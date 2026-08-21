@@ -9,7 +9,7 @@ workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
   → repository-level GitHub Actions JIT runner
-  → Hello world на self-hosted runner
+  → light GameSnapshot через `game-snapshot-builder@v0.2.0`
   → удаление runner, VM, direct public IP и security group
 ```
 
@@ -18,15 +18,17 @@ workflow_dispatch
 
 ## Устройство workflow
 
-- [`ephemeral-runner-hello.yml`](.github/workflows/ephemeral-runner-hello.yml) — ручная точка входа
-  и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
+- [`ephemeral-light-snapshot.yml`](.github/workflows/ephemeral-light-snapshot.yml) — ручная точка
+  входа и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.
 
-Workload — обычный GitHub Actions job. Сейчас в нём один именованный шаг `Hello world`. Позже на
-его месте будут видимые шаги скачивания, проверки, распаковки, декомпиляции и публикации, но весь
-workload останется одним job: JIT runner выполняет не более одного job.
+Workload вызывает versioned reusable workflow из публичного
+[`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder). Все стадии от
+`resolve` до `snapshot` отображаются отдельными GitHub Actions steps, но остаются одной job: JIT
+runner выполняет не более одного job. Snapshot живёт только на временной VM; в diagnostic artifact
+попадают небольшие JSON reports и stderr-логи стадий.
 
 ## Гарантии lifecycle
 

@@ -55,6 +55,26 @@ class IdentifierTests(unittest.TestCase):
         self.assertEqual(lifecycle.normalized_uuid(dashed), compact)
 
 
+class JobRoutingTests(unittest.TestCase):
+    def test_matches_the_unique_runner_label_independently_of_job_name(self) -> None:
+        job = {
+            "name": "Workload / Build snapshot (wot-eu, sd)",
+            "labels": ["self-hosted", "gup-manual-123456-2"],
+        }
+
+        self.assertTrue(lifecycle.job_targets_runner(job, "gup-manual-123456-2"))
+        self.assertFalse(lifecycle.job_targets_runner(job, "gup-manual-another-1"))
+
+    def test_rejects_missing_or_malformed_job_labels(self) -> None:
+        self.assertFalse(lifecycle.job_targets_runner({}, "gup-manual-123456-2"))
+        self.assertFalse(
+            lifecycle.job_targets_runner(
+                {"labels": "self-hosted,gup-manual-123456-2"},
+                "gup-manual-123456-2",
+            )
+        )
+
+
 class OwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
         self.identity = lifecycle.ResourceIdentity(

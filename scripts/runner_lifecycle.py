@@ -1205,11 +1205,17 @@ def cleanup(arguments: argparse.Namespace) -> None:
     print("Cleanup complete")
 
 
+def job_targets_runner(job: dict[str, object], runner_label: str) -> bool:
+    labels = job.get("labels")
+    return isinstance(labels, list) and runner_label in {
+        str(label) for label in labels if isinstance(label, str)
+    }
+
+
 def watch_queue(arguments: argparse.Namespace) -> None:
     token = require_environment("GITHUB_WATCH_TOKEN")
     repository = require_environment("GITHUB_REPOSITORY")
     run_id = require_environment("GITHUB_RUN_ID")
-    job_suffix = f"Workload ({arguments.instance_key})"
     deadline = time.monotonic() + arguments.timeout_seconds
     last_status = "not visible"
 
@@ -1227,7 +1233,7 @@ def watch_queue(arguments: argparse.Namespace) -> None:
                 job
                 for job in response.get("jobs", [])
                 if isinstance(job, dict)
-                and str(job.get("name", "")).endswith(job_suffix)
+                and job_targets_runner(job, arguments.runner_label)
             ]
             if matches:
                 last_status = str(matches[0].get("status", "unknown"))
@@ -1240,7 +1246,8 @@ def watch_queue(arguments: argparse.Namespace) -> None:
         time.sleep(10)
 
     print(
-        f"::error::Workload queue deadline exceeded; last status: {sanitized(last_status)}"
+        f"::error::Workload {arguments.instance_key} queue deadline exceeded; "
+        f"last status: {sanitized(last_status)}"
     )
     write_output("timed_out", "true")
 
@@ -1266,6 +1273,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     watch_parser = subparsers.add_parser("watch-queue")
     watch_parser.add_argument("--instance-key", required=True)
+    watch_parser.add_argument("--runner-label", required=True)
     watch_parser.add_argument("--timeout-seconds", type=int, default=600)
     watch_parser.set_defaults(handler=watch_queue)
     return parser

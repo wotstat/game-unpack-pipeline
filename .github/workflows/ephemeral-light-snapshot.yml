@@ -1,8 +1,35 @@
-name: Ephemeral runner hello
-run-name: Selectel hello by @${{ github.actor }} · attempt ${{ github.run_attempt }}
+name: Ephemeral light snapshot
+run-name: Light snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Game target
+        required: true
+        default: wot-eu
+        type: choice
+        options:
+          - wot-eu
+          - wot-na
+          - wot-asia
+          - wot-common-test
+          - wot-cn
+          - mt-ru
+          - mt-public-test
+      client_type:
+        description: Client type
+        required: true
+        default: sd
+        type: choice
+        options:
+          - sd
+          - hd
+      languages:
+        description: Comma-separated languages or ALL
+        required: true
+        default: EN
+        type: string
 
 permissions:
   actions: write
@@ -28,7 +55,7 @@ jobs:
       server_name: ${{ steps.provision.outputs.server_name }}
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create GitHub App token
         id: app-token
@@ -65,29 +92,15 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    runs-on:
-      - self-hosted
-      - ${{ needs.provision.outputs.runner_label }}
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Hello world
-        shell: bash
-        env:
-          PROVISIONED_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
-          PROVISIONED_RUNNER_VERSION: ${{ needs.provision.outputs.runner_version }}
-        run: |
-          set -Eeuo pipefail
-          echo 'Hello world'
-          echo "Host: $(hostname)"
-          echo "Kernel: $(uname -srmo)"
-          {
-            echo '## Workload'
-            echo
-            echo "- Result: \`Hello world\`"
-            echo "- Runner: \`${PROVISIONED_RUNNER_NAME}\`"
-            echo "- Runner version: \`${PROVISIONED_RUNNER_VERSION}\`"
-          } >>"${GITHUB_STEP_SUMMARY}"
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.2.0
+    with:
+      runner_label: ${{ needs.provision.outputs.runner_label }}
+      target: ${{ inputs.target }}
+      client_type: ${{ inputs.client_type }}
+      languages: ${{ inputs.languages }}
+      light: true
+    permissions:
+      contents: read
 
   queue-watchdog:
     name: Queue watchdog (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -97,16 +110,18 @@ jobs:
     environment: selectel
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Wait for workload assignment
         id: watch
         env:
           GITHUB_WATCH_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          RUNNER_LABEL: ${{ needs.provision.outputs.runner_label }}
         run: >-
           python3 scripts/runner_lifecycle.py watch-queue
           --instance-key "${INSTANCE_KEY}"
+          --runner-label "${RUNNER_LABEL}"
           --timeout-seconds 600
 
       - name: Create cleanup GitHub App token
@@ -167,7 +182,7 @@ jobs:
     environment: selectel
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create GitHub App token
         id: app-token
