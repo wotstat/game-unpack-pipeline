@@ -18,10 +18,8 @@ workflow_dispatch
 
 ## Устройство workflow
 
-- [`ephemeral-runner-hello.yml`](.github/workflows/ephemeral-runner-hello.yml) — единственная
-  ручная точка входа текущей итерации.
-- [`process-one.yml`](.github/workflows/process-one.yml) — reusable lifecycle одной единицы работы:
-  `provision → workload + queue watchdog → cleanup`.
+- [`ephemeral-runner-hello.yml`](.github/workflows/ephemeral-runner-hello.yml) — ручная точка входа
+  и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.

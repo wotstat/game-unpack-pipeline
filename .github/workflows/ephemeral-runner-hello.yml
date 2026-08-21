@@ -9,8 +9,204 @@ permissions:
   contents: read
 
 jobs:
-  process-one:
-    name: Process manual request
-    uses: ./.github/workflows/process-one.yml
-    with:
-      instance_key: manual-${{ github.run_id }}-${{ github.run_attempt }}
+  provision:
+    name: Provision (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: selectel
+    outputs:
+      port_id: ${{ steps.provision.outputs.port_id }}
+      public_address: ${{ steps.provision.outputs.public_address }}
+      resource_key: ${{ steps.provision.outputs.resource_key }}
+      runner_id: ${{ steps.provision.outputs.runner_id }}
+      runner_label: ${{ steps.provision.outputs.runner_label }}
+      runner_name: ${{ steps.provision.outputs.runner_name }}
+      runner_scope_label: ${{ steps.provision.outputs.runner_scope_label }}
+      runner_version: ${{ steps.provision.outputs.runner_version }}
+      security_group_id: ${{ steps.provision.outputs.security_group_id }}
+      server_id: ${{ steps.provision.outputs.server_id }}
+      server_name: ${{ steps.provision.outputs.server_name }}
+    steps:
+      - name: Check out lifecycle code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          permission-administration: write
+
+      - name: Install OpenStack CLI
+        uses: ./.github/actions/setup-openstack
+
+      - name: Create VM and wait for runner
+        id: provision
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_PUBLIC_TOKEN: ${{ github.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
+          SELECTEL_AVAILABILITY_ZONE: ${{ vars.SELECTEL_AVAILABILITY_ZONE }}
+          SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}
+          SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
+          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
+          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
+          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
+          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
+          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
+          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
+        run: >-
+          python3 scripts/runner_lifecycle.py provision
+          --instance-key "${INSTANCE_KEY}"
+
+  workload:
+    name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    needs: provision
+    runs-on:
+      - self-hosted
+      - ${{ needs.provision.outputs.runner_label }}
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Hello world
+        shell: bash
+        env:
+          PROVISIONED_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+          PROVISIONED_RUNNER_VERSION: ${{ needs.provision.outputs.runner_version }}
+        run: |
+          set -Eeuo pipefail
+          echo 'Hello world'
+          echo "Host: $(hostname)"
+          echo "Kernel: $(uname -srmo)"
+          {
+            echo '## Workload'
+            echo
+            echo "- Result: \`Hello world\`"
+            echo "- Runner: \`${PROVISIONED_RUNNER_NAME}\`"
+            echo "- Runner version: \`${PROVISIONED_RUNNER_VERSION}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  queue-watchdog:
+    name: Queue watchdog (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    needs: provision
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: selectel
+    steps:
+      - name: Check out lifecycle code
+        uses: actions/checkout@v4
+
+      - name: Wait for workload assignment
+        id: watch
+        env:
+          GITHUB_WATCH_TOKEN: ${{ github.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python3 scripts/runner_lifecycle.py watch-queue
+          --instance-key "${INSTANCE_KEY}"
+          --timeout-seconds 600
+
+      - name: Create cleanup GitHub App token
+        if: steps.watch.outputs.timed_out == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          permission-administration: write
+
+      - name: Install OpenStack CLI for timed-out cleanup
+        if: steps.watch.outputs.timed_out == 'true'
+        uses: ./.github/actions/setup-openstack
+
+      - name: Delete resources after queue timeout
+        if: steps.watch.outputs.timed_out == 'true'
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          PORT_ID: ${{ needs.provision.outputs.port_id }}
+          RUNNER_ID: ${{ needs.provision.outputs.runner_id }}
+          SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
+          SERVER_ID: ${{ needs.provision.outputs.server_id }}
+          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
+          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
+          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
+          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
+          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
+          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
+        run: >-
+          python3 scripts/runner_lifecycle.py cleanup
+          --instance-key "${INSTANCE_KEY}"
+          --runner-id "${RUNNER_ID}"
+          --server-id "${SERVER_ID}"
+          --port-id "${PORT_ID}"
+          --security-group-id "${SECURITY_GROUP_ID}"
+          --diagnostics
+
+      - name: Cancel workflow after queue timeout
+        if: always() && steps.watch.outputs.timed_out == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api --method POST
+          'repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel'
+
+  cleanup:
+    name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    if: always() && needs.provision.result != 'skipped'
+    needs:
+      - provision
+      - workload
+      - queue-watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: selectel
+    steps:
+      - name: Check out lifecycle code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          permission-administration: write
+
+      - name: Install OpenStack CLI
+        uses: ./.github/actions/setup-openstack
+
+      - name: Delete runner and Selectel resources
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          PORT_ID: ${{ needs.provision.outputs.port_id }}
+          PROVISION_RESULT: ${{ needs.provision.result }}
+          RUNNER_ID: ${{ needs.provision.outputs.runner_id }}
+          SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
+          SERVER_ID: ${{ needs.provision.outputs.server_id }}
+          WORKLOAD_RESULT: ${{ needs.workload.result }}
+          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
+          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
+          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
+          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
+          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
+          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
+        run: |
+          set -Eeuo pipefail
+          diagnostics=()
+          if [[ "${PROVISION_RESULT}" != success || "${WORKLOAD_RESULT}" != success ]]; then
+            diagnostics+=(--diagnostics)
+          fi
+          python3 scripts/runner_lifecycle.py cleanup \
+            --instance-key "${INSTANCE_KEY}" \
+            --runner-id "${RUNNER_ID}" \
+            --server-id "${SERVER_ID}" \
+            --port-id "${PORT_ID}" \
+            --security-group-id "${SECURITY_GROUP_ID}" \
+            "${diagnostics[@]}"
