@@ -1,0 +1,16 @@
+name: Ephemeral runner hello
+run-name: Selectel hello by @${{ github.actor }} · attempt ${{ github.run_attempt }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  process-one:
+    name: Process manual request
+    uses: ./.github/workflows/process-one.yml
+    with:
+      instance_key: manual-${{ github.run_id }}-${{ github.run_attempt }}

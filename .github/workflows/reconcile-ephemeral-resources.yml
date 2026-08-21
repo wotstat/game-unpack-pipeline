@@ -1,0 +1,74 @@
+name: Reconcile ephemeral runner cleanup
+run-name: Cleanup Selectel resources for run ${{ inputs.source_run_id || github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows:
+      - Ephemeral runner hello
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Run ID of Ephemeral runner hello
+        required: true
+        type: string
+      source_run_attempt:
+        description: Attempt number of that run
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    name: Reconcile source run
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: selectel
+    env:
+      SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt || github.event.workflow_run.run_attempt }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id || github.event.workflow_run.id }}
+    steps:
+      - name: Check out cleanup code from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          permission-administration: write
+
+      - name: Install OpenStack CLI
+        uses: ./.github/actions/setup-openstack
+
+      - name: Reconcile resources by deterministic ownership markers
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
+          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
+          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
+          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
+          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
+          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
+        run: |
+          set -Eeuo pipefail
+          instance_key="manual-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
+          python3 scripts/runner_lifecycle.py cleanup \
+            --instance-key "${instance_key}" \
+            --run-id "${SOURCE_RUN_ID}" \
+            --run-attempt "${SOURCE_RUN_ATTEMPT}" \
+            --diagnostics

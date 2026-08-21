@@ -1,0 +1,12 @@
+name: Setup OpenStack CLI
+description: Install the pinned OpenStack CLI used by the Selectel lifecycle jobs
+
+runs:
+  using: composite
+  steps:
+    - name: Install OpenStack CLI 10.2.1
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        pipx install --force 'python-openstackclient==10.2.1'
+        openstack --version
