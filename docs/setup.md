@@ -34,7 +34,8 @@ network volume.
 5. Другие изменяемые permissions не выдавать.
 6. Установить App в организации `wotstat`, выбрав **Only select repositories** и только
    `game-unpack-pipeline`.
-7. Скопировать числовой **App ID** приложения. `Client ID` здесь не нужен.
+7. Скопировать **Client ID** приложения. Числовой App ID для
+   `actions/create-github-app-token@v3` не нужен.
 8. Сгенерировать private key и сохранить весь PEM, включая строки `BEGIN...` и `END...`.
 
 `Administration: write` нужен для repository endpoints создания JIT-конфигурации и удаления
@@ -63,7 +64,7 @@ Self-hosted workload job не использует Environment `selectel` и н�
 
 | Variable | Значение для текущей итерации |
 | --- | --- |
-| `GH_APP_ID` | Числовой App ID созданного GitHub App |
+| `GH_APP_CLIENT_ID` | Client ID созданного GitHub App |
 | `SELECTEL_OS_AUTH_URL` | `https://cloud.api.selcloud.ru/identity/v3` |
 | `SELECTEL_OS_USERNAME` | Имя service user |
 | `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
