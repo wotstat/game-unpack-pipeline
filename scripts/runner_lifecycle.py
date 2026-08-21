@@ -607,7 +607,9 @@ def render_cloud_config(
         "RUNNER_JIT_CONFIG": runner_jit_config,
     }
     preamble = "\n".join(
-        f"readonly {name}={shlex.quote(value)}" for name, value in assignments.items()
+        f"{'readonly ' if name != 'RUNNER_JIT_CONFIG' else ''}"
+        f"{name}={shlex.quote(value)}"
+        for name, value in assignments.items()
     )
     bootstrap = f"#!/usr/bin/env bash\n{preamble}\n{template}"
     encoded = base64.b64encode(bootstrap.encode("utf-8")).decode("ascii")

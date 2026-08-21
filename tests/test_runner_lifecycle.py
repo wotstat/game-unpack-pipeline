@@ -111,9 +111,9 @@ class CloudConfigTests(unittest.TestCase):
         encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
         self.assertIsNotNone(encoded)
         bootstrap = base64.b64decode(encoded.group(1)).decode()
-        self.assertIn(
-            "readonly RUNNER_JIT_CONFIG=sensitive-jit-configuration", bootstrap
-        )
+        self.assertIn("RUNNER_JIT_CONFIG=sensitive-jit-configuration", bootstrap)
+        self.assertNotIn("readonly RUNNER_JIT_CONFIG=", bootstrap)
+        self.assertIn("unset RUNNER_JIT_CONFIG", bootstrap)
         self.assertIn("RUNNER_ALLOW_RUNASROOT=1", bootstrap)
         self.assertNotIn("set -x", bootstrap)
         self.assertIn("permissions: '0700'", cloud_config)
