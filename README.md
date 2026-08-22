@@ -9,7 +9,7 @@ workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
   → repository-level GitHub Actions JIT runner
-  → light или full GameSnapshot через `game-snapshot-builder@v0.3.6`
+  → light или full GameSnapshot через `game-snapshot-builder@v0.3.7`
   → удаление runner, VM, direct public IP и security group
 ```
 
