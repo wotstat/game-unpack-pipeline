@@ -218,6 +218,10 @@ class WorkflowContractTests(unittest.TestCase):
         )
 
         self.assertIn("workers: ${{ fromJSON(inputs.workers) }}", workflow)
+        self.assertIn(
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.8",
+            workflow,
+        )
 
 
 if __name__ == "__main__":
