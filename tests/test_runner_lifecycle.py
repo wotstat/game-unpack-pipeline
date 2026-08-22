@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import os
 import re
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -181,6 +182,33 @@ class SelectelConfigTests(unittest.TestCase):
 
         self.assertEqual(config.project_id, environment["SELECTEL_OS_PROJECT_ID"])
         self.assertEqual(config.region_name, "ru-9")
+
+
+class HttpJsonTests(unittest.TestCase):
+    def test_retries_idempotent_request_after_remote_disconnect(self) -> None:
+        response = Mock()
+        response.status = 200
+        response.read.return_value = b'{"ports":[]}'
+        response.headers.items.return_value = []
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+
+        with (
+            patch.object(
+                lifecycle.urllib.request,
+                "urlopen",
+                side_effect=[http.client.RemoteDisconnected(), response],
+            ) as urlopen,
+            patch.object(lifecycle.time, "sleep") as sleep,
+        ):
+            status, payload, _ = lifecycle.http_json(
+                "GET", "https://api.example.test/v1/public_ports"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"ports": []})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once()
 
 
 if __name__ == "__main__":

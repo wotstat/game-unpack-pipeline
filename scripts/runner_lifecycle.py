@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import re
@@ -304,23 +305,31 @@ def http_json(
         headers["Accept"] = "application/vnd.github+json"
         headers["X-GitHub-Api-Version"] = GITHUB_API_VERSION
 
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.status
-            raw = response.read()
-            response_headers = dict(response.headers.items())
-    except urllib.error.HTTPError as error:
-        status = error.code
-        raw = error.read()
-        response_headers = dict(error.headers.items()) if error.headers else {}
-        if status not in expected_statuses:
-            details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
-            raise LifecycleError(
-                f"{method} {url} returned HTTP {status}: {details}"
-            ) from error
-    except urllib.error.URLError as error:
-        raise LifecycleError(f"{method} {url} failed: {error.reason}") from error
+    retry_delays = (1, 3) if method in {"DELETE", "GET", "HEAD"} else ()
+    for attempt in range(len(retry_delays) + 1):
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = response.status
+                raw = response.read()
+                response_headers = dict(response.headers.items())
+            break
+        except urllib.error.HTTPError as error:
+            status = error.code
+            raw = error.read()
+            response_headers = dict(error.headers.items()) if error.headers else {}
+            if status not in expected_statuses:
+                details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
+                raise LifecycleError(
+                    f"{method} {url} returned HTTP {status}: {details}"
+                ) from error
+            break
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            if attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            reason = getattr(error, "reason", None) or str(error) or type(error).__name__
+            raise LifecycleError(f"{method} {url} failed: {reason}") from error
 
     if status not in expected_statuses:
         details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]

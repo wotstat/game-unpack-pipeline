@@ -9,8 +9,8 @@ GitHub Settings, не отправляя их в issues, commits или логи
 2. Пополнить баланс аккаунта.
 3. Установить для проекта верхние квоты не меньше:
    - 8 cloud servers;
-   - 8 vCPU;
-   - 16 ГБ RAM;
+   - 32 vCPU;
+   - 128 ГБ RAM;
    - 8 direct public IP addresses.
 4. Создать service user `game-unpack-pipeline-ci`.
 5. Выдать ему роль `member` только в проекте `game-unpack-pipeline`.
@@ -18,7 +18,7 @@ GitHub Settings, не отправляя их в issues, commits или логи
    нельзя будет прочитать повторно.
 7. В pool `ru-9`, segment `ru-9a` выбрать:
    - стандартный образ с точным именем `Ubuntu 24.04 LTS 64-bit`;
-   - flavor `SL1.1-2048-16` (ID `1312`: 1 vCPU, 2 ГБ RAM, 16 ГБ локального диска).
+   - flavor `SL1.4-16384-128` (ID `1315`: 4 vCPU, 16 ГБ RAM, 128 ГБ локального диска).
 
 Локальный диск принципиален для этой итерации: он удаляется вместе с VM и не оставляет отдельный
 network volume.
@@ -72,7 +72,7 @@ Self-hosted workload job не использует Environment `selectel` и н�
 | `SELECTEL_OS_REGION_NAME` | `ru-9` |
 | `SELECTEL_AVAILABILITY_ZONE` | `ru-9a` |
 | `SELECTEL_IMAGE_ID` | `Ubuntu 24.04 LTS 64-bit` (точное OpenStack-имя; UUID тоже поддерживается) |
-| `SELECTEL_FLAVOR_ID` | `1312` (`SL1.1-2048-16`) |
+| `SELECTEL_FLAVOR_ID` | `1315` (`SL1.4-16384-128`) |
 | `SELECTEL_PUBLIC_NETWORK_API_URL` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
 ID проекта может быть записан как UUID с дефисами или как 32 шестнадцатеричных символа.
