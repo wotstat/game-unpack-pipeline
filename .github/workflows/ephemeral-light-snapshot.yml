@@ -55,11 +55,11 @@ jobs:
       server_name: ${{ steps.provision.outputs.server_name }}
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Create GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -92,7 +92,7 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.1
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.2
     with:
       runner_label: ${{ needs.provision.outputs.runner_label }}
       target: ${{ inputs.target }}
@@ -110,7 +110,7 @@ jobs:
     environment: selectel
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Wait for workload assignment
         id: watch
@@ -127,7 +127,7 @@ jobs:
       - name: Create cleanup GitHub App token
         if: steps.watch.outputs.timed_out == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -182,11 +182,11 @@ jobs:
     environment: selectel
     steps:
       - name: Check out lifecycle code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Create GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}

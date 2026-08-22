@@ -39,13 +39,13 @@ jobs:
       SOURCE_RUN_ID: ${{ inputs.source_run_id || github.event.workflow_run.id }}
     steps:
       - name: Check out cleanup code from main
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: main
 
       - name: Create GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
