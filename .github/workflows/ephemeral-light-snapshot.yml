@@ -65,6 +65,11 @@ on:
         required: true
         default: 0
         type: number
+      profile_stages:
+        description: Run each stage separately for detailed timing (slower)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   actions: write
@@ -127,7 +132,7 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.9
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.10
     with:
       runner_label: ${{ needs.provision.outputs.runner_label }}
       target: ${{ inputs.target }}
@@ -138,6 +143,7 @@ jobs:
       until: ${{ inputs.until }}
       # CLI dispatch fields arrive as strings; workflow_call requires a real number.
       workers: ${{ fromJSON(inputs.workers) }}
+      profile_stages: ${{ inputs.profile_stages }}
     permissions:
       contents: read
 
