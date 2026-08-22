@@ -211,5 +211,14 @@ class HttpJsonTests(unittest.TestCase):
         sleep.assert_called_once()
 
 
+class WorkflowContractTests(unittest.TestCase):
+    def test_coerces_cli_worker_input_before_reusable_workflow_call(self) -> None:
+        workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("workers: ${{ fromJSON(inputs.workers) }}", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

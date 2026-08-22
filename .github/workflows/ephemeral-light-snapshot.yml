@@ -109,7 +109,8 @@ jobs:
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
       light: ${{ inputs.light }}
-      workers: ${{ inputs.workers }}
+      # CLI dispatch fields arrive as strings; workflow_call requires a real number.
+      workers: ${{ fromJSON(inputs.workers) }}
     permissions:
       contents: read
 
