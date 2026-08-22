@@ -4,7 +4,7 @@ run-name: Cleanup Selectel resources for run ${{ inputs.source_run_id || github.
 on:
   workflow_run:
     workflows:
-      - Ephemeral light snapshot
+      - Ephemeral snapshot
     types:
       - completed
     branches:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Run ID of Ephemeral light snapshot
+        description: Run ID of Ephemeral snapshot
         required: true
         type: string
       source_run_attempt:

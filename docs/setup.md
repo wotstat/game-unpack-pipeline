@@ -81,9 +81,10 @@ OpenStack CLI разрешает передавать образ по уника
 
 ## 5. Первый запуск
 
-1. Открыть `Actions → Ephemeral light snapshot`.
+1. Открыть `Actions → Ephemeral snapshot`.
 2. Убедиться, что выбрана branch `main`.
-3. Выбрать target, client type и languages. Для первого запуска подходят `wot-eu`, `sd`, `EN`.
+3. Выбрать target, client type, languages и режим `light`. Для первого запуска подходят
+   `wot-eu`, `sd`, `EN` и включённый `light`.
 4. Нажать **Run workflow**.
 
 Ожидаемая последовательность в одном run:
@@ -92,8 +93,8 @@ OpenStack CLI разрешает передавать образ по уника
 2. Создаёт egress-only security group и direct-public port.
 3. Создаёт repository-level JIT runner и VM.
 4. Ждёт `VM ACTIVE` и `runner online`.
-5. `Workload` устанавливает runtime и выполняет light pipeline от `resolve` до `snapshot` видимыми
-   Actions steps.
+5. `Workload` устанавливает runtime и выполняет выбранный light или full pipeline от `resolve` до
+   `snapshot` видимыми Actions steps.
 6. Финальный step публикует таблицу статистики; JSON reports и stderr-логи сохраняются как
    небольшой diagnostic artifact. Сам snapshot с VM не выгружается.
 7. `Cleanup` удаляет runner registration, VM, direct-public port и security group.
@@ -107,7 +108,7 @@ OpenStack CLI разрешает передавать образ по уника
 
 Если автоматический reconciler завершился с ошибкой:
 
-1. Скопировать numeric Run ID основного `Ephemeral light snapshot` из URL запуска.
+1. Скопировать numeric Run ID основного `Ephemeral snapshot` из URL запуска.
 2. Посмотреть attempt в интерфейсе запуска (для первого запуска это `1`).
 3. Открыть `Actions → Reconcile ephemeral runner cleanup → Run workflow`.
 4. Ввести `source_run_id` и `source_run_attempt`.

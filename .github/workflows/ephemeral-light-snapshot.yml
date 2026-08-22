@@ -1,5 +1,5 @@
-name: Ephemeral light snapshot
-run-name: Light snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
+name: Ephemeral snapshot
+run-name: ${{ inputs.light && 'Light' || 'Full' }} snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -30,6 +30,11 @@ on:
         required: true
         default: EN
         type: string
+      light:
+        description: Build a minimal integration-test snapshot
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   actions: write
@@ -98,7 +103,7 @@ jobs:
       target: ${{ inputs.target }}
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
-      light: true
+      light: ${{ inputs.light }}
     permissions:
       contents: read
 

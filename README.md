@@ -9,7 +9,7 @@ workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
   → repository-level GitHub Actions JIT runner
-  → light GameSnapshot через `game-snapshot-builder@v0.3.0`
+  → light или full GameSnapshot через `game-snapshot-builder@v0.3.3`
   → удаление runner, VM, direct public IP и security group
 ```
 
@@ -20,6 +20,7 @@ workflow_dispatch
 
 - [`ephemeral-light-snapshot.yml`](.github/workflows/ephemeral-light-snapshot.yml) — ручная точка
   входа и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
+  Input `light` выбирает минимальный интеграционный или полный snapshot.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.
