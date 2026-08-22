@@ -35,6 +35,11 @@ on:
         required: true
         default: true
         type: boolean
+      workers:
+        description: Parallel workers; 0 uses runner CPU count, capped at 32
+        required: true
+        default: 0
+        type: number
 
 permissions:
   actions: write
@@ -97,13 +102,14 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.5
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.6
     with:
       runner_label: ${{ needs.provision.outputs.runner_label }}
       target: ${{ inputs.target }}
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
       light: ${{ inputs.light }}
+      workers: ${{ inputs.workers }}
     permissions:
       contents: read
 
