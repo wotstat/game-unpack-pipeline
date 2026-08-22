@@ -9,7 +9,7 @@ workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
   → repository-level GitHub Actions JIT runner
-  → light или full GameSnapshot через `game-snapshot-builder@v0.3.8`
+  → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.9`
   → удаление runner, VM, direct public IP и security group
 ```
 
@@ -20,7 +20,9 @@ workflow_dispatch
 
 - [`ephemeral-light-snapshot.yml`](.github/workflows/ephemeral-light-snapshot.yml) — ручная точка
   входа и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
-  Input `light` выбирает минимальный интеграционный или полный snapshot.
+  Input `light` выбирает минимальный smoke-сценарий, `benchmark_percent` — детерминированную
+  неполную performance-выборку, а `until` ограничивает последнюю запускаемую стадию. Benchmark
+  нельзя довести до production snapshot.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.

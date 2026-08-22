@@ -219,7 +219,12 @@ class WorkflowContractTests(unittest.TestCase):
 
         self.assertIn("workers: ${{ fromJSON(inputs.workers) }}", workflow)
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.8",
+            "benchmark_percent: ${{ fromJSON(inputs.benchmark_percent) }}",
+            workflow,
+        )
+        self.assertIn("until: ${{ inputs.until }}", workflow)
+        self.assertIn(
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.9",
             workflow,
         )
 

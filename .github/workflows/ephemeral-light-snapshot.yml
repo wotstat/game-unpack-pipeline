@@ -1,5 +1,5 @@
 name: Ephemeral snapshot
-run-name: ${{ inputs.light && 'Light' || 'Full' }} snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
+run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -35,6 +35,31 @@ on:
         required: true
         default: true
         type: boolean
+      benchmark_percent:
+        description: Deterministic incomplete benchmark sample; 0 disables it
+        required: true
+        default: 0
+        type: number
+      until:
+        description: Last pipeline stage to execute
+        required: true
+        default: snapshot
+        type: choice
+        options:
+          - resolve
+          - plan-acquisition
+          - download
+          - verify
+          - assemble-client
+          - index-vfs
+          - materialize-vfs
+          - plan-readable
+          - transform-readable
+          - decompile-actionscript
+          - assemble-readable
+          - generate-engine-stubs
+          - finalize-readable
+          - snapshot
       workers:
         description: Parallel workers; 0 uses runner CPU count, capped at 32
         required: true
@@ -102,13 +127,15 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.8
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.9
     with:
       runner_label: ${{ needs.provision.outputs.runner_label }}
       target: ${{ inputs.target }}
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
       light: ${{ inputs.light }}
+      benchmark_percent: ${{ fromJSON(inputs.benchmark_percent) }}
+      until: ${{ inputs.until }}
       # CLI dispatch fields arrive as strings; workflow_call requires a real number.
       workers: ${{ fromJSON(inputs.workers) }}
     permissions:
