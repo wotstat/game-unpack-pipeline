@@ -223,9 +223,9 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("until: ${{ inputs.until }}", workflow)
-        self.assertIn("profile_stages: ${{ inputs.profile_stages }}", workflow)
+        self.assertIn("profile_stages: true", workflow)
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.10",
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.11",
             workflow,
         )
 

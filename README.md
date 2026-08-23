@@ -9,7 +9,7 @@ workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
   → repository-level GitHub Actions JIT runner
-  → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.10`
+  → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.11`
   → удаление runner, VM, direct public IP и security group
 ```
 
@@ -22,19 +22,18 @@ workflow_dispatch
   входа и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
   Input `light` выбирает минимальный smoke-сценарий, `benchmark_percent` — детерминированную
   неполную performance-выборку, а `until` ограничивает последнюю запускаемую стадию. Benchmark
-  нельзя довести до production snapshot. По умолчанию стадии выполняются одним процессом без
-  повторного чтения промежуточных отчётов; `profile_stages` возвращает более медленный режим с
-  отдельным процессом и подробными метриками для каждой стадии.
+  нельзя довести до production snapshot. Каждая стадия выполняется отдельным видимым GitHub step;
+  переход проверяет SHA-256 непосредственного checkpoint, но не обходит заново весь завершённый
+  prefix. Для каждого шага сохраняются отдельные логи и метрики ресурсов.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.
 
 Workload вызывает versioned reusable workflow из публичного
 [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder). Все стадии от
-`resolve` до `snapshot` остаются одной job: JIT runner выполняет не более одного job. В обычном
-режиме они собраны в один GitHub Actions step, а при `profile_stages=true` отображаются отдельными
-steps. Snapshot живёт только на временной VM; в diagnostic artifact попадают небольшие JSON
-reports и stderr-логи стадий.
+`resolve` до `snapshot` остаются одной job: JIT runner выполняет не более одного job, а стадии
+отображаются отдельными GitHub Actions steps. Snapshot живёт только на временной VM; в diagnostic
+artifact попадают небольшие JSON reports, stderr-логи стадий и их performance telemetry.
 
 ## Гарантии lifecycle
 
