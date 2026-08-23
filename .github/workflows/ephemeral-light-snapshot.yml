@@ -141,7 +141,7 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.15
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.16
     with:
       runner_label: ${{ needs.provision.outputs.builder_runner_label }}
       target: ${{ inputs.target }}

@@ -336,7 +336,7 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.15",
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.16",
             workflow,
         )
 
