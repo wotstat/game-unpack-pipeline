@@ -157,6 +157,10 @@ class CloudConfigTests(unittest.TestCase):
         self.assertIn("User=snapshot-builder", bootstrap)
         self.assertIn("User=wot-src-publisher", bootstrap)
         self.assertIn(
+            "apt-get install --yes --no-install-recommends git",
+            bootstrap,
+        )
+        self.assertIn(
             "install -d -o snapshot-builder -g snapshot-builder -m 0700 \\\n"
             "  /run/actions-runner/builder",
             bootstrap,

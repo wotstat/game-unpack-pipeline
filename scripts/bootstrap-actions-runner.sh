@@ -37,6 +37,8 @@ rm -f "${RUNNER_ARCHIVE}"
 echo 'gup-bootstrap: installing runner dependencies'
 export DEBIAN_FRONTEND=noninteractive
 "${RUNNER_TEMPLATE_DIR}/bin/installdependencies.sh"
+apt-get update
+apt-get install --yes --no-install-recommends git
 
 useradd --create-home --home-dir /var/lib/snapshot-builder --shell /bin/bash snapshot-builder
 useradd --create-home --home-dir /var/lib/wot-src-publisher --shell /bin/bash wot-src-publisher
