@@ -77,9 +77,10 @@ Self-hosted workload job не использует Environment `selectel` и н�
 ID проекта может быть записан как UUID с дефисами или как 32 шестнадцатеричных символа.
 OpenStack CLI разрешает передавать образ по уникальному имени. Preflight разрешает его в текущем
 регионе и останавливает workflow до создания ресурсов, если имя отсутствует или неоднозначно.
-По умолчанию input `runner_profile=highfreq-16c-32g` заменяет эту переменную на стабильное имя
-`HFL1.16-32768-240`; настроенный через `SELECTEL_FLAVOR_ID` Standard остаётся контрольным
-профилем `configured-standard`. Оба варианта проходят обычный preflight до создания ресурсов.
+По умолчанию input `runner_profile=configured-standard` использует настроенный через
+`SELECTEL_FLAVOR_ID` Standard. Это профиль для московского `ru-7a`. Вариант
+`highfreq-16c-32g` заменяет переменную на стабильное имя `HFL1.16-32768-240` и доступен только
+в `ru-9a`.
 Регион, availability zone и endpoint публичной сети выбираются единым workflow input
 `selectel_location`: `ru-7a` используется по умолчанию, `ru-9a` оставлен как fallback.
 

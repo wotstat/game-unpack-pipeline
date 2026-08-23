@@ -28,9 +28,10 @@ workflow_dispatch
   нельзя довести до production snapshot. Каждая стадия выполняется отдельным видимым GitHub step;
   переход проверяет SHA-256 непосредственного checkpoint, но не обходит заново весь завершённый
   prefix. Для каждого шага сохраняются отдельные логи и метрики ресурсов. `runner_profile`
-  по умолчанию выбирает фиксированный HighFreq 16 vCPU / 32 ГБ, а Standard оставлен как
-  контрольный профиль. `selectel_location` атомарно выбирает region, availability zone и endpoint
-  публичной сети; по умолчанию используется московский `ru-7a`, а `ru-9a` оставлен fallback.
+  по умолчанию выбирает Standard 16 vCPU / 32 ГБ для московского `ru-7a`; фиксированный
+  HighFreq 16 vCPU / 32 ГБ доступен в `ru-9a`. `selectel_location` атомарно выбирает region,
+  availability zone и endpoint публичной сети; по умолчанию используется `ru-7a`, а `ru-9a`
+  оставлен fallback.
   Произвольные flavor и location из dispatch передать нельзя.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно

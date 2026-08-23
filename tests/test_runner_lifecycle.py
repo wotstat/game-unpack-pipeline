@@ -329,7 +329,7 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("until: ${{ inputs.until }}", workflow)
         self.assertIn("profile_stages: true", workflow)
-        self.assertIn("default: highfreq-16c-32g", workflow)
+        self.assertIn("default: configured-standard", workflow)
         self.assertIn("default: ru-7a", workflow)
         self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
         self.assertIn("inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9'", workflow)

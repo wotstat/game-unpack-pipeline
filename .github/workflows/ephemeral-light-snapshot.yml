@@ -66,9 +66,9 @@ on:
         default: 0
         type: number
       runner_profile:
-        description: Selectel runner CPU profile
+        description: Selectel runner CPU profile (HighFreq is available only in ru-9a)
         required: true
-        default: highfreq-16c-32g
+        default: configured-standard
         type: choice
         options:
           - configured-standard
