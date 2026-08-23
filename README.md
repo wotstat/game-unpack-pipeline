@@ -29,7 +29,9 @@ workflow_dispatch
   переход проверяет SHA-256 непосредственного checkpoint, но не обходит заново весь завершённый
   prefix. Для каждого шага сохраняются отдельные логи и метрики ресурсов. `runner_profile`
   по умолчанию выбирает фиксированный HighFreq 16 vCPU / 32 ГБ, а Standard оставлен как
-  контрольный профиль. Произвольные flavor из dispatch передать нельзя.
+  контрольный профиль. `selectel_location` атомарно выбирает region, availability zone и endpoint
+  публичной сети; по умолчанию используется московский `ru-7a`, а `ru-9a` оставлен fallback.
+  Произвольные flavor и location из dispatch передать нельзя.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.
@@ -58,7 +60,7 @@ telemetry.
 - Queue watchdog удаляет VM и отменяет workflow, если builder workload не был назначен за 10
   минут.
 - Основной cleanup работает с `always()`. Второй `workflow_run` cleanup повторяет удаление по
-  точным ownership-маркерам.
+  точным ownership-маркерам во всех поддерживаемых регионах.
 - Cleanup проверяет имя, description и project перед удалением ресурсов. Отсутствующий ресурс
   считается уже очищенным.
 - При ошибке публикуется только очищенный хвост serial console. Необработанные VM-логи не

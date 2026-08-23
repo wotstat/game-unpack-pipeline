@@ -1,5 +1,5 @@
 name: Ephemeral snapshot
-run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.runner_profile }} · @${{ github.actor }}
+run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.runner_profile }} · ${{ inputs.selectel_location }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -73,9 +73,22 @@ on:
         options:
           - configured-standard
           - highfreq-16c-32g
+      selectel_location:
+        description: Selectel region and availability zone
+        required: true
+        default: ru-7a
+        type: choice
+        options:
+          - ru-7a
+          - ru-9a
 permissions:
   actions: write
   contents: read
+
+env:
+  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}
+  SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9' }}
+  SELECTEL_PUBLIC_NETWORK_API_URL: ${{ inputs.selectel_location == 'ru-7a' && 'https://ru-7.cloud.api.selcloud.ru/public-network' || 'https://ru-9.cloud.api.selcloud.ru/public-network' }}
 
 jobs:
   provision:
@@ -124,16 +137,13 @@ jobs:
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
           WOT_SRC_REPOSITORY: wotstat/wot-src
-          SELECTEL_AVAILABILITY_ZONE: ${{ vars.SELECTEL_AVAILABILITY_ZONE }}
           SELECTEL_FLAVOR_ID: ${{ inputs.runner_profile == 'highfreq-16c-32g' && 'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
           SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
           SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
-          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
         run: >-
           python3 scripts/runner_lifecycle.py provision
           --instance-key "${INSTANCE_KEY}"
@@ -207,10 +217,8 @@ jobs:
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
           SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
           SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
-          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
         run: >-
           python3 scripts/runner_lifecycle.py cleanup
           --instance-key "${INSTANCE_KEY}"
@@ -331,10 +339,8 @@ jobs:
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
           SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
           SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
-          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
         run: |
           set -Eeuo pipefail
           diagnostics=()

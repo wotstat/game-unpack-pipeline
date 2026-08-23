@@ -71,11 +71,8 @@ Self-hosted workload job не использует Environment `selectel` и н�
 | `SELECTEL_OS_USERNAME` | Имя service user |
 | `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
 | `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
-| `SELECTEL_OS_REGION_NAME` | `ru-9` |
-| `SELECTEL_AVAILABILITY_ZONE` | `ru-9a` |
 | `SELECTEL_IMAGE_ID` | `Ubuntu 24.04 LTS 64-bit` (точное OpenStack-имя; UUID тоже поддерживается) |
 | `SELECTEL_FLAVOR_ID` | `SL1.16-32768-256` (имя стабильно между пулами, numeric ID — нет) |
-| `SELECTEL_PUBLIC_NETWORK_API_URL` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
 ID проекта может быть записан как UUID с дефисами или как 32 шестнадцатеричных символа.
 OpenStack CLI разрешает передавать образ по уникальному имени. Preflight разрешает его в текущем
@@ -83,13 +80,15 @@ OpenStack CLI разрешает передавать образ по уника
 По умолчанию input `runner_profile=highfreq-16c-32g` заменяет эту переменную на стабильное имя
 `HFL1.16-32768-240`; настроенный через `SELECTEL_FLAVOR_ID` Standard остаётся контрольным
 профилем `configured-standard`. Оба варианта проходят обычный preflight до создания ресурсов.
+Регион, availability zone и endpoint публичной сети выбираются единым workflow input
+`selectel_location`: `ru-7a` используется по умолчанию, `ru-9a` оставлен как fallback.
 
 ## 5. Первый запуск
 
 1. Открыть `Actions → Ephemeral snapshot`.
 2. Убедиться, что выбрана branch `main`.
-3. Выбрать target, client type, languages и режим `light`. Первый publish-тест использует
-   `wot-eu`, `sd`, `ALL` и включённый `light`.
+3. Выбрать target, client type, languages, `selectel_location` и режим `light`. Первый publish-тест
+   использует `wot-eu`, `sd`, `ALL`, `ru-7a` и включённый `light`.
 4. Нажать **Run workflow**.
 
 Ожидаемая последовательность в одном run:

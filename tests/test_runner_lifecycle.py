@@ -330,6 +330,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("until: ${{ inputs.until }}", workflow)
         self.assertIn("profile_stages: true", workflow)
         self.assertIn("default: highfreq-16c-32g", workflow)
+        self.assertIn("default: ru-7a", workflow)
+        self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
+        self.assertIn("inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9'", workflow)
         self.assertIn(
             "inputs.runner_profile == 'highfreq-16c-32g' && "
             "'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID",
@@ -361,6 +364,7 @@ class WorkflowContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("game-unpack-pipeline,wot-src", reconciler)
         self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", reconciler)
+        self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
 
 
 if __name__ == "__main__":

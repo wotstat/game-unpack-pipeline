@@ -63,15 +63,21 @@ jobs:
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_REGION_NAME: ${{ vars.SELECTEL_OS_REGION_NAME }}
           SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
           SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
-          SELECTEL_PUBLIC_NETWORK_API_URL: ${{ vars.SELECTEL_PUBLIC_NETWORK_API_URL }}
         run: |
           set -Eeuo pipefail
           instance_key="manual-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
-          python3 scripts/runner_lifecycle.py cleanup \
-            --instance-key "${instance_key}" \
-            --run-id "${SOURCE_RUN_ID}" \
-            --run-attempt "${SOURCE_RUN_ATTEMPT}" \
-            --diagnostics
+          cleanup_failed=0
+          for selectel_region in ru-7 ru-9; do
+            export SELECTEL_OS_REGION_NAME="${selectel_region}"
+            export SELECTEL_PUBLIC_NETWORK_API_URL="https://${selectel_region}.cloud.api.selcloud.ru/public-network"
+            if ! python3 scripts/runner_lifecycle.py cleanup \
+              --instance-key "${instance_key}" \
+              --run-id "${SOURCE_RUN_ID}" \
+              --run-attempt "${SOURCE_RUN_ATTEMPT}" \
+              --diagnostics; then
+              cleanup_failed=1
+            fi
+          done
+          exit "${cleanup_failed}"
