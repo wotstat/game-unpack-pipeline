@@ -39,9 +39,10 @@ Builder workload вызывает versioned reusable workflow из публич�
 `resolve` до `snapshot` остаются одной job: JIT runner выполняет не более одного job, а стадии
 отображаются отдельными GitHub Actions steps. После seal управляющая GitHub-hosted job вызывает
 `publish-snapshot.yml` из ветки `main` репозитория `wot-src` и ждёт конкретный возвращённый Run ID.
-В тестовом режиме данные попадают в `test/light-<target>`. Snapshot не загружается через Actions:
-оба workload читают один локальный путь на VM. В diagnostic artifact попадают только небольшие
-JSON reports, stderr-логи стадий и performance telemetry.
+В light-режиме данные попадают в `test/light-<target>`, а полный snapshot — в production-ветку
+`<target>`. Snapshot не загружается через Actions: оба workload читают один локальный путь на VM.
+В diagnostic artifact попадают только небольшие JSON reports, stderr-логи стадий и performance
+telemetry.
 
 ## Гарантии lifecycle
 

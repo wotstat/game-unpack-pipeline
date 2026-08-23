@@ -354,6 +354,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertIn("dispatch-wot-src", workflow)
         self.assertIn("test/light-${{ inputs.target }}", workflow)
+        self.assertIn("FULL_PUBLICATION_BRANCH: ${{ inputs.target }}", workflow)
 
         reconciler = (
             ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"

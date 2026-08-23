@@ -258,7 +258,7 @@ jobs:
       - name: Dispatch and wait for exact wot-src run
         id: dispatch
         env:
-          FULL_PUBLICATION_BRANCH: test/full-${{ inputs.target }}
+          FULL_PUBLICATION_BRANCH: ${{ inputs.target }}
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           LIGHT_PUBLICATION_BRANCH: test/light-${{ inputs.target }}
           SNAPSHOT_DESCRIPTOR_SHA256: ${{ needs.workload.outputs.descriptor_sha256 }}
