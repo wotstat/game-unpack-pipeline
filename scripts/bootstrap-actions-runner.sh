@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # This file is embedded into cloud-init by runner_lifecycle.py. The provisioner
-# prepends the required values as shell-safe, readonly variables.
+# prepends the required values as shell-safe variables. Both JIT configurations
+# are consumed once and never passed through service-unit arguments.
 
 set -Eeuo pipefail
 umask 077
@@ -9,14 +10,15 @@ umask 077
 : "${RUNNER_DOWNLOAD_URL:?RUNNER_DOWNLOAD_URL is required}"
 : "${RUNNER_SHA256:?RUNNER_SHA256 is required}"
 : "${RUNNER_VERSION:?RUNNER_VERSION is required}"
-: "${RUNNER_JIT_CONFIG:?RUNNER_JIT_CONFIG is required}"
+: "${BUILDER_RUNNER_JIT_CONFIG:?BUILDER_RUNNER_JIT_CONFIG is required}"
+: "${WOT_SRC_RUNNER_JIT_CONFIG:?WOT_SRC_RUNNER_JIT_CONFIG is required}"
 
-readonly RUNNER_DIR=/opt/actions-runner
+readonly RUNNER_TEMPLATE_DIR=/opt/actions-runner-template
+readonly RUNNERS_ROOT=/opt/actions-runners
 readonly RUNNER_ARCHIVE=/tmp/actions-runner.tar.gz
-readonly JIT_CONFIG_FILE=/run/actions-runner-jit-config
 
 echo "gup-bootstrap: downloading GitHub Actions Runner ${RUNNER_VERSION}"
-install -d -m 0755 "${RUNNER_DIR}"
+install -d -m 0755 "${RUNNER_TEMPLATE_DIR}" "${RUNNERS_ROOT}"
 curl \
   --fail \
   --location \
@@ -29,44 +31,85 @@ curl \
   "${RUNNER_DOWNLOAD_URL}"
 
 printf '%s  %s\n' "${RUNNER_SHA256}" "${RUNNER_ARCHIVE}" | sha256sum --check --strict
-tar --extract --gzip --file "${RUNNER_ARCHIVE}" --directory "${RUNNER_DIR}"
+tar --extract --gzip --file "${RUNNER_ARCHIVE}" --directory "${RUNNER_TEMPLATE_DIR}"
 rm -f "${RUNNER_ARCHIVE}"
 
 echo 'gup-bootstrap: installing runner dependencies'
 export DEBIAN_FRONTEND=noninteractive
-export RUNNER_ALLOW_RUNASROOT=1
-"${RUNNER_DIR}/bin/installdependencies.sh"
+"${RUNNER_TEMPLATE_DIR}/bin/installdependencies.sh"
 
-printf '%s' "${RUNNER_JIT_CONFIG}" >"${JIT_CONFIG_FILE}"
-chmod 0600 "${JIT_CONFIG_FILE}"
-unset RUNNER_JIT_CONFIG
+useradd --create-home --home-dir /var/lib/snapshot-builder --shell /bin/bash snapshot-builder
+useradd --create-home --home-dir /var/lib/wot-src-publisher --shell /bin/bash wot-src-publisher
+chmod 0700 /var/lib/snapshot-builder /var/lib/wot-src-publisher
+install -d -o snapshot-builder -g snapshot-builder -m 0711 /var/lib/game-snapshot-builder
+
+install -m 0440 /dev/null /etc/sudoers.d/snapshot-builder
+printf '%s\n' 'snapshot-builder ALL=(ALL) NOPASSWD: ALL' \
+  >/etc/sudoers.d/snapshot-builder
+
+cp -a "${RUNNER_TEMPLATE_DIR}" "${RUNNERS_ROOT}/builder"
+cp -a "${RUNNER_TEMPLATE_DIR}" "${RUNNERS_ROOT}/wot-src"
+chown -R snapshot-builder:snapshot-builder "${RUNNERS_ROOT}/builder"
+chown -R wot-src-publisher:wot-src-publisher "${RUNNERS_ROOT}/wot-src"
+rm -rf "${RUNNER_TEMPLATE_DIR}"
+
+install -o snapshot-builder -g snapshot-builder -m 0600 /dev/null \
+  /run/actions-runner-builder-jit-config
+install -o wot-src-publisher -g wot-src-publisher -m 0600 /dev/null \
+  /run/actions-runner-wot-src-jit-config
+printf '%s' "${BUILDER_RUNNER_JIT_CONFIG}" >/run/actions-runner-builder-jit-config
+printf '%s' "${WOT_SRC_RUNNER_JIT_CONFIG}" >/run/actions-runner-wot-src-jit-config
+unset BUILDER_RUNNER_JIT_CONFIG WOT_SRC_RUNNER_JIT_CONFIG
 
 cat >/usr/local/sbin/run-actions-runner <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly runner_dir=/opt/actions-runner
-readonly jit_config_file=/run/actions-runner-jit-config
+readonly role="${1:?runner role is required}"
+readonly runner_dir="/opt/actions-runners/${role}"
+readonly jit_config_file="/run/actions-runner-${role}-jit-config"
 
 jit_config=$(<"${jit_config_file}")
 rm -f "${jit_config_file}"
-
-export RUNNER_ALLOW_RUNASROOT=1
 cd "${runner_dir}"
 exec ./run.sh --jitconfig "${jit_config}"
 EOF
-chmod 0700 /usr/local/sbin/run-actions-runner
+chmod 0755 /usr/local/sbin/run-actions-runner
 
-cat >/etc/systemd/system/github-actions-runner.service <<'EOF'
+cat >/etc/systemd/system/github-actions-runner-builder.service <<'EOF'
 [Unit]
-Description=Ephemeral GitHub Actions JIT runner
+Description=Ephemeral GitHub Actions builder JIT runner
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/actions-runner
-ExecStart=/usr/local/sbin/run-actions-runner
+User=snapshot-builder
+Group=snapshot-builder
+Environment=HOME=/var/lib/snapshot-builder
+WorkingDirectory=/opt/actions-runners/builder
+ExecStart=/usr/local/sbin/run-actions-runner builder
+Restart=no
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/github-actions-runner-wot-src.service <<'EOF'
+[Unit]
+Description=Ephemeral GitHub Actions wot-src JIT runner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=wot-src-publisher
+Group=wot-src-publisher
+Environment=HOME=/var/lib/wot-src-publisher
+WorkingDirectory=/opt/actions-runners/wot-src
+ExecStart=/usr/local/sbin/run-actions-runner wot-src
 Restart=no
 StandardOutput=journal+console
 StandardError=journal+console
@@ -76,5 +119,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now github-actions-runner.service
-echo 'gup-bootstrap: runner service started'
+systemctl enable --now \
+  github-actions-runner-builder.service \
+  github-actions-runner-wot-src.service
+rm -f /usr/local/sbin/bootstrap-actions-runner
+echo 'gup-bootstrap: builder and wot-src runner services started'

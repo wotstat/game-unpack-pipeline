@@ -26,13 +26,21 @@ class ResourceIdentityTests(unittest.TestCase):
 
         self.assertEqual(identity.server_name, "gup-manual-123456-2")
         self.assertEqual(identity.security_group_name, "gup-manual-123456-2-sg")
-        self.assertEqual(identity.runner_label, "gup-manual-123456-2")
         self.assertEqual(identity.scope_label, "gup-run-123456-2")
         self.assertEqual(
             identity.descriptor,
             "game-unpack-pipeline;repository=wotstat/game-unpack-pipeline;"
             "run_id=123456;run_attempt=2;instance_key=manual-123456-2",
         )
+
+        builder = identity.runner("builder", "wotstat/game-unpack-pipeline")
+        source = identity.runner("wot-src", "wotstat/wot-src")
+        self.assertEqual(builder.name, "gup-manual-123456-2-builder")
+        self.assertEqual(builder.label, "gup-manual-123456-2-builder")
+        self.assertEqual(builder.repository, "wotstat/game-unpack-pipeline")
+        self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
+        self.assertEqual(source.repository, "wotstat/wot-src")
+        self.assertEqual(builder.scope_label, source.scope_label)
 
     def test_rejects_unsafe_instance_keys(self) -> None:
         rejected = ["", "UPPER", "-leading", "trailing-", "has space", "a" * 49]
@@ -113,9 +121,10 @@ class OwnershipTests(unittest.TestCase):
 
 
 class CloudConfigTests(unittest.TestCase):
-    def test_jit_config_is_encoded_and_bootstrap_runs_as_root(self) -> None:
+    def test_jit_configs_are_encoded_and_runners_use_isolated_users(self) -> None:
         template = (ROOT / "scripts" / "bootstrap-actions-runner.sh").read_text()
-        jit_config = "sensitive-jit-configuration"
+        builder_jit_config = "sensitive-builder-jit-configuration"
+        source_jit_config = "sensitive-source-jit-configuration"
         cloud_config = lifecycle.render_cloud_config(
             template,
             runner_download_url=(
@@ -124,18 +133,32 @@ class CloudConfigTests(unittest.TestCase):
             ),
             runner_sha256="a" * 64,
             runner_version="2.999.0",
-            runner_jit_config=jit_config,
+            runner_jit_configs={
+                "builder": builder_jit_config,
+                "wot-src": source_jit_config,
+            },
         )
 
         self.assertTrue(cloud_config.startswith("#cloud-config\n"))
-        self.assertNotIn(jit_config, cloud_config)
+        self.assertNotIn(builder_jit_config, cloud_config)
+        self.assertNotIn(source_jit_config, cloud_config)
         encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
         self.assertIsNotNone(encoded)
         bootstrap = base64.b64decode(encoded.group(1)).decode()
-        self.assertIn("RUNNER_JIT_CONFIG=sensitive-jit-configuration", bootstrap)
-        self.assertNotIn("readonly RUNNER_JIT_CONFIG=", bootstrap)
-        self.assertIn("unset RUNNER_JIT_CONFIG", bootstrap)
-        self.assertIn("RUNNER_ALLOW_RUNASROOT=1", bootstrap)
+        self.assertIn(
+            "BUILDER_RUNNER_JIT_CONFIG=sensitive-builder-jit-configuration",
+            bootstrap,
+        )
+        self.assertIn(
+            "WOT_SRC_RUNNER_JIT_CONFIG=sensitive-source-jit-configuration",
+            bootstrap,
+        )
+        self.assertIn("unset BUILDER_RUNNER_JIT_CONFIG WOT_SRC_RUNNER_JIT_CONFIG", bootstrap)
+        self.assertIn("User=snapshot-builder", bootstrap)
+        self.assertIn("User=wot-src-publisher", bootstrap)
+        self.assertIn("snapshot-builder ALL=(ALL) NOPASSWD: ALL", bootstrap)
+        self.assertNotIn("wot-src-publisher ALL=", bootstrap)
+        self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
         self.assertNotIn("set -x", bootstrap)
         self.assertIn("permissions: '0700'", cloud_config)
 
@@ -211,6 +234,69 @@ class HttpJsonTests(unittest.TestCase):
         sleep.assert_called_once()
 
 
+class WorkflowDispatchTests(unittest.TestCase):
+    def test_dispatches_main_and_waits_for_the_exact_returned_run_id(self) -> None:
+        arguments = Mock(
+            workflow="publish-snapshot.yml",
+            ref="main",
+            runner_label="gup-manual-123-1-wot-src",
+            snapshot_path="/var/lib/game-snapshot-builder/run/snapshots/sha256:abc",
+            snapshot_id="sha256:" + "a" * 64,
+            descriptor_sha256="b" * 64,
+            target="wot-eu",
+            branch="test/light-wot-eu",
+            profile="light",
+            timeout_seconds=3600,
+        )
+        responses = [
+            (
+                200,
+                {
+                    "workflow_run_id": 987654,
+                    "html_url": "https://github.com/wotstat/wot-src/actions/runs/987654",
+                },
+                {},
+            ),
+            (
+                200,
+                {
+                    "id": 987654,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": "https://github.com/wotstat/wot-src/actions/runs/987654",
+                },
+                {},
+            ),
+        ]
+        environment = {
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_APP_TOKEN": "test-token",
+            "WOT_SRC_REPOSITORY": "wotstat/wot-src",
+        }
+
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(lifecycle, "http_json", side_effect=responses) as request,
+        ):
+            lifecycle.dispatch_wot_src(arguments)
+
+        dispatch_call = request.call_args_list[0]
+        self.assertEqual(dispatch_call.args[0], "POST")
+        self.assertTrue(
+            dispatch_call.args[1].endswith(
+                "/repos/wotstat/wot-src/actions/workflows/"
+                "publish-snapshot.yml/dispatches"
+            )
+        )
+        self.assertEqual(dispatch_call.kwargs["body"]["ref"], "main")
+        self.assertEqual(
+            dispatch_call.kwargs["body"]["inputs"]["runner_label"],
+            arguments.runner_label,
+        )
+        wait_call = request.call_args_list[1]
+        self.assertTrue(wait_call.args[1].endswith("/actions/runs/987654"))
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_coerces_cli_worker_input_before_reusable_workflow_call(self) -> None:
         workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
@@ -231,9 +317,30 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.14",
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.15",
             workflow,
         )
+
+    def test_provisions_and_cleans_builder_and_wot_src_runners(self) -> None:
+        workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("builder_runner_label", workflow)
+        self.assertIn("wot_src_runner_label", workflow)
+        self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", workflow)
+        self.assertIn("permission-actions: write", workflow)
+        self.assertIn("game-unpack-pipeline,wot-src", workflow)
+        self.assertIn("--builder-runner-id", workflow)
+        self.assertIn("--wot-src-runner-id", workflow)
+        self.assertIn("dispatch-wot-src", workflow)
+        self.assertIn("test/light-${{ inputs.target }}", workflow)
+
+        reconciler = (
+            ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("game-unpack-pipeline,wot-src", reconciler)
+        self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", reconciler)
 
 
 if __name__ == "__main__":

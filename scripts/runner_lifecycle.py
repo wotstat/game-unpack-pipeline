@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision and clean one Selectel-hosted GitHub Actions JIT runner.
+"""Provision and clean one Selectel VM with isolated GitHub Actions JIT runners.
 
 The script deliberately keeps all cloud mutations behind explicit subcommands.
 Importing it and running its unit tests never contacts Selectel or GitHub.
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-GITHUB_API_VERSION = "2022-11-28"
+GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 UUID_RE = re.compile(
@@ -37,6 +37,26 @@ UUID_RE = re.compile(
 
 class LifecycleError(RuntimeError):
     """An expected, user-facing lifecycle failure."""
+
+
+def validate_repository(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        raise LifecycleError("repository must have owner/repository form")
+    return value
+
+
+@dataclass(frozen=True)
+class RunnerIdentity:
+    repository: str
+    role: str
+    name: str
+    label: str
+    scope_label: str
+
+    def __post_init__(self) -> None:
+        validate_repository(self.repository)
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?", self.role):
+            raise LifecycleError("runner role is invalid")
 
 
 @dataclass(frozen=True)
@@ -52,8 +72,7 @@ class ResourceIdentity:
             raise LifecycleError("GITHUB_RUN_ID must be a positive integer")
         if not re.fullmatch(r"[1-9][0-9]*", self.run_attempt):
             raise LifecycleError("GITHUB_RUN_ATTEMPT must be a positive integer")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository):
-            raise LifecycleError("GITHUB_REPOSITORY must have owner/repository form")
+        validate_repository(self.repository)
 
     @property
     def base_name(self) -> str:
@@ -68,14 +87,6 @@ class ResourceIdentity:
         return f"{self.base_name}-sg"
 
     @property
-    def runner_name(self) -> str:
-        return self.base_name
-
-    @property
-    def runner_label(self) -> str:
-        return self.base_name
-
-    @property
     def scope_label(self) -> str:
         return f"gup-run-{self.run_id}-{self.run_attempt}"
 
@@ -84,6 +95,16 @@ class ResourceIdentity:
         return (
             f"{PIPELINE_MARKER};repository={self.repository};run_id={self.run_id};"
             f"run_attempt={self.run_attempt};instance_key={self.instance_key}"
+        )
+
+    def runner(self, role: str, repository: str) -> RunnerIdentity:
+        name = f"{self.base_name}-{role}"
+        return RunnerIdentity(
+            repository=repository,
+            role=role,
+            name=name,
+            label=name,
+            scope_label=self.scope_label,
         )
 
 
@@ -567,22 +588,21 @@ def resolve_runner_package(app_token: str, public_token: str) -> tuple[str, str,
     return download_url, digest_match.group(1).lower(), version
 
 
-def create_jit_runner(identity: ResourceIdentity, app_token: str) -> tuple[str, str]:
-    repository = require_environment("GITHUB_REPOSITORY")
+def create_jit_runner(identity: RunnerIdentity, app_token: str) -> tuple[str, str]:
     _, response, _ = http_json(
         "POST",
-        github_url(f"repos/{repository}/actions/runners/generate-jitconfig"),
+        github_url(f"repos/{identity.repository}/actions/runners/generate-jitconfig"),
         token=app_token,
         github_api=True,
         body={
-            "name": identity.runner_name,
+            "name": identity.name,
             "runner_group_id": 1,
             "labels": [
                 "self-hosted",
                 "linux",
                 "x64",
                 identity.scope_label,
-                identity.runner_label,
+                identity.label,
             ],
             "work_folder": "_work",
         },
@@ -607,16 +627,20 @@ def render_cloud_config(
     runner_download_url: str,
     runner_sha256: str,
     runner_version: str,
-    runner_jit_config: str,
+    runner_jit_configs: Mapping[str, str],
 ) -> str:
+    expected_roles = {"builder", "wot-src"}
+    if set(runner_jit_configs) != expected_roles:
+        raise LifecycleError("cloud config requires builder and wot-src JIT configurations")
     assignments = {
         "RUNNER_DOWNLOAD_URL": runner_download_url,
         "RUNNER_SHA256": runner_sha256,
         "RUNNER_VERSION": runner_version,
-        "RUNNER_JIT_CONFIG": runner_jit_config,
+        "BUILDER_RUNNER_JIT_CONFIG": runner_jit_configs["builder"],
+        "WOT_SRC_RUNNER_JIT_CONFIG": runner_jit_configs["wot-src"],
     }
     preamble = "\n".join(
-        f"{'readonly ' if name != 'RUNNER_JIT_CONFIG' else ''}"
+        f"{'readonly ' if not name.endswith('_JIT_CONFIG') else ''}"
         f"{name}={shlex.quote(value)}"
         for name, value in assignments.items()
     )
@@ -702,14 +726,13 @@ def wait_for_server_active(
 
 
 def wait_for_runner_online(
-    identity: ResourceIdentity, runner_id: str, app_token: str, timeout_seconds: int
+    identity: RunnerIdentity, runner_id: str, app_token: str, timeout_seconds: int
 ) -> None:
-    repository = require_environment("GITHUB_REPOSITORY")
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         status, runner, _ = http_json(
             "GET",
-            github_url(f"repos/{repository}/actions/runners/{runner_id}"),
+            github_url(f"repos/{identity.repository}/actions/runners/{runner_id}"),
             token=app_token,
             github_api=True,
             expected_statuses=(200, 404),
@@ -720,9 +743,9 @@ def wait_for_runner_online(
                 for item in runner.get("labels", [])
                 if isinstance(item, dict)
             }
-            if runner.get("status") == "online" and identity.runner_label in labels:
-                print("Runner online")
-                append_summary(f"- Runner `{identity.runner_name}`: `online`")
+            if runner.get("status") == "online" and identity.label in labels:
+                print(f"Runner {identity.role} online")
+                append_summary(f"- Runner `{identity.name}`: `online`")
                 return
         time.sleep(5)
     raise LifecycleError("Timed out waiting for the JIT runner to become online")
@@ -810,14 +833,13 @@ def show_console_log(
 
 
 def delete_github_runners(
-    identity: ResourceIdentity, app_token: str, runner_id: str = ""
+    identity: RunnerIdentity, app_token: str, runner_id: str = ""
 ) -> None:
-    repository = require_environment("GITHUB_REPOSITORY")
     candidate_ids: set[str] = set()
     if runner_id.isdigit():
         status, explicit_runner, _ = http_json(
             "GET",
-            github_url(f"repos/{repository}/actions/runners/{runner_id}"),
+            github_url(f"repos/{identity.repository}/actions/runners/{runner_id}"),
             token=app_token,
             github_api=True,
             expected_statuses=(200, 404),
@@ -829,7 +851,7 @@ def delete_github_runners(
                 if isinstance(item, dict)
             }
             if (
-                explicit_runner.get("name") != identity.runner_name
+                explicit_runner.get("name") != identity.name
                 or identity.scope_label not in explicit_labels
             ):
                 raise LifecycleError(
@@ -838,7 +860,7 @@ def delete_github_runners(
             candidate_ids.add(runner_id)
     _, response, _ = http_json(
         "GET",
-        github_url(f"repos/{repository}/actions/runners?per_page=100"),
+        github_url(f"repos/{identity.repository}/actions/runners?per_page=100"),
         token=app_token,
         github_api=True,
     )
@@ -851,7 +873,7 @@ def delete_github_runners(
             if isinstance(item, dict)
         }
         if (
-            runner.get("name") == identity.runner_name
+            runner.get("name") == identity.name
             and identity.scope_label in labels
         ):
             candidate_ids.add(str(runner.get("id", "")))
@@ -859,7 +881,7 @@ def delete_github_runners(
     for candidate in sorted(value for value in candidate_ids if value.isdigit()):
         status, _, _ = http_json(
             "DELETE",
-            github_url(f"repos/{repository}/actions/runners/{candidate}"),
+            github_url(f"repos/{identity.repository}/actions/runners/{candidate}"),
             token=app_token,
             github_api=True,
             expected_statuses=(204, 404),
@@ -1072,12 +1094,17 @@ def provision(arguments: argparse.Namespace) -> None:
     identity = build_identity(arguments.instance_key)
     app_token = require_environment("GITHUB_APP_TOKEN")
     public_token = require_environment("GITHUB_PUBLIC_TOKEN")
+    wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
+    builder_runner = identity.runner("builder", identity.repository)
+    wot_src_runner = identity.runner("wot-src", wot_src_repository)
     add_mask(config.password)
 
     for name, value in {
         "resource_key": identity.instance_key,
-        "runner_name": identity.runner_name,
-        "runner_label": identity.runner_label,
+        "builder_runner_name": builder_runner.name,
+        "builder_runner_label": builder_runner.label,
+        "wot_src_runner_name": wot_src_runner.name,
+        "wot_src_runner_label": wot_src_runner.label,
         "runner_scope_label": identity.scope_label,
         "server_name": identity.server_name,
         "security_group_name": identity.security_group_name,
@@ -1090,7 +1117,7 @@ def provision(arguments: argparse.Namespace) -> None:
     preflight(config)
 
     server_id = ""
-    jit_config = ""
+    jit_configs: dict[str, str] = {}
     cloud_config_path = ""
     try:
         security_group_id = create_security_group(config, identity)
@@ -1110,9 +1137,19 @@ def provision(arguments: argparse.Namespace) -> None:
         write_output("runner_version", runner_version)
         print(f"Runner package resolved: {runner_version}")
 
-        runner_id, jit_config = create_jit_runner(identity, app_token)
-        write_output("runner_id", runner_id)
-        print(f"JIT runner reserved: {runner_id}")
+        builder_runner_id, builder_jit_config = create_jit_runner(
+            builder_runner, app_token
+        )
+        jit_configs[builder_runner.role] = builder_jit_config
+        write_output("builder_runner_id", builder_runner_id)
+        print(f"Builder JIT runner reserved: {builder_runner_id}")
+
+        wot_src_runner_id, wot_src_jit_config = create_jit_runner(
+            wot_src_runner, app_token
+        )
+        jit_configs[wot_src_runner.role] = wot_src_jit_config
+        write_output("wot_src_runner_id", wot_src_runner_id)
+        print(f"wot-src JIT runner reserved: {wot_src_runner_id}")
 
         template_path = Path(__file__).with_name("bootstrap-actions-runner.sh")
         template = template_path.read_text(encoding="utf-8")
@@ -1121,7 +1158,7 @@ def provision(arguments: argparse.Namespace) -> None:
             runner_download_url=runner_url,
             runner_sha256=runner_sha256,
             runner_version=runner_version,
-            runner_jit_config=jit_config,
+            runner_jit_configs=jit_configs,
         )
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -1139,8 +1176,14 @@ def provision(arguments: argparse.Namespace) -> None:
         print(f"Server created: {server_id}")
         wait_for_server_active(config, server_id, timeout_seconds=300)
         wait_for_runner_online(
-            identity,
-            runner_id,
+            builder_runner,
+            builder_runner_id,
+            app_token,
+            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+        )
+        wait_for_runner_online(
+            wot_src_runner,
+            wot_src_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
         )
@@ -1151,7 +1194,7 @@ def provision(arguments: argparse.Namespace) -> None:
             show_console_log(
                 config,
                 server_id,
-                sensitive_values=(jit_config, app_token, public_token),
+                sensitive_values=(*jit_configs.values(), app_token, public_token),
             )
         raise
     finally:
@@ -1167,6 +1210,9 @@ def cleanup(arguments: argparse.Namespace) -> None:
         run_attempt=arguments.run_attempt,
     )
     app_token = require_environment("GITHUB_APP_TOKEN")
+    wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
+    builder_runner = identity.runner("builder", identity.repository)
+    wot_src_runner = identity.runner("wot-src", wot_src_repository)
     add_mask(config.password)
 
     if arguments.diagnostics:
@@ -1180,8 +1226,16 @@ def cleanup(arguments: argparse.Namespace) -> None:
     failures: list[str] = []
     operations = [
         (
-            "GitHub runner registration",
-            lambda: delete_github_runners(identity, app_token, arguments.runner_id),
+            "GitHub builder runner registration",
+            lambda: delete_github_runners(
+                builder_runner, app_token, arguments.builder_runner_id
+            ),
+        ),
+        (
+            "GitHub wot-src runner registration",
+            lambda: delete_github_runners(
+                wot_src_runner, app_token, arguments.wot_src_runner_id
+            ),
         ),
         (
             "Selectel server",
@@ -1261,6 +1315,93 @@ def watch_queue(arguments: argparse.Namespace) -> None:
     write_output("timed_out", "true")
 
 
+def dispatch_wot_src(arguments: argparse.Namespace) -> None:
+    token = require_environment("GITHUB_APP_TOKEN")
+    repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
+    add_mask(token)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", arguments.workflow):
+        raise LifecycleError("wot-src workflow filename is invalid")
+    if arguments.ref != "main":
+        raise LifecycleError("wot-src publisher workflow must be dispatched from main")
+    if arguments.profile not in {"full", "light"}:
+        raise LifecycleError("snapshot profile must be full or light")
+    if not os.path.isabs(arguments.snapshot_path):
+        raise LifecycleError("snapshot path must be absolute")
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", arguments.snapshot_id):
+        raise LifecycleError("snapshot ID is invalid")
+    if not re.fullmatch(r"[a-f0-9]{64}", arguments.descriptor_sha256):
+        raise LifecycleError("snapshot descriptor SHA-256 is invalid")
+    if arguments.timeout_seconds <= 0:
+        raise LifecycleError("publisher timeout must be positive")
+
+    _, response, _ = http_json(
+        "POST",
+        github_url(
+            f"repos/{repository}/actions/workflows/{arguments.workflow}/dispatches"
+        ),
+        token=token,
+        github_api=True,
+        body={
+            "ref": arguments.ref,
+            "inputs": {
+                "runner_label": arguments.runner_label,
+                "snapshot_path": arguments.snapshot_path,
+                "expected_snapshot_id": arguments.snapshot_id,
+                "expected_descriptor_sha256": arguments.descriptor_sha256,
+                "expected_profile": arguments.profile,
+                "target": arguments.target,
+                "branch": arguments.branch,
+            },
+        },
+        expected_statuses=(200,),
+    )
+    if not isinstance(response, dict):
+        raise LifecycleError("wot-src dispatch returned an invalid response")
+    run_id = response.get("workflow_run_id")
+    if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
+        raise LifecycleError("wot-src dispatch did not return a workflow run ID")
+    run_url = str(response.get("html_url", ""))
+    write_output("wot_src_run_id", run_id)
+    if run_url:
+        write_output("wot_src_run_url", run_url)
+    print(f"Dispatched wot-src workflow run {run_id}")
+    append_summary(f"- wot-src run: [{run_id}]({run_url})" if run_url else f"- wot-src run: `{run_id}`")
+
+    deadline = time.monotonic() + arguments.timeout_seconds
+    last_status = ""
+    while time.monotonic() < deadline:
+        _, run, _ = http_json(
+            "GET",
+            github_url(f"repos/{repository}/actions/runs/{run_id}"),
+            token=token,
+            github_api=True,
+        )
+        if not isinstance(run, dict) or run.get("id") != run_id:
+            raise LifecycleError("wot-src run lookup returned an unexpected run")
+        status = str(run.get("status", "unknown"))
+        if status != last_status:
+            print(f"wot-src run {run_id}: {status}")
+            last_status = status
+        if status == "completed":
+            conclusion = str(run.get("conclusion", ""))
+            append_summary(f"- wot-src conclusion: `{conclusion}`")
+            if conclusion != "success":
+                raise LifecycleError(
+                    f"wot-src workflow run {run_id} completed with {conclusion or 'no conclusion'}"
+                )
+            return
+        time.sleep(10)
+
+    http_json(
+        "POST",
+        github_url(f"repos/{repository}/actions/runs/{run_id}/cancel"),
+        token=token,
+        github_api=True,
+        expected_statuses=(202, 409),
+    )
+    raise LifecycleError(f"timed out waiting for wot-src workflow run {run_id}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1273,7 +1414,8 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--instance-key", required=True)
     cleanup_parser.add_argument("--run-id")
     cleanup_parser.add_argument("--run-attempt")
-    cleanup_parser.add_argument("--runner-id", default="")
+    cleanup_parser.add_argument("--builder-runner-id", default="")
+    cleanup_parser.add_argument("--wot-src-runner-id", default="")
     cleanup_parser.add_argument("--server-id", default="")
     cleanup_parser.add_argument("--port-id", default="")
     cleanup_parser.add_argument("--security-group-id", default="")
@@ -1285,6 +1427,19 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--runner-label", required=True)
     watch_parser.add_argument("--timeout-seconds", type=int, default=600)
     watch_parser.set_defaults(handler=watch_queue)
+
+    dispatch_parser = subparsers.add_parser("dispatch-wot-src")
+    dispatch_parser.add_argument("--workflow", default="publish-snapshot.yml")
+    dispatch_parser.add_argument("--ref", default="main")
+    dispatch_parser.add_argument("--runner-label", required=True)
+    dispatch_parser.add_argument("--snapshot-path", required=True)
+    dispatch_parser.add_argument("--snapshot-id", required=True)
+    dispatch_parser.add_argument("--descriptor-sha256", required=True)
+    dispatch_parser.add_argument("--target", required=True)
+    dispatch_parser.add_argument("--branch", required=True)
+    dispatch_parser.add_argument("--profile", choices=("full", "light"), required=True)
+    dispatch_parser.add_argument("--timeout-seconds", type=int, default=3600)
+    dispatch_parser.set_defaults(handler=dispatch_wot_src)
     return parser
 
 

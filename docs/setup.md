@@ -30,17 +30,19 @@ network volume.
 1. Homepage URL: URL этого репозитория.
 2. Webhook: отключён.
 3. Callback URL и OAuth не нужны.
-4. Repository permissions → **Administration: Read and write**.
-5. Другие изменяемые permissions не выдавать.
-6. Установить App в организации `wotstat`, выбрав **Only select repositories** и только
-   `game-unpack-pipeline`.
+4. Repository permissions → **Administration: Read and write** — создание и удаление JIT runner.
+5. Repository permissions → **Actions: Read and write** — dispatch и ожидание native workflow в
+   `wot-src`.
+6. Установить App в организации `wotstat`, выбрав **Only select repositories**:
+   `game-unpack-pipeline` и `wot-src`.
 7. Скопировать **Client ID** приложения. Числовой App ID для
    `actions/create-github-app-token@v3` не нужен.
 8. Сгенерировать private key и сохранить весь PEM, включая строки `BEGIN...` и `END...`.
 
-`Administration: write` нужен для repository endpoints создания JIT-конфигурации и удаления
-self-hosted runner. Workflows выпускают короткоживущий installation token через официальный
-`actions/create-github-app-token`; private key не покидает GitHub-hosted управляющие jobs.
+Workflows выпускают минимально scoped короткоживущие installation tokens через официальный
+`actions/create-github-app-token`: provision/cleanup получают Administration для двух репозиториев,
+а dispatch job — только Actions для `wot-src`. Private key не покидает GitHub-hosted управляющие
+jobs.
 
 ## 3. GitHub Environment
 
@@ -86,22 +88,24 @@ OpenStack CLI разрешает передавать образ по уника
 
 1. Открыть `Actions → Ephemeral snapshot`.
 2. Убедиться, что выбрана branch `main`.
-3. Выбрать target, client type, languages и режим `light`. Для первого запуска подходят
-   `wot-eu`, `sd`, `EN` и включённый `light`.
+3. Выбрать target, client type, languages и режим `light`. Первый publish-тест использует
+   `wot-eu`, `sd`, `ALL` и включённый `light`.
 4. Нажать **Run workflow**.
 
 Ожидаемая последовательность в одном run:
 
 1. `Provision` проверяет authentication, image, flavor, zone и direct-IP quota.
 2. Создаёт egress-only security group и direct-public port.
-3. Создаёт repository-level JIT runner и VM.
-4. Ждёт `VM ACTIVE` и `runner online`.
+3. Создаёт builder JIT runner в `game-unpack-pipeline`, publisher JIT runner в `wot-src` и VM.
+4. Ждёт `VM ACTIVE` и оба `runner online`.
 5. `Workload` устанавливает runtime и выполняет выбранный light или full pipeline от `resolve` до
    `snapshot` видимыми Actions steps.
-6. Финальный step публикует таблицу статистики; JSON reports и stderr-логи сохраняются как
-   небольшой diagnostic artifact. Сам snapshot с VM не выгружается.
-7. `Cleanup` удаляет runner registration, VM, direct-public port и security group.
-8. После завершения отдельный `Reconcile ephemeral runner cleanup` подтверждает, что остаточных
+6. Builder открывает второму Unix-пользователю traversal к sealed snapshot и возвращает его ID,
+   абсолютный путь и SHA-256 descriptor.
+7. Pipeline вызывает `wot-src/.github/workflows/publish-snapshot.yml@main`, ждёт точный внешний Run
+   ID и получает commit в `test/light-wot-eu`.
+8. `Cleanup` удаляет обе runner registration, VM, direct-public port и security group.
+9. После завершения отдельный `Reconcile ephemeral runner cleanup` подтверждает, что остаточных
    ресурсов нет.
 
 Нормальная кнопка **Cancel workflow** не должна оставлять инфраструктуру: cleanup использует

@@ -87,9 +87,12 @@ jobs:
       port_id: ${{ steps.provision.outputs.port_id }}
       public_address: ${{ steps.provision.outputs.public_address }}
       resource_key: ${{ steps.provision.outputs.resource_key }}
-      runner_id: ${{ steps.provision.outputs.runner_id }}
-      runner_label: ${{ steps.provision.outputs.runner_label }}
-      runner_name: ${{ steps.provision.outputs.runner_name }}
+      builder_runner_id: ${{ steps.provision.outputs.builder_runner_id }}
+      builder_runner_label: ${{ steps.provision.outputs.builder_runner_label }}
+      builder_runner_name: ${{ steps.provision.outputs.builder_runner_name }}
+      wot_src_runner_id: ${{ steps.provision.outputs.wot_src_runner_id }}
+      wot_src_runner_label: ${{ steps.provision.outputs.wot_src_runner_label }}
+      wot_src_runner_name: ${{ steps.provision.outputs.wot_src_runner_name }}
       runner_scope_label: ${{ steps.provision.outputs.runner_scope_label }}
       runner_version: ${{ steps.provision.outputs.runner_version }}
       security_group_id: ${{ steps.provision.outputs.security_group_id }}
@@ -105,6 +108,9 @@ jobs:
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: game-unpack-pipeline,wot-src
+          permission-actions: write
           permission-administration: write
 
       - name: Install OpenStack CLI
@@ -117,6 +123,7 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
+          WOT_SRC_REPOSITORY: wotstat/wot-src
           SELECTEL_AVAILABILITY_ZONE: ${{ vars.SELECTEL_AVAILABILITY_ZONE }}
           SELECTEL_FLAVOR_ID: ${{ inputs.runner_profile == 'highfreq-16c-32g' && 'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
@@ -134,9 +141,9 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.14
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.15
     with:
-      runner_label: ${{ needs.provision.outputs.runner_label }}
+      runner_label: ${{ needs.provision.outputs.builder_runner_label }}
       target: ${{ inputs.target }}
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
@@ -164,7 +171,7 @@ jobs:
         env:
           GITHUB_WATCH_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
-          RUNNER_LABEL: ${{ needs.provision.outputs.runner_label }}
+          RUNNER_LABEL: ${{ needs.provision.outputs.builder_runner_label }}
         run: >-
           python3 scripts/runner_lifecycle.py watch-queue
           --instance-key "${INSTANCE_KEY}"
@@ -178,6 +185,8 @@ jobs:
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: game-unpack-pipeline,wot-src
           permission-administration: write
 
       - name: Install OpenStack CLI for timed-out cleanup
@@ -190,7 +199,9 @@ jobs:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           PORT_ID: ${{ needs.provision.outputs.port_id }}
-          RUNNER_ID: ${{ needs.provision.outputs.runner_id }}
+          BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
+          WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
+          WOT_SRC_REPOSITORY: wotstat/wot-src
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
@@ -203,7 +214,8 @@ jobs:
         run: >-
           python3 scripts/runner_lifecycle.py cleanup
           --instance-key "${INSTANCE_KEY}"
-          --runner-id "${RUNNER_ID}"
+          --builder-runner-id "${BUILDER_RUNNER_ID}"
+          --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
           --server-id "${SERVER_ID}"
           --port-id "${PORT_ID}"
           --security-group-id "${SECURITY_GROUP_ID}"
@@ -217,6 +229,64 @@ jobs:
           gh api --method POST
           'repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel'
 
+  publish-wot-src:
+    name: Publish wot-src (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    if: needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
+    needs:
+      - provision
+      - workload
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: selectel
+    outputs:
+      run_id: ${{ steps.dispatch.outputs.wot_src_run_id }}
+      run_url: ${{ steps.dispatch.outputs.wot_src_run_url }}
+    steps:
+      - name: Check out orchestration code
+        uses: actions/checkout@v7.0.1
+
+      - name: Create wot-src dispatch token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: wot-src
+          permission-actions: write
+
+      - name: Dispatch and wait for exact wot-src run
+        id: dispatch
+        env:
+          FULL_PUBLICATION_BRANCH: test/full-${{ inputs.target }}
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          LIGHT_PUBLICATION_BRANCH: test/light-${{ inputs.target }}
+          SNAPSHOT_DESCRIPTOR_SHA256: ${{ needs.workload.outputs.descriptor_sha256 }}
+          SNAPSHOT_ID: ${{ needs.workload.outputs.snapshot_id }}
+          SNAPSHOT_PATH: ${{ needs.workload.outputs.snapshot_path }}
+          SNAPSHOT_PROFILE: ${{ inputs.light && 'light' || 'full' }}
+          TARGET: ${{ inputs.target }}
+          WOT_SRC_RUNNER_LABEL: ${{ needs.provision.outputs.wot_src_runner_label }}
+          WOT_SRC_REPOSITORY: wotstat/wot-src
+        run: |
+          set -Eeuo pipefail
+          if [[ "${SNAPSHOT_PROFILE}" == light ]]; then
+            publication_branch="${LIGHT_PUBLICATION_BRANCH}"
+          else
+            publication_branch="${FULL_PUBLICATION_BRANCH}"
+          fi
+          python3 scripts/runner_lifecycle.py dispatch-wot-src \
+            --workflow publish-snapshot.yml \
+            --ref main \
+            --runner-label "${WOT_SRC_RUNNER_LABEL}" \
+            --snapshot-path "${SNAPSHOT_PATH}" \
+            --snapshot-id "${SNAPSHOT_ID}" \
+            --descriptor-sha256 "${SNAPSHOT_DESCRIPTOR_SHA256}" \
+            --target "${TARGET}" \
+            --branch "${publication_branch}" \
+            --profile "${SNAPSHOT_PROFILE}" \
+            --timeout-seconds 2700
+
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
     if: always() && needs.provision.result != 'skipped'
@@ -224,6 +294,7 @@ jobs:
       - provision
       - workload
       - queue-watchdog
+      - publish-wot-src
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: selectel
@@ -237,6 +308,8 @@ jobs:
         with:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: game-unpack-pipeline,wot-src
           permission-administration: write
 
       - name: Install OpenStack CLI
@@ -248,7 +321,10 @@ jobs:
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           PORT_ID: ${{ needs.provision.outputs.port_id }}
           PROVISION_RESULT: ${{ needs.provision.result }}
-          RUNNER_ID: ${{ needs.provision.outputs.runner_id }}
+          BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
+          WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
+          WOT_SRC_REPOSITORY: wotstat/wot-src
+          PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           WORKLOAD_RESULT: ${{ needs.workload.result }}
@@ -262,12 +338,15 @@ jobs:
         run: |
           set -Eeuo pipefail
           diagnostics=()
-          if [[ "${PROVISION_RESULT}" != success || "${WORKLOAD_RESULT}" != success ]]; then
+          if [[ "${PROVISION_RESULT}" != success \
+            || "${WORKLOAD_RESULT}" != success \
+            || "${PUBLISH_RESULT}" != success ]]; then
             diagnostics+=(--diagnostics)
           fi
           python3 scripts/runner_lifecycle.py cleanup \
             --instance-key "${INSTANCE_KEY}" \
-            --runner-id "${RUNNER_ID}" \
+            --builder-runner-id "${BUILDER_RUNNER_ID}" \
+            --wot-src-runner-id "${WOT_SRC_RUNNER_ID}" \
             --server-id "${SERVER_ID}" \
             --port-id "${PORT_ID}" \
             --security-group-id "${SECURITY_GROUP_ID}" \

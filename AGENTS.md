@@ -41,24 +41,28 @@ WGUS/LSTUS обнаружил новую версию
 
 ## Ближайшая итерация
 
-Сейчас нужен light вертикальный сценарий сборки GameSnapshot:
+Сейчас нужен light вертикальный сценарий сборки и публикации `wot-src`:
 
 1. Пользователь вручную запускает workflow кнопкой (`workflow_dispatch`).
 2. Workflow создаёт один временный сервер в Selectel.
-3. Сервер регистрируется как отдельный ephemeral self-hosted GitHub Actions runner.
-4. Workload вызывает versioned reusable workflow из `wotstat/game-snapshot-builder`.
-5. Builder с `--light` выполняет стадии от `resolve` до `snapshot`, публикует Actions summary,
-   структурированную статистику и небольшие diagnostic logs. Snapshot пока остаётся на VM.
-6. После выполнения удаляются runner registration, сервер и созданные вместе с ним временные
+3. Сервер регистрирует два изолированных ephemeral self-hosted GitHub Actions runner: builder в
+   `game-unpack-pipeline` и publisher в `wot-src`.
+4. Builder workload вызывает versioned reusable workflow из `wotstat/game-snapshot-builder`.
+5. Builder с `--light --languages ALL` выполняет стадии от `resolve` до `snapshot`, публикует
+   Actions summary, структурированную статистику и небольшие diagnostic logs. Snapshot остаётся
+   на локальном диске VM.
+6. GitHub-hosted orchestration job вызывает workflow из `wot-src@main`. Второй runner независимо
+   проверяет snapshot и публикует `py`, `xml`, `po`, AS3, stubs, все WG locale overlays и base
+   Gameface в временную pure-data ветку `test/light-wot-eu`.
+7. После выполнения удаляются обе runner registration, сервер и созданные вместе с ним временные
    ресурсы. Очистка должна учитываться и для неуспешного запуска.
 
-На этой итерации не нужны: cron, отдельный watcher обновлений, downstream processors, публикация
-snapshot, S3, БД, выходные репозитории и GitHub Pages.
+На этой итерации не нужны: cron, отдельный watcher обновлений, `wot-assets`, production data
+branches, S3, БД и GitHub Pages.
 
 Это интеграционная итерация с участием пользователя. Не угадывать Selectel project/region/image,
-GitHub scope, способ аутентификации и значения секретов. Сначала определить минимально необходимые
-входы и проверять сценарий небольшими наблюдаемыми шагами. Не выполнять реальные облачные операции
-без явной задачи пользователя.
+GitHub scope, способ аутентификации и значения секретов. Реальные облачные операции выполнять
+только после явной задачи пользователя.
 
 ## Дальнейшее направление
 

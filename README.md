@@ -2,15 +2,17 @@
 
 Публичный оркестратор обработки клиентов World of Tanks и «Мира танков».
 
-Текущая интеграционная итерация проверяет минимальный вертикальный сценарий:
+Текущая интеграционная итерация проверяет вертикальный сценарий до публикации исходников:
 
 ```text
 workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
-  → repository-level GitHub Actions JIT runner
-  → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.14`
-  → удаление runner, VM, direct public IP и security group
+  → два repository-level GitHub Actions JIT runner на одной VM
+  → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.15`
+  → native workflow `wotstat/wot-src@main`
+  → проверка snapshot и commit в временную pure-data ветку
+  → удаление обоих runner, VM, direct public IP и security group
 ```
 
 Несколько ручных запусков независимы: имена, labels и облачные ресурсы включают уникальные
@@ -19,7 +21,8 @@ workflow_dispatch
 ## Устройство workflow
 
 - [`ephemeral-light-snapshot.yml`](.github/workflows/ephemeral-light-snapshot.yml) — ручная точка
-  входа и lifecycle одной единицы работы: `provision → workload + queue watchdog → cleanup`.
+  входа и lifecycle одной единицы работы:
+  `provision → workload + queue watchdog → publish-wot-src → cleanup`.
   Input `light` выбирает минимальный smoke-сценарий, `benchmark_percent` — детерминированную
   неполную performance-выборку, а `until` ограничивает последнюю запускаемую стадию. Benchmark
   нельзя довести до production snapshot. Каждая стадия выполняется отдельным видимым GitHub step;
@@ -31,21 +34,28 @@ workflow_dispatch
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.
 
-Workload вызывает versioned reusable workflow из публичного
+Builder workload вызывает versioned reusable workflow из публичного
 [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder). Все стадии от
 `resolve` до `snapshot` остаются одной job: JIT runner выполняет не более одного job, а стадии
-отображаются отдельными GitHub Actions steps. Snapshot живёт только на временной VM; в diagnostic
-artifact попадают небольшие JSON reports, stderr-логи стадий и их performance telemetry.
+отображаются отдельными GitHub Actions steps. После seal управляющая GitHub-hosted job вызывает
+`publish-snapshot.yml` из ветки `main` репозитория `wot-src` и ждёт конкретный возвращённый Run ID.
+В тестовом режиме данные попадают в `test/light-<target>`. Snapshot не загружается через Actions:
+оба workload читают один локальный путь на VM. В diagnostic artifact попадают только небольшие
+JSON reports, stderr-логи стадий и performance telemetry.
 
 ## Гарантии lifecycle
 
-- VM получает только короткоживущую JIT-конфигурацию конкретного runner. Selectel credentials и
+- VM получает только две короткоживущие JIT-конфигурации. Selectel credentials и
   private key GitHub App на VM не передаются.
+- Builder и publisher работают под разными Unix-пользователями и в разных runner work
+  directories. У publisher нет `sudo`; после seal ему открывается traversal только к immutable
+  snapshot, но не к cache, checkpoints или builder work directory.
 - Runner скачивается с официального GitHub release, а архив проверяется по опубликованному
   SHA-256 digest.
 - У security group нет ingress rules. Runner сам открывает исходящие HTTPS-соединения к GitHub;
   stateful-фильтрация пропускает ответный трафик.
-- Queue watchdog удаляет VM и отменяет workflow, если workload не был назначен за 10 минут.
+- Queue watchdog удаляет VM и отменяет workflow, если builder workload не был назначен за 10
+  минут.
 - Основной cleanup работает с `always()`. Второй `workflow_run` cleanup повторяет удаление по
   точным ownership-маркерам.
 - Cleanup проверяет имя, description и project перед удалением ресурсов. Отсутствующий ресурс
