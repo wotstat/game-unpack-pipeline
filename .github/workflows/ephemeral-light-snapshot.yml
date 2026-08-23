@@ -68,7 +68,7 @@ on:
       runner_profile:
         description: Selectel runner CPU profile
         required: true
-        default: configured-standard
+        default: highfreq-16c-32g
         type: choice
         options:
           - configured-standard

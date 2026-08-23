@@ -25,8 +25,8 @@ workflow_dispatch
   нельзя довести до production snapshot. Каждая стадия выполняется отдельным видимым GitHub step;
   переход проверяет SHA-256 непосредственного checkpoint, но не обходит заново весь завершённый
   prefix. Для каждого шага сохраняются отдельные логи и метрики ресурсов. `runner_profile`
-  оставляет настроенный Standard flavor либо выбирает фиксированный HighFreq 16 vCPU / 32 ГБ для
-  воспроизводимого CPU A/B; произвольные flavor из dispatch передать нельзя.
+  по умолчанию выбирает фиксированный HighFreq 16 vCPU / 32 ГБ, а Standard оставлен как
+  контрольный профиль. Произвольные flavor из dispatch передать нельзя.
 - [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml) —
   независимая повторная очистка после завершения или отмены основного workflow. Её также можно
   запустить вручную для конкретных `run_id` и `run_attempt`.

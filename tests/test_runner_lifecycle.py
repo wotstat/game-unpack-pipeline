@@ -224,6 +224,7 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("until: ${{ inputs.until }}", workflow)
         self.assertIn("profile_stages: true", workflow)
+        self.assertIn("default: highfreq-16c-32g", workflow)
         self.assertIn(
             "inputs.runner_profile == 'highfreq-16c-32g' && "
             "'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID",
