@@ -53,12 +53,19 @@ chown -R snapshot-builder:snapshot-builder "${RUNNERS_ROOT}/builder"
 chown -R wot-src-publisher:wot-src-publisher "${RUNNERS_ROOT}/wot-src"
 rm -rf "${RUNNER_TEMPLATE_DIR}"
 
+install -d -o root -g root -m 0755 /run/actions-runner
+install -d -o snapshot-builder -g snapshot-builder -m 0700 \
+  /run/actions-runner/builder
+install -d -o wot-src-publisher -g wot-src-publisher -m 0700 \
+  /run/actions-runner/wot-src
 install -o snapshot-builder -g snapshot-builder -m 0600 /dev/null \
-  /run/actions-runner-builder-jit-config
+  /run/actions-runner/builder/jit-config
 install -o wot-src-publisher -g wot-src-publisher -m 0600 /dev/null \
-  /run/actions-runner-wot-src-jit-config
-printf '%s' "${BUILDER_RUNNER_JIT_CONFIG}" >/run/actions-runner-builder-jit-config
-printf '%s' "${WOT_SRC_RUNNER_JIT_CONFIG}" >/run/actions-runner-wot-src-jit-config
+  /run/actions-runner/wot-src/jit-config
+printf '%s' "${BUILDER_RUNNER_JIT_CONFIG}" \
+  >/run/actions-runner/builder/jit-config
+printf '%s' "${WOT_SRC_RUNNER_JIT_CONFIG}" \
+  >/run/actions-runner/wot-src/jit-config
 unset BUILDER_RUNNER_JIT_CONFIG WOT_SRC_RUNNER_JIT_CONFIG
 
 cat >/usr/local/sbin/run-actions-runner <<'EOF'
@@ -67,7 +74,7 @@ set -Eeuo pipefail
 
 readonly role="${1:?runner role is required}"
 readonly runner_dir="/opt/actions-runners/${role}"
-readonly jit_config_file="/run/actions-runner-${role}-jit-config"
+readonly jit_config_file="/run/actions-runner/${role}/jit-config"
 
 jit_config=$(<"${jit_config_file}")
 rm -f "${jit_config_file}"

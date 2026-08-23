@@ -156,6 +156,21 @@ class CloudConfigTests(unittest.TestCase):
         self.assertIn("unset BUILDER_RUNNER_JIT_CONFIG WOT_SRC_RUNNER_JIT_CONFIG", bootstrap)
         self.assertIn("User=snapshot-builder", bootstrap)
         self.assertIn("User=wot-src-publisher", bootstrap)
+        self.assertIn(
+            "install -d -o snapshot-builder -g snapshot-builder -m 0700 \\\n"
+            "  /run/actions-runner/builder",
+            bootstrap,
+        )
+        self.assertIn(
+            "install -d -o wot-src-publisher -g wot-src-publisher -m 0700 \\\n"
+            "  /run/actions-runner/wot-src",
+            bootstrap,
+        )
+        self.assertIn(
+            'readonly jit_config_file="/run/actions-runner/${role}/jit-config"',
+            bootstrap,
+        )
+        self.assertNotIn('/run/actions-runner-${role}-jit-config', bootstrap)
         self.assertIn("snapshot-builder ALL=(ALL) NOPASSWD: ALL", bootstrap)
         self.assertNotIn("wot-src-publisher ALL=", bootstrap)
         self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
