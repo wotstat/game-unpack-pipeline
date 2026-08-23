@@ -1,5 +1,5 @@
 name: Ephemeral snapshot
-run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · @${{ github.actor }}
+run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.runner_profile }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -65,6 +65,14 @@ on:
         required: true
         default: 0
         type: number
+      runner_profile:
+        description: Selectel runner CPU profile
+        required: true
+        default: configured-standard
+        type: choice
+        options:
+          - configured-standard
+          - highfreq-16c-32g
 permissions:
   actions: write
   contents: read
@@ -110,7 +118,7 @@ jobs:
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
           SELECTEL_AVAILABILITY_ZONE: ${{ vars.SELECTEL_AVAILABILITY_ZONE }}
-          SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}
+          SELECTEL_FLAVOR_ID: ${{ inputs.runner_profile == 'highfreq-16c-32g' && 'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
@@ -126,7 +134,7 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.13
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.14
     with:
       runner_label: ${{ needs.provision.outputs.runner_label }}
       target: ${{ inputs.target }}
