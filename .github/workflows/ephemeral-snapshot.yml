@@ -1,5 +1,5 @@
 name: Ephemeral snapshot
-run-name: ${{ inputs.benchmark_percent > 0 && 'Benchmark' || (inputs.light && 'Light' || 'Full') }} through ${{ inputs.until }} · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.runner_profile }} · ${{ inputs.selectel_location }} · @${{ github.actor }}
+run-name: Snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -30,41 +30,6 @@ on:
         required: true
         default: EN
         type: string
-      light:
-        description: Build a minimal integration-test snapshot
-        required: true
-        default: true
-        type: boolean
-      benchmark_percent:
-        description: Deterministic incomplete benchmark sample; 0 disables it
-        required: true
-        default: 0
-        type: number
-      until:
-        description: Last pipeline stage to execute
-        required: true
-        default: snapshot
-        type: choice
-        options:
-          - resolve
-          - plan-acquisition
-          - download
-          - verify
-          - assemble-client
-          - index-vfs
-          - materialize-vfs
-          - plan-readable
-          - transform-readable
-          - decompile-actionscript
-          - assemble-readable
-          - generate-engine-stubs
-          - finalize-readable
-          - snapshot
-      workers:
-        description: Parallel workers; 0 uses runner CPU count, capped at 32
-        required: true
-        default: 0
-        type: number
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
@@ -75,14 +40,6 @@ on:
         required: true
         default: true
         type: boolean
-      runner_profile:
-        description: Selectel runner CPU profile (HighFreq is available only in ru-9a)
-        required: true
-        default: configured-standard
-        type: choice
-        options:
-          - configured-standard
-          - highfreq-16c-32g
       selectel_location:
         description: Selectel region and availability zone
         required: true
@@ -148,7 +105,7 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
-          SELECTEL_FLAVOR_ID: ${{ inputs.runner_profile == 'highfreq-16c-32g' && 'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID }}
+          SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
@@ -162,18 +119,12 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.16
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0
     with:
       runner_label: ${{ needs.provision.outputs.builder_runner_label }}
       target: ${{ inputs.target }}
       client_type: ${{ inputs.client_type }}
       languages: ${{ inputs.languages }}
-      light: ${{ inputs.light }}
-      benchmark_percent: ${{ fromJSON(inputs.benchmark_percent) }}
-      until: ${{ inputs.until }}
-      # CLI dispatch fields arrive as strings; workflow_call requires a real number.
-      workers: ${{ fromJSON(inputs.workers) }}
-      profile_stages: true
     permissions:
       contents: read
 
@@ -255,20 +206,15 @@ jobs:
     needs:
       - provision
       - workload
-    uses: ./.github/workflows/publish-snapshot.yml
+    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@afb2fd47dedf778d7c78d05cd925d8837f75c591
     with:
-      publisher: wot-src
-      publisher_ref: 3b31d135e0218214b333c1d8084f03219f4f1352
       runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
       expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
       expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
-      expected_profile: ${{ inputs.light && 'light' || 'full' }}
       target: ${{ inputs.target }}
-      branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
     permissions:
       contents: read
-    secrets: inherit
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -276,20 +222,15 @@ jobs:
     needs:
       - provision
       - workload
-    uses: ./.github/workflows/publish-snapshot.yml
+    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@74c8e83cea735271d477524e61f4f2f8576302c7
     with:
-      publisher: wot-gui-assets
-      publisher_ref: b0c44a1652833ee38bd3333029147d97c2616f10
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
       expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
       expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
-      expected_profile: ${{ inputs.light && 'light' || 'full' }}
       target: ${{ inputs.target }}
-      branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
     permissions:
       contents: read
-    secrets: inherit
 
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -388,7 +329,7 @@ jobs:
             ${{ contains(needs.*.result, 'failure') && '❌ FAILURE' || contains(needs.*.result, 'cancelled') && '⚠️ CANCELLED' || '✅ SUCCESS' }}
             Ephemeral snapshot · ${{ inputs.target }} · ${{ inputs.client_type }}
 
-            Mode: ${{ inputs.benchmark_percent > 0 && format('benchmark {0}%', inputs.benchmark_percent) || (inputs.light && 'light' || 'full') }} through ${{ inputs.until }}
+            Mode: full production snapshot
             Languages: ${{ inputs.languages }}
             Provision: ${{ needs.provision.result }}
             Builder: ${{ needs.workload.result }}

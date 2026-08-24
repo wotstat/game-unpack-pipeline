@@ -2,14 +2,13 @@
 
 ## Назначение репозитория
 
-`game-unpack-pipeline` — публичный оркестратор ручной сборки и публикации снимков клиентов World of
-Tanks и «Мира танков». Сейчас репозиторий владеет GitHub Actions workflows, жизненным циклом
-временной VM и трёх repository-level JIT runner, вызовом reusable builder/publisher и повторной очисткой
-ресурсов.
+`game-unpack-pipeline` — публичный оркестратор ручной production-сборки и публикации снимков
+клиентов World of Tanks и «Мира танков». Репозиторий владеет GitHub Actions entrypoint, жизненным
+циклом временной VM и трёх repository-level JIT runner, вызовом reusable builder/publisher,
+cleanup/reconciliation и Telegram-отчётами.
 
-Скачивание и распаковка игрового клиента, преобразования и формат `GameSnapshot` здесь не
-реализуются. Автоматическое обнаружение новых версий и публичная история статусов также пока
-отсутствуют.
+Скачивание и распаковка клиента, преобразования и формат `GameSnapshot` здесь не реализуются.
+Автоматическое обнаружение новых версий и публичная история статусов также отсутствуют.
 
 ## Реализованный поток
 
@@ -17,111 +16,105 @@ Tanks и «Мира танков». Сейчас репозиторий влад
 manual workflow_dispatch
   → provision одной VM, direct public IP и egress-only security group в Selectel
   → три JIT runner в game-unpack-pipeline: builder, wot-src и wot-gui-assets
-  → game-snapshot-builder@v0.3.16 на builder runner
+  → game-snapshot-builder@v0.4.0 на builder runner
   → sealed snapshot на локальном диске VM
-  → параллельный workflow_call локального publish-snapshot.yml с pinned publisher commit SHA
-  → выбранный light publish в test/light-<target> или full publish в <target>
+  → параллельные pinned reusable workflows data-репозиториев
+  → выбранные production data-ветки target
   → cleanup с always()
   → итоговый Telegram-отчёт
-  → отдельный workflow_run reconciler в ru-7 и ru-9
-  → Telegram recovery alert только при фактическом удалении остаточных ресурсов
+  → workflow_run reconciler в ru-7 и ru-9
+  → recovery alert только при deleted_count > 0
 ```
 
-Основной workflow поддерживает light, full, benchmark и остановку на выбранной стадии. Benchmark
-является неполной выборкой, не может дойти до `snapshot` и не публикуется. Publisher jobs создаются
-только когда reusable workflow вернул непустой `snapshot_path` и включён соответствующий
-`publish_wot_src`/`publish_wot_gui_assets`. Оба publisher включены по умолчанию. Light и benchmark
-взаимно исключаются; `ALL` нельзя смешивать с отдельными кодами языков.
+Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
+target, client type, languages, Selectel location и два независимых переключателя
+`publish_wot_src`/`publish_wot_gui_assets`, включённых по умолчанию.
 
-## Границы компонентов и локальные зеркала
+## Границы компонентов
 
-- Этот репозиторий: `.github/workflows`, Selectel lifecycle, JIT runner bootstrap, native reusable
-  publisher jobs, cleanup/reconciliation.
+- Этот репозиторий: `.github/workflows`, Selectel lifecycle, JIT runner bootstrap, вызов reusable
+  workflows, cleanup/reconciliation.
 - [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder), локально
   обычно `../game-unpacker`: resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline,
-  Python/XML/MO/AS3 transforms, engine stubs, seal и verify `GameSnapshot`. Оркестратор сейчас
-  закрепляет reusable workflow на `v0.3.16`.
-- [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`:
-  независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и Gameface.
-- [`wotstat/wot-gui-assets`](https://github.com/wotstat/wot-gui-assets), локальный каталог в
-  текущем workspace обычно называется `../wot-assets`: независимая проверка snapshot и проекция
+  transforms, stubs, seal и verify `GameSnapshot`. Оркестратор закрепляет reusable workflow на
+  `v0.4.0`.
+- [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`: reusable
+  publication workflow, независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и
+  Gameface.
+- [`wotstat/wot-gui-assets`](https://github.com/wotstat/wot-gui-assets), локально обычно
+  `../wot-assets`: reusable publication workflow, независимая проверка snapshot и проекция
   `res/gui` без `.py`.
 
-Не переносить в этот репозиторий протокол WGUS/LSTUS, реализацию builder или правила publisher без
-отдельного архитектурного решения.
+Не переносить сюда протокол WGUS/LSTUS, builder или правила publisher без отдельного
+архитектурного решения.
 
 ## Текущие контракты
 
-- Единственная точка запуска сборки — ручной `workflow_dispatch` в
-  `.github/workflows/ephemeral-light-snapshot.yml`; имя файла историческое и не означает, что
-  workflow ограничен light-режимом.
-- Поддерживаются targets `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru` и
-  `mt-public-test`, client types `sd`/`hd`, список языков или `ALL`.
-- Light snapshot публикуется только в `test/light-<target>`. Full snapshot публикуется в
-  production data-ветку `<target>`. Каждый publisher можно независимо отключить для конкретного
-  run; если включены оба, они должны получить одинаковые identity, target, profile и descriptor
-  digest.
-- Publisher lifecycle находится в локальном reusable workflow оркестратора. Он является частью
-  caller run и checkout’ит publisher-код из data-репозитория по точному commit SHA; не возвращать
-  cross-repository dispatch/polling и не закреплять publisher-код на плавающем `main`.
-- Изменённые Git blobs суммарным размером более 1 ГБ publisher загружает bounded staging pushes во
-  временную ветку, кумулятивно собирая полный tree. После проверки его локального hash один version
-  commit создаётся через GitHub Git Database API; production-ref обновляется без force, а staging
-  commits не входят в production-историю.
-- Перед cleanup или рефакторингом publisher Git transport полностью прочитать
-  `docs/publisher-cleanup.md`, `../wot-src/docs/publication-transport.md` и
-  `../wot-assets/docs/publication-transport.md`. Сохранять наблюдаемое поведение через CLI/data-ветку,
-  а не текущую структуру приватных helper'ов: она не является контрактом и может быть упрощена.
-- Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
+- Единственная точка ручного запуска — `.github/workflows/ephemeral-snapshot.yml`.
+- Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
+  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`; location: `ru-7a`/`ru-9a`.
+- Каждый publisher можно независимо отключить. Если включены оба, они получают одинаковые target,
+  snapshot identity и descriptor digest.
+- Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
+  `uses: owner/repo/.github/workflows/publish-snapshot.yml@<full-sha>`. Не возвращать
+  cross-repository dispatch/polling, локальный универсальный publisher workflow или floating
+  `main`.
+- Called workflow checkout’ит собственный код через `job.workflow_repository` и
+  `job.workflow_sha`, а не default checkout caller-репозитория.
+- Отсутствующая data-ветка создаётся первой публикацией. Существующий ref без
+  `.publication.json` — hard failure; bootstrap compatibility не поддерживается.
+- Изменённые Git blobs суммарно больше 1 ГБ publisher загружает bounded staging pushes, создавая
+  полный cumulative tree. После проверки tree hash один final commit создаётся через GitHub Git
+  Database API; production-ref обновляется без force, staging commits в production-историю не
+  входят.
+- Перед изменением publisher transport полностью прочитать `../wot-src/AGENTS.md`,
+  `../wot-src/docs/publication-transport.md`, `../wot-assets/AGENTS.md` и
+  `../wot-assets/docs/publication-transport.md`. Не считать staging protocol legacy.
+- Snapshot не загружается в Actions artifact. Все runner находятся на одной VM и читают один
   абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
-- Все три runner зарегистрированы в `game-unpack-pipeline`. Каждый имеет уникальные имя и label на
-  основе `run_id`/`run_attempt`, отдельного
+- Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только builder имеет
   `sudo`.
-- По умолчанию используется `configured-standard` в `ru-7a`. Профиль
-  `highfreq-16c-32g` фиксирован как `HFL1.16-32768-240` и разрешён только в `ru-9a`.
-- Основной cleanup обязан выполняться после ошибок обоих publisher. Reconciler должен оставаться
-  идемпотентным, искать ресурсы по точным ownership-маркерам и проверять обе поддерживаемые region.
+- Flavor всегда берётся из `SELECTEL_FLAVOR_ID`; location задаёт zone, region и Public Network
+  endpoint.
+- Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
+  точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет Telegram-отчёт после cleanup при любом результате. Reconciler
-  отправляет отдельный аварийный alert только при машинно подтверждённом `deleted_count > 0`.
-- Несколько pipeline runs независимы. Не добавлять отменяющий concurrency на уровень всего
-  оркестратора; publisher сами сериализуют обновления одной data-ветки без отмены предыдущего run.
+  отправляет recovery alert только при машинно подтверждённом `deleted_count > 0`.
+- Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
+  `cancel-in-progress: false`.
 
 ## Секреты и реальные операции
 
-- Все репозитории, код, workflow, несекретная конфигурация и публикуемые данные должны оставаться
-  публичными.
+- Код, workflows, несекретная конфигурация и публикуемые данные остаются публичными.
 - `GH_APP_PRIVATE_KEY` и `SELECTEL_OS_PASSWORD` хранятся только в Environment `selectel`.
-  `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` хранятся только в Environment `telegram`.
-  JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
-- Не добавлять реальные credentials, project/account identifiers, runner configs или tokens в
-  код, fixtures, документацию, summaries и логи.
-- Не угадывать secret values, фактические квоты или доступность flavor/image. Реальные Selectel и
-  GitHub mutations выполнять только по явной задаче пользователя. Локальные unit/lint checks
-  безопасны и не обращаются к облаку.
-- Не ослаблять masking, отсутствие ingress, разделение Unix-пользователей, проверку digest runner
-  archive или ownership checks ради упрощения workflow.
+  `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` — только в Environment `telegram`.
+- JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
+- Не добавлять credentials, project/account identifiers, runner configs или tokens в код,
+  fixtures, документацию, summaries и логи.
+- Реальные Selectel и GitHub mutations выполнять только по явной задаче пользователя. Локальные
+  unit/lint checks безопасны и не обращаются к облаку.
+- Не ослаблять masking, отсутствие ingress, разделение Unix-пользователей, digest check runner
+  archive или ownership checks ради упрощения.
 
-## Что пока не входит в систему
+## Что не входит в систему
 
 - cron и watcher новых WGUS/LSTUS releases;
-- модель release identity/state/retry на уровне оркестратора;
+- release identity/state/retry на уровне orchestrator;
 - публичный status store или GitHub Pages;
 - processors для S3 и БД;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
 
-Не проектировать и не добавлять эти части без нового запроса. Если они становятся текущей задачей,
-сначала отделить подтверждённые требования от предложений и обновить этот файл вместе с кодом.
+Не проектировать эти части без нового запроса.
 
 ## Правила изменения
 
-- Перед правками проверять фактические workflow и lifecycle-скрипты этого репозитория, текущий
-  `build-snapshot.yml` закреплённого builder tag и publisher-код на pinned SHA обоих репозиториев.
-- При обновлении builder tag сверять inputs, outputs, stage names, profile semantics и требования к
-  runner. Не ссылаться на плавающий `main` builder из production orchestration.
-- При изменении publisher contract обновлять оба reusable call path симметрично, закреплять код на
-  полных commit SHA и сохранять cleanup при ошибке любого из них.
-- Документация должна описывать реализованное состояние. Будущие идеи явно помечать как
-  нереализованные, а не как текущую итерацию.
-- После изменений запускать `./scripts/check.sh`. При правках, затрагивающих соседние контракты,
-  дополнительно использовать их собственные test/lint команды.
+- Перед правками проверять фактические workflows/lifecycle scripts и pinned interfaces соседних
+  репозиториев.
+- При обновлении builder tag сверять inputs, outputs, stage names и требования к runner. Не
+  ссылаться на floating `main`.
+- При изменении publisher contract обновлять оба call path симметрично и закреплять код на полных
+  commit SHA.
+- Документация описывает реализованное состояние; будущие идеи явно помечать нереализованными.
+- После изменений запускать `./scripts/check.sh`. При правках соседних контрактов дополнительно
+  запускать их собственные pytest/Ruff/mypy.

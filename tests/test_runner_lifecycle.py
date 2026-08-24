@@ -333,18 +333,19 @@ class CleanupReportingTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_coerces_cli_worker_input_before_reusable_workflow_call(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
+    def test_dispatch_exposes_only_production_inputs(self) -> None:
+        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("workers: ${{ fromJSON(inputs.workers) }}", workflow)
-        self.assertIn(
-            "benchmark_percent: ${{ fromJSON(inputs.benchmark_percent) }}",
-            workflow,
-        )
-        self.assertIn("until: ${{ inputs.until }}", workflow)
-        self.assertIn("profile_stages: true", workflow)
+        for removed_input in (
+            "benchmark_percent:",
+            "light:",
+            "runner_profile:",
+            "until:",
+            "workers:",
+        ):
+            self.assertNotIn(removed_input, workflow)
         self.assertIn(
             "      publish_wot_src:\n"
             "        description: Publish the snapshot to wot-src\n"
@@ -365,22 +366,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
         self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
-        self.assertIn("default: configured-standard", workflow)
         self.assertIn("default: ru-7a", workflow)
         self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
         self.assertIn("inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9'", workflow)
+        self.assertIn("SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}", workflow)
         self.assertIn(
-            "inputs.runner_profile == 'highfreq-16c-32g' && "
-            "'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID",
-            workflow,
-        )
-        self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.16",
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0",
             workflow,
         )
 
     def test_provisions_and_calls_both_reusable_publishers(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
+        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(
             encoding="utf-8"
         )
 
@@ -396,14 +392,18 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
-        self.assertEqual(workflow.count("uses: ./.github/workflows/publish-snapshot.yml"), 2)
-        self.assertEqual(workflow.count("secrets: inherit"), 2)
-        self.assertRegex(workflow, r"publisher_ref: [0-9a-f]{40}")
-        self.assertIn("publisher: wot-src", workflow)
-        self.assertIn("publisher: wot-gui-assets", workflow)
+        self.assertRegex(
+            workflow,
+            r"uses: wotstat/wot-src/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
+        )
+        self.assertRegex(
+            workflow,
+            r"uses: wotstat/wot-gui-assets/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
+        )
+        self.assertNotIn("secrets: inherit", workflow)
+        self.assertFalse((ROOT / ".github/workflows/publish-snapshot.yml").exists())
         self.assertIn("publish-wot-gui-assets:", workflow)
         self.assertIn("publish-wot-src:", workflow)
-        self.assertIn("format('test/light-{0}', inputs.target)", workflow)
         self.assertIn("notify:", workflow)
         self.assertIn("needs.cleanup.outputs.deleted_count", workflow)
         self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
@@ -419,32 +419,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
-
-    def test_publisher_lifecycle_is_owned_by_the_orchestrator(self) -> None:
-        workflow = (ROOT / ".github/workflows/publish-snapshot.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("workflow_call:", workflow)
-        self.assertIn("environment: selectel", workflow)
-        self.assertIn(
-            "repository: ${{ format('{0}/{1}', github.repository_owner, "
-            "inputs.publisher) }}",
-            workflow,
-        )
-        self.assertIn("ref: ${{ inputs.publisher_ref }}", workflow)
-        self.assertIn("repositories: ${{ inputs.publisher }}", workflow)
-        self.assertIn("permission-contents: write", workflow)
-        self.assertIn(
-            "PUBLISHER_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}", workflow
-        )
-        self.assertIn(
-            "PUBLISHER_GITHUB_REPOSITORY: ${{ format('{0}/{1}', "
-            "github.repository_owner, inputs.publisher) }}",
-            workflow,
-        )
-        self.assertIn("wot-src-publisher", workflow)
-        self.assertIn("wot-gui-assets-publisher", workflow)
 
 
 if __name__ == "__main__":
