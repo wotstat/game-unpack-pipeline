@@ -52,7 +52,7 @@ target, client type, languages, Selectel location и два независимы
 
 - Единственная точка ручного запуска — `.github/workflows/ephemeral-snapshot.yml`.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
-  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`; location: `ru-7a`/`ru-9a`.
+  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`; location: `ru-9a`/`ru-7b`.
 - Каждый publisher можно независимо отключить. Если включены оба, они получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым

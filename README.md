@@ -52,7 +52,7 @@ snapshot до стадии `snapshot` и предоставляет только
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `EN` |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
-| `selectel_location` | `ru-7a` по умолчанию или `ru-9a` |
+| `selectel_location` | `ru-9a` по умолчанию или `ru-7b` |
 
 Publisher можно независимо отключить для ручного рерана. Если отключить оба, workflow только
 соберёт и проверит snapshot, после чего удалит VM. Production flavor зафиксирован как HighFreq
