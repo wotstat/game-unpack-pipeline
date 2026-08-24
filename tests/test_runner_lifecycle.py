@@ -34,12 +34,16 @@ class ResourceIdentityTests(unittest.TestCase):
         )
 
         builder = identity.runner("builder", "wotstat/game-unpack-pipeline")
+        assets = identity.runner("wot-gui-assets", "wotstat/wot-gui-assets")
         source = identity.runner("wot-src", "wotstat/wot-src")
         self.assertEqual(builder.name, "gup-manual-123456-2-builder")
         self.assertEqual(builder.label, "gup-manual-123456-2-builder")
         self.assertEqual(builder.repository, "wotstat/game-unpack-pipeline")
+        self.assertEqual(assets.name, "gup-manual-123456-2-wot-gui-assets")
+        self.assertEqual(assets.repository, "wotstat/wot-gui-assets")
         self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
         self.assertEqual(source.repository, "wotstat/wot-src")
+        self.assertEqual(builder.scope_label, assets.scope_label)
         self.assertEqual(builder.scope_label, source.scope_label)
 
     def test_rejects_unsafe_instance_keys(self) -> None:
@@ -123,6 +127,7 @@ class OwnershipTests(unittest.TestCase):
 class CloudConfigTests(unittest.TestCase):
     def test_jit_configs_are_encoded_and_runners_use_isolated_users(self) -> None:
         template = (ROOT / "scripts" / "bootstrap-actions-runner.sh").read_text()
+        assets_jit_config = "sensitive-assets-jit-configuration"
         builder_jit_config = "sensitive-builder-jit-configuration"
         source_jit_config = "sensitive-source-jit-configuration"
         cloud_config = lifecycle.render_cloud_config(
@@ -135,12 +140,14 @@ class CloudConfigTests(unittest.TestCase):
             runner_version="2.999.0",
             runner_jit_configs={
                 "builder": builder_jit_config,
+                "wot-gui-assets": assets_jit_config,
                 "wot-src": source_jit_config,
             },
         )
 
         self.assertTrue(cloud_config.startswith("#cloud-config\n"))
         self.assertNotIn(builder_jit_config, cloud_config)
+        self.assertNotIn(assets_jit_config, cloud_config)
         self.assertNotIn(source_jit_config, cloud_config)
         encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
         self.assertIsNotNone(encoded)
@@ -150,11 +157,17 @@ class CloudConfigTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn(
+            "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG=sensitive-assets-jit-configuration",
+            bootstrap,
+        )
+        self.assertIn(
             "WOT_SRC_RUNNER_JIT_CONFIG=sensitive-source-jit-configuration",
             bootstrap,
         )
-        self.assertIn("unset BUILDER_RUNNER_JIT_CONFIG WOT_SRC_RUNNER_JIT_CONFIG", bootstrap)
+        self.assertIn("WOT_GUI_ASSETS_RUNNER_JIT_CONFIG", bootstrap)
+        self.assertIn("unset \\\n", bootstrap)
         self.assertIn("User=snapshot-builder", bootstrap)
+        self.assertIn("User=wot-gui-assets-publisher", bootstrap)
         self.assertIn("User=wot-src-publisher", bootstrap)
         self.assertIn(
             "apt-get install --yes --no-install-recommends git",
@@ -163,6 +176,11 @@ class CloudConfigTests(unittest.TestCase):
         self.assertIn(
             "install -d -o snapshot-builder -g snapshot-builder -m 0700 \\\n"
             "  /run/actions-runner/builder",
+            bootstrap,
+        )
+        self.assertIn(
+            "install -d -o wot-gui-assets-publisher -g wot-gui-assets-publisher -m 0700 \\\n"
+            "  /run/actions-runner/wot-gui-assets",
             bootstrap,
         )
         self.assertIn(
@@ -176,6 +194,7 @@ class CloudConfigTests(unittest.TestCase):
         )
         self.assertNotIn('/run/actions-runner-${role}-jit-config', bootstrap)
         self.assertIn("snapshot-builder ALL=(ALL) NOPASSWD: ALL", bootstrap)
+        self.assertNotIn("wot-gui-assets-publisher ALL=", bootstrap)
         self.assertNotIn("wot-src-publisher ALL=", bootstrap)
         self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
         self.assertNotIn("set -x", bootstrap)
@@ -290,14 +309,14 @@ class WorkflowDispatchTests(unittest.TestCase):
         environment = {
             "GITHUB_API_URL": "https://api.github.com",
             "GITHUB_APP_TOKEN": "test-token",
-            "WOT_SRC_REPOSITORY": "wotstat/wot-src",
+            "PUBLICATION_REPOSITORY": "wotstat/wot-src",
         }
 
         with (
             patch.dict(os.environ, environment, clear=True),
             patch.object(lifecycle, "http_json", side_effect=responses) as request,
         ):
-            lifecycle.dispatch_wot_src(arguments)
+            lifecycle.dispatch_publication(arguments)
 
         dispatch_call = request.call_args_list[0]
         self.assertEqual(dispatch_call.args[0], "POST")
@@ -343,26 +362,32 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
 
-    def test_provisions_and_cleans_builder_and_wot_src_runners(self) -> None:
+    def test_provisions_cleans_and_dispatches_both_publishers(self) -> None:
         workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("builder_runner_label", workflow)
+        self.assertIn("wot_gui_assets_runner_label", workflow)
         self.assertIn("wot_src_runner_label", workflow)
+        self.assertIn("WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets", workflow)
         self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", workflow)
         self.assertIn("permission-actions: write", workflow)
-        self.assertIn("game-unpack-pipeline,wot-src", workflow)
+        self.assertIn("game-unpack-pipeline,wot-src,wot-gui-assets", workflow)
         self.assertIn("--builder-runner-id", workflow)
+        self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
-        self.assertIn("dispatch-wot-src", workflow)
+        self.assertEqual(workflow.count("dispatch-publication"), 2)
+        self.assertIn("publish-wot-gui-assets:", workflow)
+        self.assertIn("publish-wot-src:", workflow)
         self.assertIn("test/light-${{ inputs.target }}", workflow)
         self.assertIn("FULL_PUBLICATION_BRANCH: ${{ inputs.target }}", workflow)
 
         reconciler = (
             ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("game-unpack-pipeline,wot-src", reconciler)
+        self.assertIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
+        self.assertIn("WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets", reconciler)
         self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", reconciler)
         self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
 

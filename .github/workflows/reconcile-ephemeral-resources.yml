@@ -50,7 +50,7 @@ jobs:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: game-unpack-pipeline,wot-src
+          repositories: game-unpack-pipeline,wot-src,wot-gui-assets
           permission-administration: write
 
       - name: Install OpenStack CLI
@@ -59,6 +59,7 @@ jobs:
       - name: Reconcile resources by deterministic ownership markers
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets
           WOT_SRC_REPOSITORY: wotstat/wot-src
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}

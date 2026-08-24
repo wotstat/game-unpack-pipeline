@@ -629,14 +629,17 @@ def render_cloud_config(
     runner_version: str,
     runner_jit_configs: Mapping[str, str],
 ) -> str:
-    expected_roles = {"builder", "wot-src"}
+    expected_roles = {"builder", "wot-gui-assets", "wot-src"}
     if set(runner_jit_configs) != expected_roles:
-        raise LifecycleError("cloud config requires builder and wot-src JIT configurations")
+        raise LifecycleError(
+            "cloud config requires builder, wot-src and wot-gui-assets JIT configurations"
+        )
     assignments = {
         "RUNNER_DOWNLOAD_URL": runner_download_url,
         "RUNNER_SHA256": runner_sha256,
         "RUNNER_VERSION": runner_version,
         "BUILDER_RUNNER_JIT_CONFIG": runner_jit_configs["builder"],
+        "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wot-gui-assets"],
         "WOT_SRC_RUNNER_JIT_CONFIG": runner_jit_configs["wot-src"],
     }
     preamble = "\n".join(
@@ -1094,8 +1097,12 @@ def provision(arguments: argparse.Namespace) -> None:
     identity = build_identity(arguments.instance_key)
     app_token = require_environment("GITHUB_APP_TOKEN")
     public_token = require_environment("GITHUB_PUBLIC_TOKEN")
+    wot_gui_assets_repository = validate_repository(
+        require_environment("WOT_GUI_ASSETS_REPOSITORY")
+    )
     wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
     builder_runner = identity.runner("builder", identity.repository)
+    wot_gui_assets_runner = identity.runner("wot-gui-assets", wot_gui_assets_repository)
     wot_src_runner = identity.runner("wot-src", wot_src_repository)
     add_mask(config.password)
 
@@ -1103,6 +1110,8 @@ def provision(arguments: argparse.Namespace) -> None:
         "resource_key": identity.instance_key,
         "builder_runner_name": builder_runner.name,
         "builder_runner_label": builder_runner.label,
+        "wot_gui_assets_runner_name": wot_gui_assets_runner.name,
+        "wot_gui_assets_runner_label": wot_gui_assets_runner.label,
         "wot_src_runner_name": wot_src_runner.name,
         "wot_src_runner_label": wot_src_runner.label,
         "runner_scope_label": identity.scope_label,
@@ -1144,6 +1153,13 @@ def provision(arguments: argparse.Namespace) -> None:
         write_output("builder_runner_id", builder_runner_id)
         print(f"Builder JIT runner reserved: {builder_runner_id}")
 
+        wot_gui_assets_runner_id, wot_gui_assets_jit_config = create_jit_runner(
+            wot_gui_assets_runner, app_token
+        )
+        jit_configs[wot_gui_assets_runner.role] = wot_gui_assets_jit_config
+        write_output("wot_gui_assets_runner_id", wot_gui_assets_runner_id)
+        print(f"wot-gui-assets JIT runner reserved: {wot_gui_assets_runner_id}")
+
         wot_src_runner_id, wot_src_jit_config = create_jit_runner(
             wot_src_runner, app_token
         )
@@ -1182,6 +1198,12 @@ def provision(arguments: argparse.Namespace) -> None:
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
         )
         wait_for_runner_online(
+            wot_gui_assets_runner,
+            wot_gui_assets_runner_id,
+            app_token,
+            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+        )
+        wait_for_runner_online(
             wot_src_runner,
             wot_src_runner_id,
             app_token,
@@ -1210,8 +1232,12 @@ def cleanup(arguments: argparse.Namespace) -> None:
         run_attempt=arguments.run_attempt,
     )
     app_token = require_environment("GITHUB_APP_TOKEN")
+    wot_gui_assets_repository = validate_repository(
+        require_environment("WOT_GUI_ASSETS_REPOSITORY")
+    )
     wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
     builder_runner = identity.runner("builder", identity.repository)
+    wot_gui_assets_runner = identity.runner("wot-gui-assets", wot_gui_assets_repository)
     wot_src_runner = identity.runner("wot-src", wot_src_repository)
     add_mask(config.password)
 
@@ -1235,6 +1261,14 @@ def cleanup(arguments: argparse.Namespace) -> None:
             "GitHub wot-src runner registration",
             lambda: delete_github_runners(
                 wot_src_runner, app_token, arguments.wot_src_runner_id
+            ),
+        ),
+        (
+            "GitHub wot-gui-assets runner registration",
+            lambda: delete_github_runners(
+                wot_gui_assets_runner,
+                app_token,
+                arguments.wot_gui_assets_runner_id,
             ),
         ),
         (
@@ -1315,14 +1349,15 @@ def watch_queue(arguments: argparse.Namespace) -> None:
     write_output("timed_out", "true")
 
 
-def dispatch_wot_src(arguments: argparse.Namespace) -> None:
+def dispatch_publication(arguments: argparse.Namespace) -> None:
     token = require_environment("GITHUB_APP_TOKEN")
-    repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
+    repository = validate_repository(require_environment("PUBLICATION_REPOSITORY"))
+    publisher_name = repository.rsplit("/", 1)[1]
     add_mask(token)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", arguments.workflow):
-        raise LifecycleError("wot-src workflow filename is invalid")
+        raise LifecycleError("publisher workflow filename is invalid")
     if arguments.ref != "main":
-        raise LifecycleError("wot-src publisher workflow must be dispatched from main")
+        raise LifecycleError("publisher workflow must be dispatched from main")
     if arguments.profile not in {"full", "light"}:
         raise LifecycleError("snapshot profile must be full or light")
     if not os.path.isabs(arguments.snapshot_path):
@@ -1356,16 +1391,20 @@ def dispatch_wot_src(arguments: argparse.Namespace) -> None:
         expected_statuses=(200,),
     )
     if not isinstance(response, dict):
-        raise LifecycleError("wot-src dispatch returned an invalid response")
+        raise LifecycleError(f"{publisher_name} dispatch returned an invalid response")
     run_id = response.get("workflow_run_id")
     if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
-        raise LifecycleError("wot-src dispatch did not return a workflow run ID")
+        raise LifecycleError(f"{publisher_name} dispatch did not return a workflow run ID")
     run_url = str(response.get("html_url", ""))
-    write_output("wot_src_run_id", run_id)
+    write_output("publication_run_id", run_id)
     if run_url:
-        write_output("wot_src_run_url", run_url)
-    print(f"Dispatched wot-src workflow run {run_id}")
-    append_summary(f"- wot-src run: [{run_id}]({run_url})" if run_url else f"- wot-src run: `{run_id}`")
+        write_output("publication_run_url", run_url)
+    print(f"Dispatched {publisher_name} workflow run {run_id}")
+    append_summary(
+        f"- {publisher_name} run: [{run_id}]({run_url})"
+        if run_url
+        else f"- {publisher_name} run: `{run_id}`"
+    )
 
     deadline = time.monotonic() + arguments.timeout_seconds
     last_status = ""
@@ -1377,17 +1416,18 @@ def dispatch_wot_src(arguments: argparse.Namespace) -> None:
             github_api=True,
         )
         if not isinstance(run, dict) or run.get("id") != run_id:
-            raise LifecycleError("wot-src run lookup returned an unexpected run")
+            raise LifecycleError(f"{publisher_name} run lookup returned an unexpected run")
         status = str(run.get("status", "unknown"))
         if status != last_status:
-            print(f"wot-src run {run_id}: {status}")
+            print(f"{publisher_name} run {run_id}: {status}")
             last_status = status
         if status == "completed":
             conclusion = str(run.get("conclusion", ""))
-            append_summary(f"- wot-src conclusion: `{conclusion}`")
+            append_summary(f"- {publisher_name} conclusion: `{conclusion}`")
             if conclusion != "success":
                 raise LifecycleError(
-                    f"wot-src workflow run {run_id} completed with {conclusion or 'no conclusion'}"
+                    f"{publisher_name} workflow run {run_id} completed with "
+                    f"{conclusion or 'no conclusion'}"
                 )
             return
         time.sleep(10)
@@ -1399,7 +1439,7 @@ def dispatch_wot_src(arguments: argparse.Namespace) -> None:
         github_api=True,
         expected_statuses=(202, 409),
     )
-    raise LifecycleError(f"timed out waiting for wot-src workflow run {run_id}")
+    raise LifecycleError(f"timed out waiting for {publisher_name} workflow run {run_id}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1415,6 +1455,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--run-id")
     cleanup_parser.add_argument("--run-attempt")
     cleanup_parser.add_argument("--builder-runner-id", default="")
+    cleanup_parser.add_argument("--wot-gui-assets-runner-id", default="")
     cleanup_parser.add_argument("--wot-src-runner-id", default="")
     cleanup_parser.add_argument("--server-id", default="")
     cleanup_parser.add_argument("--port-id", default="")
@@ -1428,7 +1469,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--timeout-seconds", type=int, default=600)
     watch_parser.set_defaults(handler=watch_queue)
 
-    dispatch_parser = subparsers.add_parser("dispatch-wot-src")
+    dispatch_parser = subparsers.add_parser("dispatch-publication")
     dispatch_parser.add_argument("--workflow", default="publish-snapshot.yml")
     dispatch_parser.add_argument("--ref", default="main")
     dispatch_parser.add_argument("--runner-label", required=True)
@@ -1439,7 +1480,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch_parser.add_argument("--branch", required=True)
     dispatch_parser.add_argument("--profile", choices=("full", "light"), required=True)
     dispatch_parser.add_argument("--timeout-seconds", type=int, default=3600)
-    dispatch_parser.set_defaults(handler=dispatch_wot_src)
+    dispatch_parser.set_defaults(handler=dispatch_publication)
     return parser
 
 

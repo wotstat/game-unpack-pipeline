@@ -41,24 +41,27 @@ WGUS/LSTUS обнаружил новую версию
 
 ## Ближайшая итерация
 
-Сейчас нужен light вертикальный сценарий сборки и публикации `wot-src`:
+Сейчас нужен единый light/full сценарий сборки с параллельной публикацией `wot-src` и
+`wot-gui-assets`:
 
 1. Пользователь вручную запускает workflow кнопкой (`workflow_dispatch`).
 2. Workflow создаёт один временный сервер в Selectel.
-3. Сервер регистрирует два изолированных ephemeral self-hosted GitHub Actions runner: builder в
-   `game-unpack-pipeline` и publisher в `wot-src`.
+3. Сервер регистрирует три изолированных ephemeral self-hosted GitHub Actions runner: builder в
+   `game-unpack-pipeline` и publisher в `wot-src` и `wot-gui-assets`.
 4. Builder workload вызывает versioned reusable workflow из `wotstat/game-snapshot-builder`.
 5. Builder с `--light --languages ALL` выполняет стадии от `resolve` до `snapshot`, публикует
    Actions summary, структурированную статистику и небольшие diagnostic logs. Snapshot остаётся
    на локальном диске VM.
-6. GitHub-hosted orchestration job вызывает workflow из `wot-src@main`. Второй runner независимо
-   проверяет snapshot и публикует `py`, `xml`, `po`, AS3, stubs, все WG locale overlays и base
-   Gameface в временную pure-data ветку `test/light-wot-eu`.
-7. После выполнения удаляются обе runner registration, сервер и созданные вместе с ним временные
-   ресурсы. Очистка должна учитываться и для неуспешного запуска.
+6. Две GitHub-hosted orchestration job параллельно вызывают workflows из `wot-src@main` и
+   `wot-gui-assets@main`. Publisher независимо проверяют один sealed snapshot. `wot-src` публикует
+   `py`, `xml`, `po`, AS3, stubs и Gameface, а `wot-gui-assets` — содержимое `res/gui` кроме
+   `.xml` и `.py`; оба сохраняют WG locale overlays по общему правилу.
+7. Light snapshot публикуется в `test/light-<target>`, full snapshot — в production data-ветку
+   региона. Version commit и служебные метаданные должны совпадать по формату в обоих репозиториях.
+8. После выполнения удаляются все три runner registration, сервер и созданные вместе с ним
+   временные ресурсы. Очистка должна учитывать неуспешный запуск любого publisher.
 
-На этой итерации не нужны: cron, отдельный watcher обновлений, `wot-assets`, production data
-branches, S3, БД и GitHub Pages.
+На этой итерации не нужны: cron, отдельный watcher обновлений, S3, БД и GitHub Pages.
 
 Это интеграционная итерация с участием пользователя. Не угадывать Selectel project/region/image,
 GitHub scope, способ аутентификации и значения секретов. Реальные облачные операции выполнять
@@ -70,8 +73,6 @@ GitHub scope, способ аутентификации и значения се
 
 - запускать проверку версий по расписанию для поддерживаемых клиентов/регионов;
 - на каждую новую версию запускать `game-snapshot-builder` на отдельном временном runner;
-- выгружать изображения и GUI в один публичный GitHub-репозиторий, а скрипты и текстовые данные —
-  в другой;
 - добавлять processors как отдельные шаги workflow для публикации в S3 и БД;
 - фиксировать в этом репозитории версию, время и ход обработки;
 - строить GitHub Pages со статусом каждой версии каждого клиента: в процессе, успешно или с

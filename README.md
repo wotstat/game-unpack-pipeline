@@ -2,17 +2,18 @@
 
 Публичный оркестратор обработки клиентов World of Tanks и «Мира танков».
 
-Текущая интеграционная итерация проверяет вертикальный сценарий до публикации исходников:
+Текущая интеграционная итерация проверяет вертикальный сценарий до параллельной публикации
+исходников и GUI-ресурсов:
 
 ```text
 workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
-  → два repository-level GitHub Actions JIT runner на одной VM
+  → три repository-level GitHub Actions JIT runner на одной VM
   → light, benchmark или full GameSnapshot через `game-snapshot-builder@v0.3.16`
-  → native workflow `wotstat/wot-src@main`
-  → проверка snapshot и commit в временную pure-data ветку
-  → удаление обоих runner, VM, direct public IP и security group
+  → параллельные native workflow `wotstat/wot-src@main` и `wotstat/wot-gui-assets@main`
+  → независимая проверка snapshot и version commit в две pure-data ветки
+  → удаление трёх runner, VM, direct public IP и security group
 ```
 
 Несколько ручных запусков независимы: имена, labels и облачные ресурсы включают уникальные
@@ -22,7 +23,7 @@ workflow_dispatch
 
 - [`ephemeral-light-snapshot.yml`](.github/workflows/ephemeral-light-snapshot.yml) — ручная точка
   входа и lifecycle одной единицы работы:
-  `provision → workload + queue watchdog → publish-wot-src → cleanup`.
+  `provision → workload + queue watchdog → publish-wot-src + publish-wot-gui-assets → cleanup`.
   Input `light` выбирает минимальный smoke-сценарий, `benchmark_percent` — детерминированную
   неполную performance-выборку, а `until` ограничивает последнюю запускаемую стадию. Benchmark
   нельзя довести до production snapshot. Каждая стадия выполняется отдельным видимым GitHub step;
@@ -40,19 +41,20 @@ workflow_dispatch
 Builder workload вызывает versioned reusable workflow из публичного
 [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder). Все стадии от
 `resolve` до `snapshot` остаются одной job: JIT runner выполняет не более одного job, а стадии
-отображаются отдельными GitHub Actions steps. После seal управляющая GitHub-hosted job вызывает
-`publish-snapshot.yml` из ветки `main` репозитория `wot-src` и ждёт конкретный возвращённый Run ID.
-В light-режиме данные попадают в `test/light-<target>`, а полный snapshot — в production-ветку
-`<target>`. Snapshot не загружается через Actions: оба workload читают один локальный путь на VM.
+отображаются отдельными GitHub Actions steps. После seal две управляющие GitHub-hosted job
+параллельно вызывают `publish-snapshot.yml` из веток `main` репозиториев `wot-src` и
+`wot-gui-assets`, затем ждут конкретные возвращённые Run ID. В light-режиме данные попадают в
+`test/light-<target>`, а полный snapshot — в production-ветку `<target>`. Snapshot не загружается
+через Actions: builder и оба publisher читают один локальный путь на VM.
 В diagnostic artifact попадают только небольшие JSON reports, stderr-логи стадий и performance
 telemetry.
 
 ## Гарантии lifecycle
 
-- VM получает только две короткоживущие JIT-конфигурации. Selectel credentials и
+- VM получает только три короткоживущие JIT-конфигурации. Selectel credentials и
   private key GitHub App на VM не передаются.
-- Builder и publisher работают под разными Unix-пользователями и в разных runner work
-  directories. У publisher нет `sudo`; после seal ему открывается traversal только к immutable
+- Builder и оба publisher работают под разными Unix-пользователями и в разных runner work
+  directories. У publisher нет `sudo`; после seal им открывается traversal только к immutable
   snapshot, но не к cache, checkpoints или builder work directory.
 - Runner скачивается с официального GitHub release, а архив проверяется по опубликованному
   SHA-256 digest.

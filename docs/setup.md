@@ -32,17 +32,17 @@ network volume.
 3. Callback URL и OAuth не нужны.
 4. Repository permissions → **Administration: Read and write** — создание и удаление JIT runner.
 5. Repository permissions → **Actions: Read and write** — dispatch и ожидание native workflow в
-   `wot-src`.
+   `wot-src` и `wot-gui-assets`.
 6. Установить App в организации `wotstat`, выбрав **Only select repositories**:
-   `game-unpack-pipeline` и `wot-src`.
+   `game-unpack-pipeline`, `wot-src` и `wot-gui-assets`.
 7. Скопировать **Client ID** приложения. Числовой App ID для
    `actions/create-github-app-token@v3` не нужен.
 8. Сгенерировать private key и сохранить весь PEM, включая строки `BEGIN...` и `END...`.
 
 Workflows выпускают минимально scoped короткоживущие installation tokens через официальный
-`actions/create-github-app-token`: provision/cleanup получают Administration для двух репозиториев,
-а dispatch job — только Actions для `wot-src`. Private key не покидает GitHub-hosted управляющие
-jobs.
+`actions/create-github-app-token`: provision/cleanup получают Administration для трёх
+репозиториев, а каждая dispatch job — только Actions для своего data-репозитория. Private key не
+покидает GitHub-hosted управляющие jobs.
 
 ## 3. GitHub Environment
 
@@ -96,15 +96,16 @@ OpenStack CLI разрешает передавать образ по уника
 
 1. `Provision` проверяет authentication, image, flavor, zone и direct-IP quota.
 2. Создаёт egress-only security group и direct-public port.
-3. Создаёт builder JIT runner в `game-unpack-pipeline`, publisher JIT runner в `wot-src` и VM.
-4. Ждёт `VM ACTIVE` и оба `runner online`.
+3. Создаёт builder JIT runner в `game-unpack-pipeline`, publisher JIT runner в `wot-src` и
+   `wot-gui-assets`, затем создаёт VM.
+4. Ждёт `VM ACTIVE` и все три `runner online`.
 5. `Workload` устанавливает runtime и выполняет выбранный light или full pipeline от `resolve` до
    `snapshot` видимыми Actions steps.
-6. Builder открывает второму Unix-пользователю traversal к sealed snapshot и возвращает его ID,
-   абсолютный путь и SHA-256 descriptor.
-7. Pipeline вызывает `wot-src/.github/workflows/publish-snapshot.yml@main`, ждёт точный внешний Run
-   ID и получает commit в `test/light-wot-eu`.
-8. `Cleanup` удаляет обе runner registration, VM, direct-public port и security group.
+6. Builder открывает двум publisher Unix-пользователям traversal к sealed snapshot и возвращает
+   его ID, абсолютный путь и SHA-256 descriptor.
+7. Pipeline параллельно вызывает `publish-snapshot.yml@main` в `wot-src` и `wot-gui-assets`, ждёт
+   оба точных внешних Run ID и получает commits в `test/light-wot-eu` каждого репозитория.
+8. `Cleanup` удаляет все три runner registration, VM, direct-public port и security group.
 9. После завершения отдельный `Reconcile ephemeral runner cleanup` подтверждает, что остаточных
    ресурсов нет.
 
