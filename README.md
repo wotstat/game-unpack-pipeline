@@ -16,8 +16,8 @@ workflow_dispatch
   → три repository-level GitHub Actions JIT runner на одной VM
   → light, benchmark или full pipeline через game-snapshot-builder@v0.3.16
   → sealed GameSnapshot на локальном диске VM
-  → параллельные workflow wot-src@main и wot-gui-assets@main
-  → независимая проверка и обновление двух pure-data веток
+  → выбранные workflow wot-src@main и/или wot-gui-assets@main
+  → независимая проверка и обновление выбранных pure-data веток
   → удаление runner registrations, VM, direct public IP и security group
   → итоговый Telegram-отчёт со статусами builder, publisher и cleanup
   → независимая повторная очистка
@@ -51,8 +51,8 @@ publisher с `cancel-in-progress: false`.
 
 | Сценарий | `light` | `benchmark_percent` | `until` | Результат |
 | --- | ---: | ---: | --- | --- |
-| Smoke + publish | `true` | `0` | `snapshot` | Sealed light snapshot и две ветки `test/light-<target>` |
-| Production publish | `false` | `0` | `snapshot` | Sealed full snapshot и две production-ветки `<target>` |
+| Smoke + publish | `true` | `0` | `snapshot` | Sealed light snapshot и выбранные ветки `test/light-<target>` |
+| Production publish | `false` | `0` | `snapshot` | Sealed full snapshot и выбранные production-ветки `<target>` |
 | Benchmark | `false` | `1`–`99` | До `finalize-readable` | Детерминированная неполная выборка, telemetry, без snapshot и publish |
 | Диагностика стадии | По задаче | `0` | Любая стадия до `snapshot` | Checkpoints и diagnostics, без publish |
 
@@ -70,6 +70,8 @@ benchmark до `snapshot`: неполную выборку нельзя случ
 | `benchmark_percent` | `0` отключает benchmark; `1`–`99` выбирает репрезентативную долю данных |
 | `until` | Последняя стадия от `resolve` до `snapshot` |
 | `workers` | `0` выбирает число CPU автоматически с ограничением 32; иначе `1`–`32` |
+| `publish_wot_src` | Запускает `Publish wot-src`; по умолчанию включён |
+| `publish_wot_gui_assets` | Запускает `Publish wot-gui-assets`; по умолчанию включён |
 | `runner_profile` | `configured-standard` или `highfreq-16c-32g` |
 | `selectel_location` | `ru-7a` по умолчанию или `ru-9a` |
 
@@ -92,11 +94,11 @@ region/zone/flavor через dispatch не принимаются.
    telemetry.
 4. `Queue watchdog` отменяет run и удаляет инфраструктуру, если builder workload не получил runner
    за 10 минут.
-5. Если builder вернул `snapshot_path`, две GitHub-hosted orchestration jobs параллельно вызывают
-   `publish-snapshot.yml@main` в data-репозиториях и ждут именно возвращённые GitHub Run ID.
-6. Оба publisher читают один sealed snapshot с локального диска VM, независимо проверяют identity,
-   descriptor и payload, после чего обновляют свои data-ветки. Большой snapshot не передаётся через
-   Actions artifacts.
+5. Если builder вернул `snapshot_path`, каждая включённая GitHub-hosted orchestration job вызывает
+   `publish-snapshot.yml@main` в своём data-репозитории и ждёт именно возвращённый GitHub Run ID.
+6. Включённые publisher читают один sealed snapshot с локального диска VM, независимо проверяют
+   identity, descriptor и payload, после чего обновляют свои data-ветки. Большой snapshot не
+   передаётся через Actions artifacts.
 7. `Cleanup` с `always()` удаляет три runner registration и ресурсы Selectel даже после ошибки
    workload или любого publisher.
 8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, snapshot ID, число удалённых

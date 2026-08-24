@@ -410,6 +410,26 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("until: ${{ inputs.until }}", workflow)
         self.assertIn("profile_stages: true", workflow)
+        self.assertIn(
+            "      publish_wot_src:\n"
+            "        description: Publish the snapshot to wot-src\n"
+            "        required: true\n"
+            "        default: true\n"
+            "        type: boolean",
+            workflow,
+        )
+        self.assertIn(
+            "      publish_wot_gui_assets:\n"
+            "        description: Publish the snapshot to wot-gui-assets\n"
+            "        required: true\n"
+            "        default: true\n"
+            "        type: boolean",
+            workflow,
+        )
+        self.assertIn("if: inputs.publish_wot_src &&", workflow)
+        self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
+        self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
+        self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("default: configured-standard", workflow)
         self.assertIn("default: ru-7a", workflow)
         self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)

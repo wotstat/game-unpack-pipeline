@@ -65,6 +65,16 @@ on:
         required: true
         default: 0
         type: number
+      publish_wot_src:
+        description: Publish the snapshot to wot-src
+        required: true
+        default: true
+        type: boolean
+      publish_wot_gui_assets:
+        description: Publish the snapshot to wot-gui-assets
+        required: true
+        default: true
+        type: boolean
       runner_profile:
         description: Selectel runner CPU profile (HighFreq is available only in ru-9a)
         required: true
@@ -246,7 +256,7 @@ jobs:
 
   publish-wot-src:
     name: Publish wot-src (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
+    if: inputs.publish_wot_src && needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
     needs:
       - provision
       - workload
@@ -304,7 +314,7 @@ jobs:
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
+    if: inputs.publish_wot_gui_assets && needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
     needs:
       - provision
       - workload
@@ -400,9 +410,11 @@ jobs:
           PROVISION_RESULT: ${{ needs.provision.result }}
           BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
           WOT_GUI_ASSETS_PUBLISH_RESULT: ${{ needs.publish-wot-gui-assets.result }}
+          WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_gui_assets && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
           WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets
           WOT_SRC_PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
+          WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
           WOT_SRC_REPOSITORY: wotstat/wot-src
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
@@ -418,8 +430,8 @@ jobs:
           diagnostics=()
           if [[ "${PROVISION_RESULT}" != success \
             || "${WORKLOAD_RESULT}" != success \
-            || "${WOT_GUI_ASSETS_PUBLISH_RESULT}" != success \
-            || "${WOT_SRC_PUBLISH_RESULT}" != success ]]; then
+            || "${WOT_GUI_ASSETS_PUBLISH_RESULT}" != "${WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT}" \
+            || "${WOT_SRC_PUBLISH_RESULT}" != "${WOT_SRC_PUBLISH_EXPECTED_RESULT}" ]]; then
             diagnostics+=(--diagnostics)
           fi
           python3 scripts/runner_lifecycle.py cleanup \
@@ -462,11 +474,11 @@ jobs:
             Provision: ${{ needs.provision.result }}
             Builder: ${{ needs.workload.result }}
             Queue watchdog: ${{ needs.queue-watchdog.result }}
-            wot-src: ${{ needs.publish-wot-src.result }}
-            wot-gui-assets: ${{ needs.publish-wot-gui-assets.result }}
+            wot-src: ${{ inputs.publish_wot_src && needs.publish-wot-src.result || 'disabled' }}
+            wot-gui-assets: ${{ inputs.publish_wot_gui_assets && needs.publish-wot-gui-assets.result || 'disabled' }}
             Cleanup: ${{ needs.cleanup.result }} (deleted: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }})
             Snapshot: ${{ needs.workload.outputs.snapshot_id || 'not created' }}
 
-            wot-src run: ${{ needs.publish-wot-src.outputs.run_url || 'not started' }}
-            wot-gui-assets run: ${{ needs.publish-wot-gui-assets.outputs.run_url || 'not started' }}
+            wot-src run: ${{ !inputs.publish_wot_src && 'disabled' || needs.publish-wot-src.outputs.run_url || 'not started' }}
+            wot-gui-assets run: ${{ !inputs.publish_wot_gui_assets && 'disabled' || needs.publish-wot-gui-assets.outputs.run_url || 'not started' }}
             Pipeline run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

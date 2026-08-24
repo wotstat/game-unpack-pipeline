@@ -153,10 +153,16 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 | `benchmark_percent` | `0` |
 | `until` | `snapshot` |
 | `workers` | `0` |
+| `publish_wot_src` | `true` |
+| `publish_wot_gui_assets` | `true` |
 | `runner_profile` | `configured-standard` |
 | `selectel_location` | `ru-7a` |
 
 Такой run собирает sealed light snapshot и публикует обе ветки `test/light-wot-eu`.
+
+Publisher можно включать независимо для каждого run. Например, чтобы обновить только `wot-src`,
+оставить `publish_wot_src: true` и установить `publish_wot_gui_assets: false`. Оба переключателя
+включены по умолчанию; если отключить оба, workflow соберёт snapshot без публикации.
 
 Для production publish установить `light: false`, оставить `benchmark_percent: 0` и
 `until: snapshot`. Результат попадёт в production data-ветку `<target>` обоих репозиториев.
@@ -183,10 +189,11 @@ run на нужной стадии через `until`. Значение `workers
 5. `Workload` вызывает `game-snapshot-builder@v0.3.16`. Стадии от `resolve` до выбранного `until`
    видны отдельными Actions steps; metrics и небольшие diagnostic files загружаются как artifact.
 6. После seal builder возвращает snapshot ID, абсолютный path и SHA-256 canonical descriptor.
-7. `Publish wot-src` и `Publish wot-gui-assets` параллельно dispatch-ят `publish-snapshot.yml@main`,
-   передают одинаковый snapshot contract и ждут конкретные внешние Run ID.
-8. Каждый publisher независимо проверяет snapshot и либо создаёт version commit, либо успешно
-   завершает повторную публикацию как `unchanged`.
+7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно dispatch-ят
+   `publish-snapshot.yml@main`, передают одинаковый snapshot contract и ждут конкретные внешние
+   Run ID. Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
+8. Каждый включённый publisher независимо проверяет snapshot и либо создаёт version commit, либо
+   успешно завершает повторную публикацию как `unchanged`.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
 10. `Telegram report` отправляет итоговые статусы и ссылки после завершения cleanup.
 11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в

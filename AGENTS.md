@@ -21,8 +21,8 @@ manual workflow_dispatch
   → publisher JIT runner в wot-gui-assets
   → game-snapshot-builder@v0.3.16 на builder runner
   → sealed snapshot на локальном диске VM
-  → параллельный dispatch publish-snapshot.yml@main в оба data-репозитория
-  → light publish в test/light-<target> или full publish в <target>
+  → параллельный dispatch publish-snapshot.yml@main в выбранные data-репозитории
+  → выбранный light publish в test/light-<target> или full publish в <target>
   → cleanup с always()
   → итоговый Telegram-отчёт
   → отдельный workflow_run reconciler в ru-7 и ru-9
@@ -31,8 +31,9 @@ manual workflow_dispatch
 
 Основной workflow поддерживает light, full, benchmark и остановку на выбранной стадии. Benchmark
 является неполной выборкой, не может дойти до `snapshot` и не публикуется. Publisher jobs создаются
-только когда reusable workflow вернул непустой `snapshot_path`. Light и benchmark взаимно
-исключаются; `ALL` нельзя смешивать с отдельными кодами языков.
+только когда reusable workflow вернул непустой `snapshot_path` и включён соответствующий
+`publish_wot_src`/`publish_wot_gui_assets`. Оба publisher включены по умолчанию. Light и benchmark
+взаимно исключаются; `ALL` нельзя смешивать с отдельными кодами языков.
 
 ## Границы компонентов и локальные зеркала
 
@@ -59,8 +60,9 @@ manual workflow_dispatch
 - Поддерживаются targets `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru` и
   `mt-public-test`, client types `sd`/`hd`, список языков или `ALL`.
 - Light snapshot публикуется только в `test/light-<target>`. Full snapshot публикуется в
-  production data-ветку `<target>`. Оба publisher должны получить одинаковые identity, target,
-  profile и descriptor digest.
+  production data-ветку `<target>`. Каждый publisher можно независимо отключить для конкретного
+  run; если включены оба, они должны получить одинаковые identity, target, profile и descriptor
+  digest.
 - Publisher workflow всегда dispatch-ится из `main`. Оркестратор ждёт точный Run ID, возвращённый
   GitHub API, а не ищет run по времени или имени.
 - Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
