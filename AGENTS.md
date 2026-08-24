@@ -24,7 +24,9 @@ manual workflow_dispatch
   → параллельный dispatch publish-snapshot.yml@main в оба data-репозитория
   → light publish в test/light-<target> или full publish в <target>
   → cleanup с always()
+  → итоговый Telegram-отчёт
   → отдельный workflow_run reconciler в ru-7 и ru-9
+  → Telegram recovery alert только при фактическом удалении остаточных ресурсов
 ```
 
 Основной workflow поддерживает light, full, benchmark и остановку на выбранной стадии. Benchmark
@@ -70,6 +72,8 @@ manual workflow_dispatch
   `highfreq-16c-32g` фиксирован как `HFL1.16-32768-240` и разрешён только в `ru-9a`.
 - Основной cleanup обязан выполняться после ошибок обоих publisher. Reconciler должен оставаться
   идемпотентным, искать ресурсы по точным ownership-маркерам и проверять обе поддерживаемые region.
+- Основной workflow отправляет Telegram-отчёт после cleanup при любом результате. Reconciler
+  отправляет отдельный аварийный alert только при машинно подтверждённом `deleted_count > 0`.
 - Несколько pipeline runs независимы. Не добавлять отменяющий concurrency на уровень всего
   оркестратора; publisher сами сериализуют обновления одной data-ветки без отмены предыдущего run.
 
@@ -78,6 +82,7 @@ manual workflow_dispatch
 - Все репозитории, код, workflow, несекретная конфигурация и публикуемые данные должны оставаться
   публичными.
 - `GH_APP_PRIVATE_KEY` и `SELECTEL_OS_PASSWORD` хранятся только в Environment `selectel`.
+  `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` хранятся только в Environment `telegram`.
   JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
 - Не добавлять реальные credentials, project/account identifiers, runner configs или tokens в
   код, fixtures, документацию, summaries и логи.

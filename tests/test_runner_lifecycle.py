@@ -5,6 +5,7 @@ import http.client
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -335,6 +336,67 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertTrue(wait_call.args[1].endswith("/actions/runs/987654"))
 
 
+class CleanupReportingTests(unittest.TestCase):
+    def test_reports_deletions_even_when_later_cleanup_fails(self) -> None:
+        arguments = Mock(
+            instance_key="manual-123456-2",
+            run_id="123456",
+            run_attempt="2",
+            diagnostics=False,
+            builder_runner_id="1",
+            wot_gui_assets_runner_id="2",
+            wot_src_runner_id="3",
+            server_id="",
+            port_id="",
+            security_group_id="",
+        )
+        config = Mock(password="not-a-real-secret")
+
+        def record_runner(*_args, deleted_resources=None, **_kwargs) -> None:
+            deleted_resources.append("github-runner")
+
+        def record_server(*_args, deleted_resources=None, **_kwargs) -> None:
+            deleted_resources.append("selectel-server")
+
+        def record_port(*_args, deleted_resources=None, **_kwargs) -> None:
+            deleted_resources.append("selectel-public-port")
+
+        def delete_security_group(*_args, deleted_resources=None, **_kwargs) -> None:
+            deleted_resources.append("selectel-security-group")
+            raise lifecycle.LifecycleError("simulated post-delete failure")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output"
+            environment = {
+                "GITHUB_APP_TOKEN": "test-token",
+                "GITHUB_OUTPUT": str(output_path),
+                "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
+                "WOT_GUI_ASSETS_REPOSITORY": "wotstat/wot-gui-assets",
+                "WOT_SRC_REPOSITORY": "wotstat/wot-src",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(
+                    lifecycle.SelectelConfig,
+                    "from_environment",
+                    return_value=config,
+                ),
+                patch.object(lifecycle, "delete_github_runners", side_effect=record_runner),
+                patch.object(lifecycle, "delete_servers", side_effect=record_server),
+                patch.object(lifecycle, "selectel_token", return_value="selectel-token"),
+                patch.object(lifecycle, "delete_public_ports", side_effect=record_port),
+                patch.object(
+                    lifecycle,
+                    "delete_security_groups",
+                    side_effect=delete_security_group,
+                ),
+                self.assertRaises(lifecycle.LifecycleError),
+            ):
+                lifecycle.cleanup(arguments)
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=6\n")
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_coerces_cli_worker_input_before_reusable_workflow_call(self) -> None:
         workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
@@ -382,6 +444,11 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("publish-wot-src:", workflow)
         self.assertIn("test/light-${{ inputs.target }}", workflow)
         self.assertIn("FULL_PUBLICATION_BRANCH: ${{ inputs.target }}", workflow)
+        self.assertIn("notify:", workflow)
+        self.assertIn("needs.cleanup.outputs.deleted_count", workflow)
+        self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
+        self.assertIn("secrets.TELEGRAM_CHAT_ID", workflow)
+        self.assertIn("environment: telegram", workflow)
 
         reconciler = (
             ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"
@@ -390,6 +457,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets", reconciler)
         self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", reconciler)
         self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
+        self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
+        self.assertIn("environment: telegram", reconciler)
 
 
 if __name__ == "__main__":

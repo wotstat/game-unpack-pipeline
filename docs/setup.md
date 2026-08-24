@@ -112,7 +112,33 @@ flavor разрешаются OpenStack CLI в выбранном run region. Д
 authentication, image, flavor, availability zone и наличие свободного direct-public-IP slot; при
 отсутствующем или неоднозначном имени run завершается на этом этапе.
 
-## 5. Выбор режима запуска
+## 5. Telegram-уведомления
+
+1. Создать отдельного бота через [`@BotFather`](https://t.me/BotFather) и сохранить выданный токен
+   непосредственно в GitHub Actions Secrets.
+2. Написать боту сообщение. Для группы или канала сначала добавить туда бота и отправить новое
+   сообщение.
+3. Получить числовой `chat.id` через метод
+   [`getUpdates`](https://core.telegram.org/bots/api#getupdates). Токен из URL нельзя помещать в
+   issue, commit или workflow log.
+4. В `Settings → Environments` создать отдельный Environment с точным именем `telegram`.
+5. В **Deployment branches and tags** разрешить только branch `main`. Не включать required
+   reviewers, wait timer или другие protection rules, которые задержат обязательное финальное
+   уведомление.
+6. Добавить в Environment `telegram` следующие secrets:
+
+| Secret | Значение |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Токен созданного Telegram-бота |
+| `TELEGRAM_CHAT_ID` | Числовой ID личного чата, группы или канала |
+
+Обе notification jobs работают на GitHub-hosted runner с Environment `telegram` и не получают
+Selectel credentials из Environment `selectel`. Основной workflow всегда отправляет итоговый отчёт
+после своей cleanup job. Reconciler отправляет отдельный аварийный alert только если его
+`deleted_count` больше нуля. Используемый `appleboy/telegram-action` закреплён на полном commit SHA
+версии `v1.1.1`.
+
+## 6. Выбор режима запуска
 
 Открыть `Actions → Ephemeral snapshot`, выбрать branch `main` и заполнить inputs.
 
@@ -145,7 +171,7 @@ Full run скачивает существенно больше данных и 
 run на нужной стадии через `until`. Значение `workers: 0` выбирает число CPU автоматически с
 ограничением 32.
 
-## 6. Ожидаемая последовательность jobs
+## 7. Ожидаемая последовательность jobs
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
@@ -162,14 +188,15 @@ run на нужной стадии через `until`. Значение `workers
 8. Каждый publisher независимо проверяет snapshot и либо создаёт version commit, либо успешно
    завершает повторную публикацию как `unchanged`.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
-    `ru-7` и `ru-9`.
+10. `Telegram report` отправляет итоговые статусы и ссылки после завершения cleanup.
+11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
+    `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 
 Queue watchdog ждёт назначения builder workload 10 минут. Publisher orchestration ждёт каждый
 внешний workflow до 45 минут и пытается отменить его при timeout; сама GitHub-hosted publisher job
 ограничена 60 минутами.
 
-## 7. Отмена и повторная очистка
+## 8. Отмена и повторная очистка
 
 Обычная кнопка **Cancel workflow** не должна оставлять инфраструктуру: основной cleanup использует
 `always()`, а после завершения run с branch `main` запускается отдельный `workflow_run` reconciler.
@@ -187,7 +214,7 @@ repository/run/attempt ownership-маркерами. Уже отсутствую
 ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
 перечнем незавершённых действий.
 
-## 8. Диагностика без утечки секретов
+## 9. Диагностика без утечки секретов
 
 При ошибке cleanup запрашивает serial console и выводит только очищенный хвост. Из него удаляются
 JIT-конфигурации, известные tokens/passwords и распространённые GitHub token formats. Полный console

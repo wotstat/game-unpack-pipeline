@@ -19,7 +19,9 @@ workflow_dispatch
   → параллельные workflow wot-src@main и wot-gui-assets@main
   → независимая проверка и обновление двух pure-data веток
   → удаление runner registrations, VM, direct public IP и security group
+  → итоговый Telegram-отчёт со статусами builder, publisher и cleanup
   → независимая повторная очистка
+  → аварийный Telegram-alert, только если reconciler удалил остаточные ресурсы
 ```
 
 Несколько ручных запусков получают разные имена, labels и облачные ресурсы на основе
@@ -97,9 +99,13 @@ region/zone/flavor через dispatch не принимаются.
    Actions artifacts.
 7. `Cleanup` с `always()` удаляет три runner registration и ресурсы Selectel даже после ошибки
    workload или любого publisher.
-8. [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml)
+8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, snapshot ID, число удалённых
+   ресурсов и ссылки на основной и publisher runs.
+9. [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml)
    запускается после завершения основного workflow и повторяет идемпотентную очистку в `ru-7` и
-   `ru-9`. Его можно запустить вручную по исходным `run_id` и `run_attempt`.
+   `ru-9`. Его можно запустить вручную по исходным `run_id` и `run_attempt`. Аварийный alert
+   отправляется только при `deleted_count > 0`, когда reconciler действительно удалил пропущенные
+   основной очисткой ресурсы.
 
 Light snapshot публикуется в `test/light-<target>`, full snapshot — в `<target>`. Точный layout,
 формат `.publication.json`, locale overlays и поведение повторной публикации документированы в
@@ -128,8 +134,9 @@ README репозиториев [`wot-src`](https://github.com/wotstat/wot-src) 
 ## Настройка и эксплуатация
 
 Перед первым запуском нужно настроить Selectel project/service user, repository-level GitHub App,
-Environment `selectel`, secrets и repository variables. Полная инструкция, рекомендации по
-квотам, варианты запуска и ручное восстановление находятся в [docs/setup.md](docs/setup.md).
+Environments `selectel` и `telegram`, Telegram-бота, secrets и repository variables. Полная
+инструкция, рекомендации по квотам, варианты запуска и ручное восстановление находятся в
+[docs/setup.md](docs/setup.md).
 
 Нажатие **Run workflow** сразу создаёт реальные тарифицируемые ресурсы. Dry-run режима нет.
 

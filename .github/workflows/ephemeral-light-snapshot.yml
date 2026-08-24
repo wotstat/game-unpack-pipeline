@@ -372,6 +372,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: selectel
+    outputs:
+      deleted_count: ${{ steps.cleanup.outputs.deleted_count }}
     steps:
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
@@ -390,6 +392,7 @@ jobs:
         uses: ./.github/actions/setup-openstack
 
       - name: Delete runner and Selectel resources
+        id: cleanup
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
@@ -428,3 +431,42 @@ jobs:
             --port-id "${PORT_ID}" \
             --security-group-id "${SECURITY_GROUP_ID}" \
             "${diagnostics[@]}"
+
+  notify:
+    name: Telegram report (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    if: always()
+    needs:
+      - provision
+      - workload
+      - queue-watchdog
+      - publish-wot-gui-assets
+      - publish-wot-src
+      - cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: telegram
+    steps:
+      - name: Send pipeline report
+        # v1.1.1
+        uses: appleboy/telegram-action@214f06cfa3d3a588c1472116889437e7c6fd29b1
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          disable_web_page_preview: true
+          message: |
+            ${{ contains(needs.*.result, 'failure') && '❌ FAILURE' || contains(needs.*.result, 'cancelled') && '⚠️ CANCELLED' || '✅ SUCCESS' }}
+            Ephemeral snapshot · ${{ inputs.target }} · ${{ inputs.client_type }}
+
+            Mode: ${{ inputs.benchmark_percent > 0 && format('benchmark {0}%', inputs.benchmark_percent) || (inputs.light && 'light' || 'full') }} through ${{ inputs.until }}
+            Languages: ${{ inputs.languages }}
+            Provision: ${{ needs.provision.result }}
+            Builder: ${{ needs.workload.result }}
+            Queue watchdog: ${{ needs.queue-watchdog.result }}
+            wot-src: ${{ needs.publish-wot-src.result }}
+            wot-gui-assets: ${{ needs.publish-wot-gui-assets.result }}
+            Cleanup: ${{ needs.cleanup.result }} (deleted: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }})
+            Snapshot: ${{ needs.workload.outputs.snapshot_id || 'not created' }}
+
+            wot-src run: ${{ needs.publish-wot-src.outputs.run_url || 'not started' }}
+            wot-gui-assets run: ${{ needs.publish-wot-gui-assets.outputs.run_url || 'not started' }}
+            Pipeline run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -836,7 +836,11 @@ def show_console_log(
 
 
 def delete_github_runners(
-    identity: RunnerIdentity, app_token: str, runner_id: str = ""
+    identity: RunnerIdentity,
+    app_token: str,
+    runner_id: str = "",
+    *,
+    deleted_resources: list[str] | None = None,
 ) -> None:
     candidate_ids: set[str] = set()
     if runner_id.isdigit():
@@ -890,15 +894,20 @@ def delete_github_runners(
             expected_statuses=(204, 404),
         )
         print(f"Runner {candidate}: {'already absent' if status == 404 else 'deleted'}")
+        if status == 204 and deleted_resources is not None:
+            deleted_resources.append(f"github-runner:{identity.repository}:{candidate}")
 
 
 def delete_servers(
-    config: SelectelConfig, identity: ResourceIdentity, server_id: str = ""
-) -> list[str]:
+    config: SelectelConfig,
+    identity: ResourceIdentity,
+    server_id: str = "",
+    *,
+    deleted_resources: list[str] | None = None,
+) -> None:
     candidates = set(find_server_ids(config, identity))
     if UUID_RE.fullmatch(server_id):
         candidates.add(server_id)
-    deleted: list[str] = []
     for candidate in sorted(candidates):
         show = openstack(
             config, ["server", "show", candidate, "-f", "json"], check=False
@@ -921,14 +930,14 @@ def delete_servers(
                 != 0
             ):
                 print(f"Server {candidate}: deleted")
-                deleted.append(candidate)
+                if deleted_resources is not None:
+                    deleted_resources.append(f"selectel-server:{candidate}")
                 break
             time.sleep(5)
         else:
             raise LifecycleError(
                 f"Server {candidate} still exists after deletion timeout"
             )
-    return deleted
 
 
 def find_public_port_ids(
@@ -959,6 +968,8 @@ def delete_public_ports(
     identity: ResourceIdentity,
     token: str,
     port_id: str = "",
+    *,
+    deleted_resources: list[str] | None = None,
 ) -> None:
     candidates = set(find_public_port_ids(config, identity, token))
     if UUID_RE.fullmatch(port_id):
@@ -992,6 +1003,8 @@ def delete_public_ports(
                     f"Direct public port {candidate}: "
                     f"{'already absent' if status == 404 else 'deleted'}"
                 )
+                if status == 204 and deleted_resources is not None:
+                    deleted_resources.append(f"selectel-public-port:{candidate}")
                 break
             if time.monotonic() >= deadline:
                 raise LifecycleError(
@@ -1039,6 +1052,8 @@ def delete_security_groups(
     config: SelectelConfig,
     identity: ResourceIdentity,
     security_group_id: str = "",
+    *,
+    deleted_resources: list[str] | None = None,
 ) -> None:
     candidates = set(find_security_group_ids(config, identity))
     if UUID_RE.fullmatch(security_group_id):
@@ -1066,6 +1081,8 @@ def delete_security_groups(
             )
             if result.returncode == 0:
                 print(f"Security group {candidate}: deleted")
+                if deleted_resources is not None:
+                    deleted_resources.append(f"selectel-security-group:{candidate}")
                 break
             show = openstack(
                 config, ["security", "group", "show", candidate], check=False
@@ -1250,17 +1267,24 @@ def cleanup(arguments: argparse.Namespace) -> None:
             show_console_log(config, candidate, sensitive_values=(app_token,))
 
     failures: list[str] = []
+    deleted_resources: list[str] = []
     operations = [
         (
             "GitHub builder runner registration",
             lambda: delete_github_runners(
-                builder_runner, app_token, arguments.builder_runner_id
+                builder_runner,
+                app_token,
+                arguments.builder_runner_id,
+                deleted_resources=deleted_resources,
             ),
         ),
         (
             "GitHub wot-src runner registration",
             lambda: delete_github_runners(
-                wot_src_runner, app_token, arguments.wot_src_runner_id
+                wot_src_runner,
+                app_token,
+                arguments.wot_src_runner_id,
+                deleted_resources=deleted_resources,
             ),
         ),
         (
@@ -1269,11 +1293,17 @@ def cleanup(arguments: argparse.Namespace) -> None:
                 wot_gui_assets_runner,
                 app_token,
                 arguments.wot_gui_assets_runner_id,
+                deleted_resources=deleted_resources,
             ),
         ),
         (
             "Selectel server",
-            lambda: delete_servers(config, identity, arguments.server_id),
+            lambda: delete_servers(
+                config,
+                identity,
+                arguments.server_id,
+                deleted_resources=deleted_resources,
+            ),
         ),
     ]
     for label, operation in operations:
@@ -1285,17 +1315,30 @@ def cleanup(arguments: argparse.Namespace) -> None:
 
     try:
         token = selectel_token(config)
-        delete_public_ports(config, identity, token, arguments.port_id)
+        delete_public_ports(
+            config,
+            identity,
+            token,
+            arguments.port_id,
+            deleted_resources=deleted_resources,
+        )
     except Exception as error:
         failures.append(f"Direct public port: {error}")
         print(f"::error::Direct public port cleanup failed: {sanitized(str(error))}")
 
     try:
-        delete_security_groups(config, identity, arguments.security_group_id)
+        delete_security_groups(
+            config,
+            identity,
+            arguments.security_group_id,
+            deleted_resources=deleted_resources,
+        )
     except Exception as error:
         failures.append(f"Security group: {error}")
         print(f"::error::Security-group cleanup failed: {sanitized(str(error))}")
 
+    write_output("deleted_count", len(deleted_resources))
+    append_summary(f"- Resources deleted: `{len(deleted_resources)}`")
     if failures:
         raise LifecycleError("Cleanup incomplete: " + " | ".join(failures))
     append_summary(f"- Cleanup `{identity.instance_key}`: complete")
