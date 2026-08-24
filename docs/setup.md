@@ -36,8 +36,8 @@ cleanup диск удаляется вместе с сервером. Отдел
 
 | `selectel_location` | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
-| `ru-9a` (по умолчанию) | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
-| `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
+| `ru-7b` (по умолчанию) | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
+| `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
 Flavor зафиксирован как `HFL1.16-32768-240`. Standard и выбор flavor не поддерживаются. Если
 планируется использовать обе location, image и фиксированный HighFreq flavor должны однозначно
@@ -154,7 +154,7 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 | `languages` | `EN` |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
-| `selectel_location` | `ru-9a` |
+| `selectel_location` | `ru-7b` |
 
 Такой run собирает полный sealed snapshot и публикует production-ветку `wot-eu` в обоих
 data-репозиториях. Первый запуск может занимать много времени и скачивает полный клиент.

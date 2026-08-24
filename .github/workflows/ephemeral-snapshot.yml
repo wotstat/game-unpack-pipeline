@@ -43,11 +43,11 @@ on:
       selectel_location:
         description: Selectel region and availability zone
         required: true
-        default: ru-9a
+        default: ru-7b
         type: choice
         options:
-          - ru-9a
           - ru-7b
+          - ru-9a
 permissions:
   contents: read
 

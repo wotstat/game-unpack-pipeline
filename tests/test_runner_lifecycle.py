@@ -366,7 +366,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
         self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
-        self.assertIn("default: ru-9a", workflow)
+        self.assertIn("default: ru-7b", workflow)
         self.assertIn("          - ru-7b", workflow)
         self.assertNotIn("ru-7a", workflow)
         self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
