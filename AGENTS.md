@@ -68,6 +68,10 @@ manual workflow_dispatch
   временную ветку, кумулятивно собирая полный tree. После проверки его локального hash один version
   commit создаётся через GitHub Git Database API; production-ref обновляется без force, а staging
   commits не входят в production-историю.
+- Перед cleanup или рефакторингом publisher Git transport полностью прочитать
+  `docs/publisher-cleanup.md`, `../wot-src/docs/publication-transport.md` и
+  `../wot-assets/docs/publication-transport.md`. Сохранять наблюдаемое поведение через CLI/data-ветку,
+  а не текущую структуру приватных helper'ов: она не является контрактом и может быть упрощена.
 - Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
   абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
 - Все три runner зарегистрированы в `game-unpack-pipeline`. Каждый имеет уникальные имя и label на
