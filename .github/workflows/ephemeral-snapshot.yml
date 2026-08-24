@@ -198,7 +198,7 @@ jobs:
     needs:
       - provision
       - workload
-    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@14ff039f148950a4bb1be88a9fa80b27157731d9
+    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@c03924970a344741e417a6cc70f3158651c4ae0a
     with:
       runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
@@ -216,7 +216,7 @@ jobs:
     needs:
       - provision
       - workload
-    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@db083c8630a454f0986b7b42dfb9699a48d6244e
+    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@ca2c9bc062a97b9dcfd6d73f645624f1d4dc3d0c
     with:
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
