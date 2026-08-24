@@ -1,93 +1,112 @@
 # Контекст проекта для агентов
 
-## Что мы строим
+## Назначение репозитория
 
-`game-unpack-pipeline` — публичный репозиторий-оркестратор пайплайна распаковки клиентов
-World of Tanks и «Мира танков». Он отвечает за обнаружение новых версий, запуск обработки на
-временных серверах, публикацию результатов и публичную историю статусов. Сама логика скачивания
-и распаковки клиента живёт не здесь.
+`game-unpack-pipeline` — публичный оркестратор ручной сборки и публикации снимков клиентов World of
+Tanks и «Мира танков». Сейчас репозиторий владеет GitHub Actions workflows, жизненным циклом
+временной VM и трёх repository-level JIT runner, вызовом builder/publisher и повторной очисткой
+ресурсов.
 
-Целевой поток в общих чертах:
+Скачивание и распаковка игрового клиента, преобразования и формат `GameSnapshot` здесь не
+реализуются. Автоматическое обнаружение новых версий и публичная история статусов также пока
+отсутствуют.
+
+## Реализованный поток
 
 ```text
-WGUS/LSTUS обнаружил новую версию
-  -> временный сервер Selectel
-  -> ephemeral self-hosted GitHub Actions runner
-  -> сборка GameSnapshot
-  -> публикация результатов
-  -> запись версии и статуса
-  -> удаление временной инфраструктуры
+manual workflow_dispatch
+  → provision одной VM, direct public IP и egress-only security group в Selectel
+  → builder JIT runner в game-unpack-pipeline
+  → publisher JIT runner в wot-src
+  → publisher JIT runner в wot-gui-assets
+  → game-snapshot-builder@v0.3.16 на builder runner
+  → sealed snapshot на локальном диске VM
+  → параллельный dispatch publish-snapshot.yml@main в оба data-репозитория
+  → light publish в test/light-<target> или full publish в <target>
+  → cleanup с always()
+  → отдельный workflow_run reconciler в ru-7 и ru-9
 ```
 
-Все репозитории, код, несекретная конфигурация, статусы и публикуемые результаты должны быть
-публичными. Credentials, runner tokens и другие секреты публичными быть не могут: они должны
-храниться только в предназначенных для этого secret-хранилищах и не попадать в логи.
+Основной workflow поддерживает light, full, benchmark и остановку на выбранной стадии. Benchmark
+является неполной выборкой, не может дойти до `snapshot` и не публикуется. Publisher jobs создаются
+только когда reusable workflow вернул непустой `snapshot_path`. Light и benchmark взаимно
+исключаются; `ALL` нельзя смешивать с отдельными кодами языков.
 
-## Границы компонентов
+## Границы компонентов и локальные зеркала
 
-- Этот репозиторий владеет GitHub Actions workflows, жизненным циклом временного runner,
-  оркестрацией последующих шагов и публичным состоянием обработанных релизов.
-- [`game-snapshot-builder`](/Users/soprachev/Documents/Projects/wotstat/game-unpacker) — соседний
-  публичный проект, выполняющий тяжёлую работу: определение версии, скачивание игры, проверку
-  данных, сборку и merge VFS, декомпиляцию Python/AS3, преобразование MO/XML и выпуск проверенного
-  `GameSnapshot`.
-- Способ проверки новых версий пока не выбран окончательно. Можно переиспользовать лёгкий режим
-  `game-snapshot-builder` либо реализовать небольшой WGUS/LSTUS watcher здесь. Не дублировать
-  протокол без причины.
-- Полезные локальные материалы по протоколу находятся в
-  `/Users/soprachev/Documents/Codex/2026-08-02/new-chat/outputs/wgus-protocol-research.md`.
-- Приложенная концепция из предыдущего чата — только дополнительный контекст. Это не спецификация
-  и не набор уже принятых архитектурных решений.
+- Этот репозиторий: `.github/workflows`, Selectel lifecycle, JIT runner bootstrap, dispatch и
+  ожидание publisher runs, cleanup/reconciliation.
+- [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder), локально
+  обычно `../game-unpacker`: resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline,
+  Python/XML/MO/AS3 transforms, engine stubs, seal и verify `GameSnapshot`. Оркестратор сейчас
+  закрепляет reusable workflow на `v0.3.16`.
+- [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`:
+  независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и Gameface.
+- [`wotstat/wot-gui-assets`](https://github.com/wotstat/wot-gui-assets), локальный каталог в
+  текущем workspace обычно называется `../wot-assets`: независимая проверка snapshot и проекция
+  `res/gui` без `.xml` и `.py`.
 
-## Ближайшая итерация
+Не переносить в этот репозиторий протокол WGUS/LSTUS, реализацию builder или правила publisher без
+отдельного архитектурного решения.
 
-Сейчас нужен единый light/full сценарий сборки с параллельной публикацией `wot-src` и
-`wot-gui-assets`:
+## Текущие контракты
 
-1. Пользователь вручную запускает workflow кнопкой (`workflow_dispatch`).
-2. Workflow создаёт один временный сервер в Selectel.
-3. Сервер регистрирует три изолированных ephemeral self-hosted GitHub Actions runner: builder в
-   `game-unpack-pipeline` и publisher в `wot-src` и `wot-gui-assets`.
-4. Builder workload вызывает versioned reusable workflow из `wotstat/game-snapshot-builder`.
-5. Builder с `--light --languages ALL` выполняет стадии от `resolve` до `snapshot`, публикует
-   Actions summary, структурированную статистику и небольшие diagnostic logs. Snapshot остаётся
-   на локальном диске VM.
-6. Две GitHub-hosted orchestration job параллельно вызывают workflows из `wot-src@main` и
-   `wot-gui-assets@main`. Publisher независимо проверяют один sealed snapshot. `wot-src` публикует
-   `py`, `xml`, `po`, AS3, stubs и Gameface, а `wot-gui-assets` — содержимое `res/gui` кроме
-   `.xml` и `.py`; оба сохраняют WG locale overlays по общему правилу.
-7. Light snapshot публикуется в `test/light-<target>`, full snapshot — в production data-ветку
-   региона. Version commit и служебные метаданные должны совпадать по формату в обоих репозиториях.
-8. После выполнения удаляются все три runner registration, сервер и созданные вместе с ним
-   временные ресурсы. Очистка должна учитывать неуспешный запуск любого publisher.
+- Единственная точка запуска сборки — ручной `workflow_dispatch` в
+  `.github/workflows/ephemeral-light-snapshot.yml`; имя файла историческое и не означает, что
+  workflow ограничен light-режимом.
+- Поддерживаются targets `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru` и
+  `mt-public-test`, client types `sd`/`hd`, список языков или `ALL`.
+- Light snapshot публикуется только в `test/light-<target>`. Full snapshot публикуется в
+  production data-ветку `<target>`. Оба publisher должны получить одинаковые identity, target,
+  profile и descriptor digest.
+- Publisher workflow всегда dispatch-ится из `main`. Оркестратор ждёт точный Run ID, возвращённый
+  GitHub API, а не ищет run по времени или имени.
+- Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
+  абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
+- Каждый runner имеет уникальные имя и label на основе `run_id`/`run_attempt`, отдельного
+  Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только builder имеет
+  `sudo`.
+- По умолчанию используется `configured-standard` в `ru-7a`. Профиль
+  `highfreq-16c-32g` фиксирован как `HFL1.16-32768-240` и разрешён только в `ru-9a`.
+- Основной cleanup обязан выполняться после ошибок обоих publisher. Reconciler должен оставаться
+  идемпотентным, искать ресурсы по точным ownership-маркерам и проверять обе поддерживаемые region.
+- Несколько pipeline runs независимы. Не добавлять отменяющий concurrency на уровень всего
+  оркестратора; publisher сами сериализуют обновления одной data-ветки без отмены предыдущего run.
 
-На этой итерации не нужны: cron, отдельный watcher обновлений, S3, БД и GitHub Pages.
+## Секреты и реальные операции
 
-Это интеграционная итерация с участием пользователя. Не угадывать Selectel project/region/image,
-GitHub scope, способ аутентификации и значения секретов. Реальные облачные операции выполнять
-только после явной задачи пользователя.
+- Все репозитории, код, workflow, несекретная конфигурация и публикуемые данные должны оставаться
+  публичными.
+- `GH_APP_PRIVATE_KEY` и `SELECTEL_OS_PASSWORD` хранятся только в Environment `selectel`.
+  JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
+- Не добавлять реальные credentials, project/account identifiers, runner configs или tokens в
+  код, fixtures, документацию, summaries и логи.
+- Не угадывать secret values, фактические квоты или доступность flavor/image. Реальные Selectel и
+  GitHub mutations выполнять только по явной задаче пользователя. Локальные unit/lint checks
+  безопасны и не обращаются к облаку.
+- Не ослаблять masking, отсутствие ingress, разделение Unix-пользователей, проверку digest runner
+  archive или ownership checks ради упрощения workflow.
 
-## Дальнейшее направление
+## Что пока не входит в систему
 
-После рабочего `create -> runner -> light snapshot -> destroy` планируется:
+- cron и watcher новых WGUS/LSTUS releases;
+- модель release identity/state/retry на уровне оркестратора;
+- публичный status store или GitHub Pages;
+- processors для S3 и БД;
+- долгоживущие self-hosted runners и постоянная инфраструктура.
 
-- запускать проверку версий по расписанию для поддерживаемых клиентов/регионов;
-- на каждую новую версию запускать `game-snapshot-builder` на отдельном временном runner;
-- добавлять processors как отдельные шаги workflow для публикации в S3 и БД;
-- фиксировать в этом репозитории версию, время и ход обработки;
-- строить GitHub Pages со статусом каждой версии каждого клиента: в процессе, успешно или с
-  ошибкой.
+Не проектировать и не добавлять эти части без нового запроса. Если они становятся текущей задачей,
+сначала отделить подтверждённые требования от предложений и обновить этот файл вместе с кодом.
 
-Точные модели release identity, состояния, retry, параллелизма и формат status page ещё не
-утверждены. Проектировать их следует тогда, когда соответствующая итерация станет текущей.
+## Правила изменения
 
-## Правила работы в новых чатах
-
-- Считать этот файл кратким текущим брифом, а не полной технической спецификацией.
-- Перед изменениями проверять фактическое состояние этого репозитория и актуальный интерфейс
-  `game-snapshot-builder`.
-- Не расширять ближайшую итерацию будущими функциями без просьбы пользователя.
-- Явно отделять подтверждённые требования от предложений и открытых решений.
-- Не добавлять секреты, реальные токены или credentials в код, fixtures, примеры и логи.
-- При противоречии между этим файлом и новым сообщением пользователя следовать новому сообщению и
-  при необходимости обновить этот контекст.
+- Перед правками проверять фактические workflow и lifecycle-скрипты этого репозитория, текущий
+  `build-snapshot.yml` закреплённого builder tag и `publish-snapshot.yml@main` обоих publisher.
+- При обновлении builder tag сверять inputs, outputs, stage names, profile semantics и требования к
+  runner. Не ссылаться на плавающий `main` builder из production orchestration.
+- При изменении publisher contract обновлять оба dispatch path симметрично и сохранять cleanup при
+  ошибке любого из них.
+- Документация должна описывать реализованное состояние. Будущие идеи явно помечать как
+  нереализованные, а не как текущую итерацию.
+- После изменений запускать `./scripts/check.sh`. При правках, затрагивающих соседние контракты,
+  дополнительно использовать их собственные test/lint команды.
