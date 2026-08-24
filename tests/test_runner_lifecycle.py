@@ -366,12 +366,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
         self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
-        self.assertIn("default: ru-7b", workflow)
-        self.assertIn("          - ru-7b", workflow)
+        self.assertNotIn("selectel_location", workflow)
         self.assertNotIn("ru-7a", workflow)
-        self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
-        self.assertIn("inputs.selectel_location == 'ru-7b' && 'ru-7' || 'ru-9'", workflow)
-        self.assertIn('SELECTEL_FLAVOR_ID: "HFL1.16-32768-240"', workflow)
+        self.assertNotIn("ru-9a", workflow)
+        self.assertIn('SELECTEL_AVAILABILITY_ZONE: "ru-7b"', workflow)
+        self.assertIn('SELECTEL_OS_REGION_NAME: "ru-7"', workflow)
+        self.assertIn(
+            'SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"', workflow
+        )
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
             "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0",

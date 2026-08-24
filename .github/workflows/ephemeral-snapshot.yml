@@ -1,5 +1,5 @@
 name: Ephemeral snapshot
-run-name: Snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location }} · @${{ github.actor }}
+run-name: Snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ru-7b · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -40,23 +40,15 @@ on:
         required: true
         default: true
         type: boolean
-      selectel_location:
-        description: Selectel region and availability zone
-        required: true
-        default: ru-7b
-        type: choice
-        options:
-          - ru-7b
-          - ru-9a
 permissions:
   contents: read
 
 env:
   PYTHONUNBUFFERED: "1"
-  SELECTEL_FLAVOR_ID: "HFL1.16-32768-240"
-  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}
-  SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-7b' && 'ru-7' || 'ru-9' }}
-  SELECTEL_PUBLIC_NETWORK_API_URL: ${{ inputs.selectel_location == 'ru-7b' && 'https://ru-7.cloud.api.selcloud.ru/public-network' || 'https://ru-9.cloud.api.selcloud.ru/public-network' }}
+  SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"
+  SELECTEL_AVAILABILITY_ZONE: "ru-7b"
+  SELECTEL_OS_REGION_NAME: "ru-7"
+  SELECTEL_PUBLIC_NETWORK_API_URL: "https://ru-7.cloud.api.selcloud.ru/public-network"
 
 jobs:
   provision:

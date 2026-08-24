@@ -52,12 +52,11 @@ snapshot до стадии `snapshot` и предоставляет только
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `EN` |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
-| `selectel_location` | `ru-7b` по умолчанию или `ru-9a` |
 
 Publisher можно независимо отключить для ручного рерана. Если отключить оба, workflow только
-соберёт и проверит snapshot, после чего удалит VM. Production flavor зафиксирован как HighFreq
-`HFL1.16-32768-240`; Standard и выбор flavor не поддерживаются. Location определяет OpenStack
-region, availability zone и Selectel Public Network endpoint.
+соберёт и проверит snapshot, после чего удалит VM. Production-конфигурация зафиксирована как
+HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7b`: 16 vCPU, 32 ГБ RAM и
+256 ГБ локального диска. Standard, обычный HighFreq, выбор flavor и location не поддерживаются.
 
 ## Reusable workflows publisher
 

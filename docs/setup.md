@@ -15,15 +15,16 @@ Workflow не имеет dry-run режима. Сразу после нажат�
 4. Сохранить пароль service user в менеджере секретов: после создания его нельзя будет прочитать
    повторно.
 5. Пополнить баланс и проверить квоты проекта.
-6. Выбрать образ Ubuntu 24.04 x64 для `SELECTEL_IMAGE_ID`. Production flavor уже зафиксирован в
-   workflow как HighFreq `HFL1.16-32768-240`.
+6. Выбрать образ Ubuntu 24.04 x64 для `SELECTEL_IMAGE_ID` в region `ru-7`. Production
+   flavor уже зафиксирован в workflow как HighFreq с выделенными ядрами
+   `HFL2.16-32768-256-AMD`.
 
 Один параллельный pipeline run требует:
 
 - 1 cloud server;
 - 1 direct public IP;
 - 16 vCPU и 32 ГБ RAM при текущих профилях;
-- 240 ГБ local disk HighFreq `HFL1.16-32768-240`.
+- 256 ГБ local disk HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`.
 
 Для `N` одновременно работающих runs нужны как минимум `N` server и direct-IP slots, `16 × N`
 vCPU и `32 × N` ГБ RAM. Оркестратор не отменяет предыдущий ручной run, поэтому лимит реального
@@ -32,16 +33,16 @@ vCPU и `32 × N` ГБ RAM. Оркестратор не отменяет пре�
 Локальный диск обязателен для текущей архитектуры: snapshot читают три runner на одной VM, а после
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
-Поддерживаемые location зафиксированы в workflow:
+Так как Selectel не поддерживает выделенные ядра в `ru-9a`, production location зафиксирована
+в workflow и не вынесена в dispatch input:
 
-| `selectel_location` | OpenStack region | Public Network endpoint |
+| Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
-| `ru-7b` (по умолчанию) | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
-| `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
+| `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 
-Flavor зафиксирован как `HFL1.16-32768-240`. Standard и выбор flavor не поддерживаются. Если
-планируется использовать обе location, image и фиксированный HighFreq flavor должны однозначно
-разрешаться в каждой из них.
+Flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соответствует включённой в панели
+опции **Выделенные ядра**; Hyper-Threading (SMT) остаётся включённым по умолчанию. Standard,
+обычный HighFreq, выбор flavor и location не поддерживаются.
 
 ## 2. Repository-level GitHub App
 
@@ -111,7 +112,7 @@ Self-hosted builder и reusable publisher jobs не используют Environ
 | `SELECTEL_IMAGE_ID` | Уникальное имя или UUID выбранного Ubuntu 24.04 x64 image |
 
 `SELECTEL_OS_PROJECT_ID` может быть UUID с дефисами или 32 шестнадцатеричными символами. Image и
-фиксированный HighFreq flavor разрешаются OpenStack CLI в выбранном run region. До создания
+фиксированный HighFreq flavor с выделенными ядрами разрешаются OpenStack CLI в `ru-7`. До создания
 ресурсов preflight проверяет authentication, image, flavor, availability zone и наличие свободного
 direct-public-IP slot; при отсутствующем или неоднозначном имени run завершается на этом этапе.
 
@@ -154,8 +155,6 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 | `languages` | `EN` |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
-| `selectel_location` | `ru-7b` |
-
 Такой run собирает полный sealed snapshot и публикует production-ветку `wot-eu` в обоих
 data-репозиториях. Первый запуск может занимать много времени и скачивает полный клиент.
 

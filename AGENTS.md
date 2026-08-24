@@ -27,7 +27,7 @@ manual workflow_dispatch
 ```
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
-target, client type, languages, Selectel location и два независимых переключателя
+target, client type, languages и два независимых переключателя
 `publish_wot_src`/`publish_wot_gui_assets`, включённых по умолчанию.
 
 ## Границы компонентов
@@ -52,7 +52,8 @@ target, client type, languages, Selectel location и два независимы
 
 - Единственная точка ручного запуска — `.github/workflows/ephemeral-snapshot.yml`.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
-  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`; location: `ru-9a`/`ru-7b`.
+  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. Production location
+  зафиксирована как `ru-7b` и не вынесена в dispatch input.
 - Каждый publisher можно независимо отключить. Если включены оба, они получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
@@ -75,8 +76,8 @@ target, client type, languages, Selectel location и два независимы
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только builder имеет
   `sudo`.
-- Production flavor зафиксирован как HighFreq `HFL1.16-32768-240`; Standard и выбор flavor не
-  поддерживаются. Location задаёт zone, region и Public Network endpoint.
+- Production flavor зафиксирован как HighFreq с выделенными ядрами
+  `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет Telegram-отчёт после cleanup при любом результате. Reconciler
