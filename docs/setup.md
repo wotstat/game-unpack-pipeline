@@ -171,9 +171,10 @@ Publisher можно включать независимо для каждого
 3. Cloud-init скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и запускает
    три systemd service под разными Unix-пользователями.
 4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех трёх runner.
-5. `Workload` вызывает `game-snapshot-builder@v0.4.0`. Все стадии от `resolve` до `snapshot` видны
+5. `Workload` вызывает `game-snapshot-builder@v0.4.1`. Все стадии от `resolve` до `snapshot` видны
    отдельными Actions steps; metrics и небольшие diagnostic files загружаются как artifact.
-6. После seal builder возвращает snapshot ID, абсолютный path и SHA-256 canonical descriptor.
+6. После seal builder возвращает version name, snapshot ID, абсолютный path и SHA-256 canonical
+   descriptor.
 7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно вызывают reusable workflow
    соответствующего data-репозитория через прямой `uses: ...@<commit-sha>`. Jobs входят в основной
    run, checkout’ят собственный publisher-код через `job.workflow_repository` и
@@ -182,7 +183,9 @@ Publisher можно включать независимо для каждого
 8. Каждый включённый publisher независимо проверяет snapshot и либо создаёт version commit, либо
    успешно завершает повторную публикацию как `unchanged`.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. `Telegram report` отправляет итоговые статусы и publisher commit/state после cleanup.
+10. `Telegram report` после cleanup отправляет компактный HTML-отчёт с version name, target,
+    client type, языками и publisher state; `published` ведёт ссылкой на точный commit, а `ALL`
+    сохраняется в заголовке буквально.
 11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 

@@ -11,7 +11,7 @@
 workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
   → три изолированных repository-level JIT runner на этой VM
-  → game-snapshot-builder@v0.4.0 собирает полный sealed GameSnapshot
+  → game-snapshot-builder@v0.4.1 собирает полный sealed GameSnapshot
   → выбранные pinned reusable workflows wot-src и wot-gui-assets публикуют snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
   → Telegram-отчёт
@@ -70,8 +70,8 @@ uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@<commit-sha>
 Это обычные reusable workflows внутри caller run, а не cross-repository dispatch. Каждый workflow
 checkout’ит собственный репозиторий через `job.workflow_repository` и `job.workflow_sha`, поэтому
 исполняемый publisher-код совпадает с SHA в `uses`. Он получает выделенный JIT runner, локальный
-snapshot path, target, snapshot ID и descriptor digest; branch и правила проекции выводятся из
-конфигурации самого data-репозитория.
+snapshot path, target, version name, snapshot ID и descriptor digest; branch и правила проекции
+выводятся из конфигурации самого data-репозитория.
 
 Отсутствующая data-ветка создаётся первой публикацией сразу на version commit. Существующая ветка
 обязана содержать `.publication.json`; markerless ref считается чужим состоянием и приводит к hard

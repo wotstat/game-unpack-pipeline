@@ -376,7 +376,7 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0",
+            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.1",
             workflow,
         )
 
@@ -421,6 +421,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
         self.assertIn("secrets.TELEGRAM_CHAT_ID", workflow)
         self.assertIn("environment: telegram", workflow)
+        self.assertIn("VERSION_NAME: ${{ needs.workload.outputs.version_name }}", workflow)
+        self.assertIn("format: html", workflow)
+        self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)
 
         reconciler = (
             ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"

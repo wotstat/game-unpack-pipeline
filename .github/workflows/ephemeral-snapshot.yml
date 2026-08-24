@@ -111,7 +111,7 @@ jobs:
   workload:
     name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0
+    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.1
     with:
       runner_label: ${{ needs.provision.outputs.builder_runner_label }}
       target: ${{ inputs.target }}
@@ -314,27 +314,39 @@ jobs:
     timeout-minutes: 5
     environment: telegram
     steps:
+      - name: Check out report renderer
+        uses: actions/checkout@v7.0.1
+
+      - name: Render pipeline report
+        id: report
+        env:
+          PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          TARGET: ${{ inputs.target }}
+          VERSION_NAME: ${{ needs.workload.outputs.version_name }}
+          CLIENT_TYPE: ${{ inputs.client_type }}
+          LANGUAGES: ${{ inputs.languages }}
+          PROVISION_RESULT: ${{ needs.provision.result }}
+          WORKLOAD_RESULT: ${{ needs.workload.result }}
+          QUEUE_WATCHDOG_RESULT: ${{ needs.queue-watchdog.result }}
+          WOT_SRC_ENABLED: ${{ inputs.publish_wot_src }}
+          WOT_SRC_RESULT: ${{ needs.publish-wot-src.result }}
+          WOT_SRC_PUBLICATION_STATE: ${{ needs.publish-wot-src.outputs.publication_state }}
+          WOT_SRC_COMMIT_SHA: ${{ needs.publish-wot-src.outputs.commit_sha }}
+          WOT_GUI_ASSETS_ENABLED: ${{ inputs.publish_wot_gui_assets }}
+          WOT_GUI_ASSETS_RESULT: ${{ needs.publish-wot-gui-assets.result }}
+          WOT_GUI_ASSETS_PUBLICATION_STATE: ${{ needs.publish-wot-gui-assets.outputs.publication_state }}
+          WOT_GUI_ASSETS_COMMIT_SHA: ${{ needs.publish-wot-gui-assets.outputs.commit_sha }}
+          CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          CLEANUP_DELETED_COUNT: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }}
+          PIPELINE_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/render_telegram_report.py
+
       - name: Send pipeline report
         # v1.1.1
         uses: appleboy/telegram-action@214f06cfa3d3a588c1472116889437e7c6fd29b1
         with:
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          format: html
           disable_web_page_preview: true
-          message: |
-            ${{ contains(needs.*.result, 'failure') && '❌ FAILURE' || contains(needs.*.result, 'cancelled') && '⚠️ CANCELLED' || '✅ SUCCESS' }}
-            Ephemeral snapshot · ${{ inputs.target }} · ${{ inputs.client_type }}
-
-            Mode: full production snapshot
-            Languages: ${{ inputs.languages }}
-            Provision: ${{ needs.provision.result }}
-            Builder: ${{ needs.workload.result }}
-            Queue watchdog: ${{ needs.queue-watchdog.result }}
-            wot-src: ${{ inputs.publish_wot_src && needs.publish-wot-src.result || 'disabled' }}
-            wot-gui-assets: ${{ inputs.publish_wot_gui_assets && needs.publish-wot-gui-assets.result || 'disabled' }}
-            Cleanup: ${{ needs.cleanup.result }} (deleted: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }})
-            Snapshot: ${{ needs.workload.outputs.snapshot_id || 'not created' }}
-
-            wot-src publication: ${{ !inputs.publish_wot_src && 'disabled' || needs.publish-wot-src.outputs.publication_state || 'not started' }} · ${{ needs.publish-wot-src.outputs.commit_sha || 'no commit' }}
-            wot-gui-assets publication: ${{ !inputs.publish_wot_gui_assets && 'disabled' || needs.publish-wot-gui-assets.outputs.publication_state || 'not started' }} · ${{ needs.publish-wot-gui-assets.outputs.commit_sha || 'no commit' }}
-            Pipeline run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          message: ${{ steps.report.outputs.message }}

@@ -16,7 +16,7 @@ cleanup/reconciliation и Telegram-отчётами.
 manual workflow_dispatch
   → provision одной VM, direct public IP и egress-only security group в Selectel
   → три JIT runner в game-unpack-pipeline: builder, wot-src и wot-gui-assets
-  → game-snapshot-builder@v0.4.0 на builder runner
+  → game-snapshot-builder@v0.4.1 на builder runner
   → sealed snapshot на локальном диске VM
   → параллельные pinned reusable workflows data-репозиториев
   → выбранные production data-ветки target
@@ -37,7 +37,7 @@ target, client type, languages и два независимых переключ
 - [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder), локально
   обычно `../game-unpacker`: resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline,
   transforms, stubs, seal и verify `GameSnapshot`. Оркестратор закрепляет reusable workflow на
-  `v0.4.0`.
+  `v0.4.1`.
 - [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`: reusable
   publication workflow, независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и
   Gameface.
@@ -80,8 +80,10 @@ target, client type, languages и два независимых переключ
   `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
-- Основной workflow отправляет Telegram-отчёт после cleanup при любом результате. Reconciler
-  отправляет recovery alert только при машинно подтверждённом `deleted_count > 0`.
+- Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
+  target, builder `version_name`, client type, языками и publisher state. Введённый `ALL`
+  сохраняется в заголовке буквально. Reconciler отправляет recovery alert только при машинно
+  подтверждённом `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
   `cancel-in-progress: false`.
 
