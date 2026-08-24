@@ -435,6 +435,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.publisher_ref }}", workflow)
         self.assertIn("repositories: ${{ inputs.publisher }}", workflow)
         self.assertIn("permission-contents: write", workflow)
+        self.assertIn(
+            "PUBLISHER_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}", workflow
+        )
+        self.assertIn(
+            "PUBLISHER_GITHUB_REPOSITORY: ${{ format('{0}/{1}', "
+            "github.repository_owner, inputs.publisher) }}",
+            workflow,
+        )
         self.assertIn("wot-src-publisher", workflow)
         self.assertIn("wot-gui-assets-publisher", workflow)
 

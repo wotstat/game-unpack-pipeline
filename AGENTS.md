@@ -64,6 +64,10 @@ manual workflow_dispatch
 - Publisher lifecycle находится в локальном reusable workflow оркестратора. Он является частью
   caller run и checkout’ит publisher-код из data-репозитория по точному commit SHA; не возвращать
   cross-repository dispatch/polling и не закреплять publisher-код на плавающем `main`.
+- Изменённые Git blobs суммарным размером более 1 ГБ publisher загружает bounded staging pushes во
+  временную ветку. Финальный tree и один version commit создаются через GitHub Git Database API с
+  проверкой локального tree hash; production-ref обновляется без force, а staging commits не
+  входят в production-историю.
 - Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
   абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
 - Все три runner зарегистрированы в `game-unpack-pipeline`. Каждый имеет уникальные имя и label на

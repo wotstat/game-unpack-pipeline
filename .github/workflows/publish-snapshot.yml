@@ -113,6 +113,8 @@ jobs:
           DATA_BRANCH: ${{ inputs.branch }}
           DESCRIPTOR_SHA256: ${{ inputs.expected_descriptor_sha256 }}
           PUBLISHER: ${{ inputs.publisher }}
+          PUBLISHER_GITHUB_REPOSITORY: ${{ format('{0}/{1}', github.repository_owner, inputs.publisher) }}
+          PUBLISHER_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           SNAPSHOT_ID: ${{ inputs.expected_snapshot_id }}
           SNAPSHOT_PATH: ${{ inputs.snapshot_path }}
           SNAPSHOT_PROFILE: ${{ inputs.expected_profile }}
