@@ -313,9 +313,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: telegram
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out report renderer
         uses: actions/checkout@v7.0.1
+
+      - name: Read pipeline start time
+        id: timing
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api
+          'repos/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          --jq '.run_started_at'
+          | sed 's/^/started_at=/'
+          >>"${GITHUB_OUTPUT}"
 
       - name: Render pipeline report
         id: report
@@ -338,6 +353,7 @@ jobs:
           WOT_GUI_ASSETS_COMMIT_SHA: ${{ needs.publish-wot-gui-assets.outputs.commit_sha }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
           CLEANUP_DELETED_COUNT: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }}
+          PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}
           PIPELINE_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 scripts/render_telegram_report.py
 

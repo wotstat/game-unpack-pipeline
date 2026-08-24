@@ -422,6 +422,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("secrets.TELEGRAM_CHAT_ID", workflow)
         self.assertIn("environment: telegram", workflow)
         self.assertIn("VERSION_NAME: ${{ needs.workload.outputs.version_name }}", workflow)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}", workflow)
         self.assertIn("format: html", workflow)
         self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)
 

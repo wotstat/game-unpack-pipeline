@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 
@@ -33,6 +34,29 @@ def _languages(value: str) -> str:
     if value.upper() == "ALL":
         return "ALL"
     return ", ".join(part.strip().upper() for part in value.split(",") if part.strip())
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _pipeline_duration(started_at: str, finished_at: str = "") -> str | None:
+    started = _timestamp(started_at)
+    finished = _timestamp(finished_at) if finished_at else datetime.now(timezone.utc)
+    if started is None or finished is None or finished < started:
+        return None
+    elapsed = int((finished - started).total_seconds())
+    minutes, seconds = divmod(elapsed, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
 
 
 def _commit_url(owner: str, repository: str, commit_sha: str) -> str | None:
@@ -134,7 +158,13 @@ def render_message(environment: Mapping[str, str]) -> str:
     )
 
     run_url = _escaped(environment["PIPELINE_RUN_URL"])
-    lines.extend(("", f'<a href="{run_url}">Open pipeline run →</a>'))
+    run_link = f'<a href="{run_url}">Open pipeline run →</a>'
+    duration = _pipeline_duration(
+        environment.get("PIPELINE_STARTED_AT", ""),
+        environment.get("PIPELINE_FINISHED_AT", ""),
+    )
+    footer = f"{duration} · {run_link}" if duration else run_link
+    lines.extend(("", footer))
     return "\n".join(lines)
 
 

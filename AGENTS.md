@@ -82,8 +82,9 @@ target, client type, languages и два независимых переключ
   точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
   target, builder `version_name`, client type, языками и publisher state. Введённый `ALL`
-  сохраняется в заголовке буквально. Reconciler отправляет recovery alert только при машинно
-  подтверждённом `deleted_count > 0`.
+  сохраняется в заголовке буквально, а последняя строка показывает полную длительность run рядом
+  со ссылкой. Reconciler отправляет recovery alert только при машинно подтверждённом
+  `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
   `cancel-in-progress: false`.
 

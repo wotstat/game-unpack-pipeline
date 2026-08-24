@@ -185,7 +185,8 @@ Publisher можно включать независимо для каждого
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
 10. `Telegram report` после cleanup отправляет компактный HTML-отчёт с version name, target,
     client type, языками и publisher state; `published` ведёт ссылкой на точный commit, а `ALL`
-    сохраняется в заголовке буквально.
+    сохраняется в заголовке буквально. Полная длительность run от `run_started_at` до формирования
+    отчёта выводится рядом со ссылкой на pipeline.
 11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 

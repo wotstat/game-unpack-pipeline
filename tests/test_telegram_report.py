@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.render_telegram_report import render_message
+from scripts.render_telegram_report import _pipeline_duration, render_message
 
 
 class TelegramReportTests(unittest.TestCase):
+    def test_pipeline_duration_uses_readable_precision(self) -> None:
+        self.assertEqual(
+            _pipeline_duration("2026-08-24T20:00:00Z", "2026-08-24T20:42:18Z"),
+            "42m 18s",
+        )
+        self.assertEqual(
+            _pipeline_duration("2026-08-24T20:00:00Z", "2026-08-24T20:00:38Z"),
+            "38s",
+        )
+
     def test_success_report_is_compact_and_preserves_all_languages(self) -> None:
         message = render_message(
             {
@@ -92,6 +102,33 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("Cleanup — <code>success</code> (deleted: <code>6</code>)", message)
         self.assertIn("📦 <code>wot-src</code> — not started", message)
         self.assertIn("run?a=1&amp;b=2", message)
+
+    def test_report_places_end_to_end_duration_next_to_run_link(self) -> None:
+        message = render_message(
+            {
+                "PIPELINE_RESULT": "success",
+                "TARGET": "wot-na",
+                "VERSION_NAME": "2.3.1.5400",
+                "CLIENT_TYPE": "sd",
+                "LANGUAGES": "ALL",
+                "WOT_SRC_ENABLED": "true",
+                "WOT_SRC_RESULT": "success",
+                "WOT_SRC_PUBLICATION_STATE": "unchanged",
+                "WOT_GUI_ASSETS_ENABLED": "true",
+                "WOT_GUI_ASSETS_RESULT": "success",
+                "WOT_GUI_ASSETS_PUBLICATION_STATE": "unchanged",
+                "PIPELINE_STARTED_AT": "2026-08-24T20:00:00Z",
+                "PIPELINE_FINISHED_AT": "2026-08-24T22:47:18Z",
+                "PIPELINE_RUN_URL": "https://github.com/example/run",
+            }
+        )
+
+        self.assertTrue(
+            message.endswith(
+                '2h 47m · <a href="https://github.com/example/run">Open pipeline run →</a>'
+            )
+        )
+        self.assertNotIn("⏱", message)
 
 
 if __name__ == "__main__":
