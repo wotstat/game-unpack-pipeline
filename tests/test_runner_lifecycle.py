@@ -397,6 +397,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
         self.assertEqual(workflow.count("uses: ./.github/workflows/publish-snapshot.yml"), 2)
+        self.assertEqual(workflow.count("secrets: inherit"), 2)
         self.assertRegex(workflow, r"publisher_ref: [0-9a-f]{40}")
         self.assertIn("publisher: wot-src", workflow)
         self.assertIn("publisher: wot-gui-assets", workflow)

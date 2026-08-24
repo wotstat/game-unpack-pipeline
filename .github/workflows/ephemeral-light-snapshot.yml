@@ -268,6 +268,7 @@ jobs:
       branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
     permissions:
       contents: read
+    secrets: inherit
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -288,6 +289,7 @@ jobs:
       branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
     permissions:
       contents: read
+    secrets: inherit
 
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
