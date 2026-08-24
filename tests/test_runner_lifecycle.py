@@ -449,6 +449,7 @@ class WorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
+        self.assertIn('PYTHONUNBUFFERED: "1"', workflow)
         self.assertIn("builder_runner_label", workflow)
         self.assertIn("wot_gui_assets_runner_label", workflow)
         self.assertIn("wot_src_runner_label", workflow)

@@ -1442,7 +1442,11 @@ def dispatch_publication(arguments: argparse.Namespace) -> None:
     write_output("publication_run_id", run_id)
     if run_url:
         write_output("publication_run_url", run_url)
-    print(f"Dispatched {publisher_name} workflow run {run_id}")
+    run_location = f" ({run_url})" if run_url else ""
+    print(
+        f"Dispatched {publisher_name} workflow run {run_id}{run_location}",
+        flush=True,
+    )
     append_summary(
         f"- {publisher_name} run: [{run_id}]({run_url})"
         if run_url
@@ -1462,15 +1466,16 @@ def dispatch_publication(arguments: argparse.Namespace) -> None:
             raise LifecycleError(f"{publisher_name} run lookup returned an unexpected run")
         status = str(run.get("status", "unknown"))
         if status != last_status:
-            print(f"{publisher_name} run {run_id}: {status}")
+            print(f"{publisher_name} run {run_id}: {status}", flush=True)
             last_status = status
         if status == "completed":
             conclusion = str(run.get("conclusion", ""))
             append_summary(f"- {publisher_name} conclusion: `{conclusion}`")
             if conclusion != "success":
+                details = f"; details: {run_url}" if run_url else ""
                 raise LifecycleError(
                     f"{publisher_name} workflow run {run_id} completed with "
-                    f"{conclusion or 'no conclusion'}"
+                    f"{conclusion or 'no conclusion'}{details}"
                 )
             return
         time.sleep(10)

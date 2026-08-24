@@ -96,6 +96,7 @@ permissions:
   contents: read
 
 env:
+  PYTHONUNBUFFERED: "1"
   SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}
   SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9' }}
   SELECTEL_PUBLIC_NETWORK_API_URL: ${{ inputs.selectel_location == 'ru-7a' && 'https://ru-7.cloud.api.selcloud.ru/public-network' || 'https://ru-9.cloud.api.selcloud.ru/public-network' }}
