@@ -102,8 +102,9 @@ region/zone/flavor через dispatch не принимаются.
    общий sealed snapshot с локального диска VM, независимо проверяет identity, descriptor и
    payload, после чего обновляет свою data-ветку. Большой snapshot не передаётся через Actions
    artifacts; большие Git object sets загружаются bounded staging pushes во временную ветку.
-   Затем publisher через GitHub Git Database API проверяемо собирает итоговый tree, создаёт один
-   version commit и без force обновляет production-ref; staging commits в data-историю не входят.
+   Эти commits кумулятивно собирают и проверяют итоговый tree; затем GitHub Git Database API
+   создаёт на нём один version commit и без force обновляет production-ref. Staging commits в
+   data-историю не входят.
 7. `Cleanup` с `always()` удаляет три runner registration и ресурсы Selectel даже после ошибки
    workload или любого publisher.
 8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, publisher state/commit,
