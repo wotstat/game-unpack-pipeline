@@ -396,16 +396,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
-        self.assertRegex(
-            workflow,
-            r"uses: wotstat/wot-src/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
-        )
-        self.assertRegex(
-            workflow,
-            r"uses: wotstat/wot-gui-assets/\.github/workflows/"
-            r"publish-snapshot\.yml@[0-9a-f]{40}",
-        )
-        self.assertNotIn("@0000000000000000000000000000000000000000", workflow)
+        self.assertEqual(workflow.count("uses: ./.github/workflows/publish-snapshot.yml"), 2)
+        self.assertRegex(workflow, r"publisher_ref: [0-9a-f]{40}")
+        self.assertIn("publisher: wot-src", workflow)
+        self.assertIn("publisher: wot-gui-assets", workflow)
         self.assertIn("publish-wot-gui-assets:", workflow)
         self.assertIn("publish-wot-src:", workflow)
         self.assertIn("format('test/light-{0}', inputs.target)", workflow)
@@ -424,6 +418,24 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
+
+    def test_publisher_lifecycle_is_owned_by_the_orchestrator(self) -> None:
+        workflow = (ROOT / ".github/workflows/publish-snapshot.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("workflow_call:", workflow)
+        self.assertIn("environment: selectel", workflow)
+        self.assertIn(
+            "repository: ${{ format('{0}/{1}', github.repository_owner, "
+            "inputs.publisher) }}",
+            workflow,
+        )
+        self.assertIn("ref: ${{ inputs.publisher_ref }}", workflow)
+        self.assertIn("repositories: ${{ inputs.publisher }}", workflow)
+        self.assertIn("permission-contents: write", workflow)
+        self.assertIn("wot-src-publisher", workflow)
+        self.assertIn("wot-gui-assets-publisher", workflow)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ manual workflow_dispatch
   → три JIT runner в game-unpack-pipeline: builder, wot-src и wot-gui-assets
   → game-snapshot-builder@v0.3.16 на builder runner
   → sealed snapshot на локальном диске VM
-  → параллельный workflow_call pinned publish-snapshot.yml из выбранных data-репозиториев
+  → параллельный workflow_call локального publish-snapshot.yml с pinned publisher commit SHA
   → выбранный light publish в test/light-<target> или full publish в <target>
   → cleanup с always()
   → итоговый Telegram-отчёт
@@ -61,9 +61,9 @@ manual workflow_dispatch
   production data-ветку `<target>`. Каждый publisher можно независимо отключить для конкретного
   run; если включены оба, они должны получить одинаковые identity, target, profile и descriptor
   digest.
-- Publisher workflow вызывается через `workflow_call` по точному commit SHA. Он является частью
-  caller run, но checkout’ит `job.workflow_repository` на `job.workflow_sha`; не возвращать
-  cross-repository dispatch/polling и не закреплять production publisher на плавающем `main`.
+- Publisher lifecycle находится в локальном reusable workflow оркестратора. Он является частью
+  caller run и checkout’ит publisher-код из data-репозитория по точному commit SHA; не возвращать
+  cross-repository dispatch/polling и не закреплять publisher-код на плавающем `main`.
 - Snapshot не загружается в Actions artifact. Все три runner находятся на одной VM и читают один
   абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
 - Все три runner зарегистрированы в `game-unpack-pipeline`. Каждый имеет уникальные имя и label на
@@ -108,10 +108,10 @@ manual workflow_dispatch
 ## Правила изменения
 
 - Перед правками проверять фактические workflow и lifecycle-скрипты этого репозитория, текущий
-  `build-snapshot.yml` закреплённого builder tag и pinned `publish-snapshot.yml` обоих publisher.
+  `build-snapshot.yml` закреплённого builder tag и publisher-код на pinned SHA обоих репозиториев.
 - При обновлении builder tag сверять inputs, outputs, stage names, profile semantics и требования к
   runner. Не ссылаться на плавающий `main` builder из production orchestration.
-- При изменении publisher contract обновлять оба reusable call path симметрично, закреплять их на
+- При изменении publisher contract обновлять оба reusable call path симметрично, закреплять код на
   полных commit SHA и сохранять cleanup при ошибке любого из них.
 - Документация должна описывать реализованное состояние. Будущие идеи явно помечать как
   нереализованные, а не как текущую итерацию.

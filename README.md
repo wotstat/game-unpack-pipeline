@@ -16,7 +16,7 @@ workflow_dispatch
   → три repository-level GitHub Actions JIT runner оркестратора на одной VM
   → light, benchmark или full pipeline через game-snapshot-builder@v0.3.16
   → sealed GameSnapshot на локальном диске VM
-  → выбранные reusable workflows wot-src и/или wot-gui-assets по pinned commit SHA
+  → orchestrator-owned publisher workflow checkout’ит выбранные data-репозитории по pinned SHA
   → независимая проверка и обновление выбранных pure-data веток
   → удаление runner registrations, VM, direct public IP и security group
   → итоговый Telegram-отчёт со статусами builder, publisher и cleanup
@@ -95,10 +95,10 @@ region/zone/flavor через dispatch не принимаются.
    telemetry.
 4. `Queue watchdog` отменяет run и удаляет инфраструктуру, если builder workload не получил runner
    за 10 минут.
-5. Если builder вернул `snapshot_path`, оркестратор вызывает каждый включённый
-   `publish-snapshot.yml` как reusable workflow по закреплённому commit SHA. Publisher jobs входят
-   в тот же run и назначаются на два caller-owned JIT runner без внешнего dispatch и polling.
-6. Каждый reusable workflow checkout’ит собственный репозиторий и собственный pinned SHA, читает
+5. Если builder вернул `snapshot_path`, оркестратор дважды вызывает свой reusable
+   `publish-snapshot.yml`, передавая имя и закреплённый commit SHA publisher-репозитория. Publisher
+   jobs входят в тот же run и назначаются на два caller-owned JIT runner без внешнего dispatch.
+6. Orchestrator-owned workflow checkout’ит соответствующий data-репозиторий на pinned SHA, читает
    общий sealed snapshot с локального диска VM, независимо проверяет identity, descriptor и
    payload, после чего обновляет свою data-ветку. Большой snapshot не передаётся через Actions
    artifacts; большие Git object sets предварительно загружаются bounded staging pushes.
@@ -120,7 +120,7 @@ README репозиториев [`wot-src`](https://github.com/wotstat/wot-src) 
 ## Безопасность и lifecycle
 
 - Selectel credentials используются только в GitHub-hosted lifecycle jobs. Private key GitHub App
-  хранится только в Environment `selectel`; pinned reusable publisher jobs получают его на время
+  хранится только в Environment `selectel`; orchestrator-owned publisher jobs получают его на время
   шага выпуска repository-scoped `contents: write` installation token. Selectel password
   publisher jobs не используют.
 - VM получает три одноразовые JIT-конфигурации. Каждая конфигурация хранится в отдельном файле с
@@ -152,6 +152,7 @@ Environments `selectel` и `telegram`, Telegram-бота, secrets и repository 
 ```text
 .github/actions/setup-openstack/          # pinned OpenStack CLI
 .github/workflows/ephemeral-light-snapshot.yml
+.github/workflows/publish-snapshot.yml     # reusable lifecycle двух publisher
 .github/workflows/reconcile-ephemeral-resources.yml
 scripts/bootstrap-actions-runner.sh       # cloud-init bootstrap трёх runner
 scripts/runner_lifecycle.py                # provision/watch/cleanup
