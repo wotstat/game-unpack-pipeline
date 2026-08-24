@@ -97,10 +97,10 @@ class ResourceIdentity:
             f"run_attempt={self.run_attempt};instance_key={self.instance_key}"
         )
 
-    def runner(self, role: str, repository: str) -> RunnerIdentity:
+    def runner(self, role: str) -> RunnerIdentity:
         name = f"{self.base_name}-{role}"
         return RunnerIdentity(
-            repository=repository,
+            repository=self.repository,
             role=role,
             name=name,
             label=name,
@@ -1114,13 +1114,9 @@ def provision(arguments: argparse.Namespace) -> None:
     identity = build_identity(arguments.instance_key)
     app_token = require_environment("GITHUB_APP_TOKEN")
     public_token = require_environment("GITHUB_PUBLIC_TOKEN")
-    wot_gui_assets_repository = validate_repository(
-        require_environment("WOT_GUI_ASSETS_REPOSITORY")
-    )
-    wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
-    builder_runner = identity.runner("builder", identity.repository)
-    wot_gui_assets_runner = identity.runner("wot-gui-assets", wot_gui_assets_repository)
-    wot_src_runner = identity.runner("wot-src", wot_src_repository)
+    builder_runner = identity.runner("builder")
+    wot_gui_assets_runner = identity.runner("wot-gui-assets")
+    wot_src_runner = identity.runner("wot-src")
     add_mask(config.password)
 
     for name, value in {
@@ -1249,13 +1245,9 @@ def cleanup(arguments: argparse.Namespace) -> None:
         run_attempt=arguments.run_attempt,
     )
     app_token = require_environment("GITHUB_APP_TOKEN")
-    wot_gui_assets_repository = validate_repository(
-        require_environment("WOT_GUI_ASSETS_REPOSITORY")
-    )
-    wot_src_repository = validate_repository(require_environment("WOT_SRC_REPOSITORY"))
-    builder_runner = identity.runner("builder", identity.repository)
-    wot_gui_assets_runner = identity.runner("wot-gui-assets", wot_gui_assets_repository)
-    wot_src_runner = identity.runner("wot-src", wot_src_repository)
+    builder_runner = identity.runner("builder")
+    wot_gui_assets_runner = identity.runner("wot-gui-assets")
+    wot_src_runner = identity.runner("wot-src")
     add_mask(config.password)
 
     if arguments.diagnostics:
@@ -1392,104 +1384,6 @@ def watch_queue(arguments: argparse.Namespace) -> None:
     write_output("timed_out", "true")
 
 
-def dispatch_publication(arguments: argparse.Namespace) -> None:
-    token = require_environment("GITHUB_APP_TOKEN")
-    repository = validate_repository(require_environment("PUBLICATION_REPOSITORY"))
-    publisher_name = repository.rsplit("/", 1)[1]
-    add_mask(token)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", arguments.workflow):
-        raise LifecycleError("publisher workflow filename is invalid")
-    if arguments.ref != "main":
-        raise LifecycleError("publisher workflow must be dispatched from main")
-    if arguments.profile not in {"full", "light"}:
-        raise LifecycleError("snapshot profile must be full or light")
-    if not os.path.isabs(arguments.snapshot_path):
-        raise LifecycleError("snapshot path must be absolute")
-    if not re.fullmatch(r"sha256:[a-f0-9]{64}", arguments.snapshot_id):
-        raise LifecycleError("snapshot ID is invalid")
-    if not re.fullmatch(r"[a-f0-9]{64}", arguments.descriptor_sha256):
-        raise LifecycleError("snapshot descriptor SHA-256 is invalid")
-    if arguments.timeout_seconds <= 0:
-        raise LifecycleError("publisher timeout must be positive")
-
-    _, response, _ = http_json(
-        "POST",
-        github_url(
-            f"repos/{repository}/actions/workflows/{arguments.workflow}/dispatches"
-        ),
-        token=token,
-        github_api=True,
-        body={
-            "ref": arguments.ref,
-            "inputs": {
-                "runner_label": arguments.runner_label,
-                "snapshot_path": arguments.snapshot_path,
-                "expected_snapshot_id": arguments.snapshot_id,
-                "expected_descriptor_sha256": arguments.descriptor_sha256,
-                "expected_profile": arguments.profile,
-                "target": arguments.target,
-                "branch": arguments.branch,
-            },
-        },
-        expected_statuses=(200,),
-    )
-    if not isinstance(response, dict):
-        raise LifecycleError(f"{publisher_name} dispatch returned an invalid response")
-    run_id = response.get("workflow_run_id")
-    if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
-        raise LifecycleError(f"{publisher_name} dispatch did not return a workflow run ID")
-    run_url = str(response.get("html_url", ""))
-    write_output("publication_run_id", run_id)
-    if run_url:
-        write_output("publication_run_url", run_url)
-    run_location = f" ({run_url})" if run_url else ""
-    print(
-        f"Dispatched {publisher_name} workflow run {run_id}{run_location}",
-        flush=True,
-    )
-    append_summary(
-        f"- {publisher_name} run: [{run_id}]({run_url})"
-        if run_url
-        else f"- {publisher_name} run: `{run_id}`"
-    )
-
-    deadline = time.monotonic() + arguments.timeout_seconds
-    last_status = ""
-    while time.monotonic() < deadline:
-        _, run, _ = http_json(
-            "GET",
-            github_url(f"repos/{repository}/actions/runs/{run_id}"),
-            token=token,
-            github_api=True,
-        )
-        if not isinstance(run, dict) or run.get("id") != run_id:
-            raise LifecycleError(f"{publisher_name} run lookup returned an unexpected run")
-        status = str(run.get("status", "unknown"))
-        if status != last_status:
-            print(f"{publisher_name} run {run_id}: {status}", flush=True)
-            last_status = status
-        if status == "completed":
-            conclusion = str(run.get("conclusion", ""))
-            append_summary(f"- {publisher_name} conclusion: `{conclusion}`")
-            if conclusion != "success":
-                details = f"; details: {run_url}" if run_url else ""
-                raise LifecycleError(
-                    f"{publisher_name} workflow run {run_id} completed with "
-                    f"{conclusion or 'no conclusion'}{details}"
-                )
-            return
-        time.sleep(10)
-
-    http_json(
-        "POST",
-        github_url(f"repos/{repository}/actions/runs/{run_id}/cancel"),
-        token=token,
-        github_api=True,
-        expected_statuses=(202, 409),
-    )
-    raise LifecycleError(f"timed out waiting for {publisher_name} workflow run {run_id}")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1517,18 +1411,6 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--timeout-seconds", type=int, default=600)
     watch_parser.set_defaults(handler=watch_queue)
 
-    dispatch_parser = subparsers.add_parser("dispatch-publication")
-    dispatch_parser.add_argument("--workflow", default="publish-snapshot.yml")
-    dispatch_parser.add_argument("--ref", default="main")
-    dispatch_parser.add_argument("--runner-label", required=True)
-    dispatch_parser.add_argument("--snapshot-path", required=True)
-    dispatch_parser.add_argument("--snapshot-id", required=True)
-    dispatch_parser.add_argument("--descriptor-sha256", required=True)
-    dispatch_parser.add_argument("--target", required=True)
-    dispatch_parser.add_argument("--branch", required=True)
-    dispatch_parser.add_argument("--profile", choices=("full", "light"), required=True)
-    dispatch_parser.add_argument("--timeout-seconds", type=int, default=3600)
-    dispatch_parser.set_defaults(handler=dispatch_publication)
     return parser
 
 

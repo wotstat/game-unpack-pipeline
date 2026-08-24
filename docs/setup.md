@@ -55,8 +55,7 @@ cleanup диск удаляется вместе с сервером. Отдел
 3. Callback URL и OAuth не нужны.
 4. Repository permissions → **Administration: Read and write** — генерация и удаление repository
    JIT runner.
-5. Repository permissions → **Actions: Read and write** — dispatch, чтение статуса и отмена
-   publisher workflow.
+5. Repository permissions → **Contents: Read and write** — checkout publisher и push data-веток.
 6. Установить App в организации `wotstat` с **Only select repositories**:
    `game-unpack-pipeline`, `wot-src` и `wot-gui-assets`.
 7. Скопировать **Client ID** приложения. Workflow использует `client-id` в
@@ -65,14 +64,15 @@ cleanup диск удаляется вместе с сервером. Отдел
 
 Workflows создают минимально scoped короткоживущие installation tokens:
 
-- provision — `Actions: write` и `Administration: write` для трёх репозиториев;
-- queue-timeout cleanup, основной cleanup и reconciler — `Administration: write` для трёх
-  репозиториев;
-- orchestration `wot-src` — `Actions: write` только для `wot-src`;
-- orchestration `wot-gui-assets` — `Actions: write` только для `wot-gui-assets`.
+- provision, queue-timeout cleanup, основной cleanup и reconciler — `Administration: write`
+  только для `game-unpack-pipeline`, где зарегистрированы все три JIT runner;
+- reusable publisher `wot-src` — `Contents: write` только для `wot-src`;
+- reusable publisher `wot-gui-assets` — `Contents: write` только для `wot-gui-assets`.
 
-Private key остаётся в GitHub-hosted jobs. Publisher commits выполняются встроенным
-`GITHUB_TOKEN` соответствующего data-репозитория с `contents: write`.
+`Actions: write` приложению больше не нужен: publisher не запускаются внешним dispatch. Private
+key хранится только в Environment `selectel`. Закреплённый reusable publisher использует его на
+self-hosted job лишь для выпуска repository-scoped installation token; checkout сохраняет этот
+token как credentials для push data-ветки.
 
 ## 3. GitHub Environment
 
@@ -90,8 +90,8 @@ Private key остаётся в GitHub-hosted jobs. Publisher commits выпол
 | `GH_APP_PRIVATE_KEY` | Полный PEM private key GitHub App |
 | `SELECTEL_OS_PASSWORD` | Пароль Selectel service user |
 
-Self-hosted builder и publisher jobs не используют Environment `selectel` и не получают эти
-secrets.
+Self-hosted builder не использует Environment `selectel`. Reusable publisher jobs используют его
+для `GH_APP_PRIVATE_KEY`, но не обращаются к `SELECTEL_OS_PASSWORD`.
 
 ## 4. Repository Variables
 
@@ -181,27 +181,28 @@ run на нужной стадии через `until`. Значение `workers
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
-2. Provision резервирует builder runner в `game-unpack-pipeline` и по одному publisher runner в
-   `wot-src`/`wot-gui-assets`, затем создаёт VM.
+2. Provision резервирует все три runner в `game-unpack-pipeline`: builder и по одному runner для
+   jobs `wot-src`/`wot-gui-assets`, затем создаёт VM.
 3. Cloud-init скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и запускает
    три systemd service под разными Unix-пользователями.
 4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех трёх runner.
 5. `Workload` вызывает `game-snapshot-builder@v0.3.16`. Стадии от `resolve` до выбранного `until`
    видны отдельными Actions steps; metrics и небольшие diagnostic files загружаются как artifact.
 6. После seal builder возвращает snapshot ID, абсолютный path и SHA-256 canonical descriptor.
-7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно dispatch-ят
-   `publish-snapshot.yml@main`, передают одинаковый snapshot contract и ждут конкретные внешние
-   Run ID. Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
+7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно вызывают
+   `publish-snapshot.yml` по закреплённым commit SHA. Reusable jobs входят в основной run,
+   checkout’ят код своего data-репозитория через `job.workflow_repository`/`job.workflow_sha` и
+   получают одинаковый snapshot contract. Отключённая job получает статус `skipped` и не считается
+   ошибкой cleanup.
 8. Каждый включённый publisher независимо проверяет snapshot и либо создаёт version commit, либо
    успешно завершает повторную публикацию как `unchanged`.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. `Telegram report` отправляет итоговые статусы и ссылки после завершения cleanup.
+10. `Telegram report` отправляет итоговые статусы и publisher commit/state после cleanup.
 11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 
-Queue watchdog ждёт назначения builder workload 10 минут. Publisher orchestration ждёт каждый
-внешний workflow до 45 минут и пытается отменить его при timeout; сама GitHub-hosted publisher job
-ограничена 60 минутами.
+Queue watchdog ждёт назначения builder workload 10 минут. Каждая self-hosted reusable publisher
+job ограничена 60 минутами; её состояние и шаги видны непосредственно в основном run.
 
 ## 8. Отмена и повторная очистка
 

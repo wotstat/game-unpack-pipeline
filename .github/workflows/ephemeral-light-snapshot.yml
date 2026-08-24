@@ -92,7 +92,6 @@ on:
           - ru-7a
           - ru-9a
 permissions:
-  actions: write
   contents: read
 
 env:
@@ -136,8 +135,7 @@ jobs:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: game-unpack-pipeline,wot-src,wot-gui-assets
-          permission-actions: write
+          repositories: game-unpack-pipeline
           permission-administration: write
 
       - name: Install OpenStack CLI
@@ -150,8 +148,6 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
-          WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets
-          WOT_SRC_REPOSITORY: wotstat/wot-src
           SELECTEL_FLAVOR_ID: ${{ inputs.runner_profile == 'highfreq-16c-32g' && 'HFL1.16-32768-240' || vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
@@ -211,7 +207,7 @@ jobs:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: game-unpack-pipeline,wot-src,wot-gui-assets
+          repositories: game-unpack-pipeline
           permission-administration: write
 
       - name: Install OpenStack CLI for timed-out cleanup
@@ -226,9 +222,7 @@ jobs:
           PORT_ID: ${{ needs.provision.outputs.port_id }}
           BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
-          WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
-          WOT_SRC_REPOSITORY: wotstat/wot-src
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
@@ -261,57 +255,17 @@ jobs:
     needs:
       - provision
       - workload
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: selectel
-    outputs:
-      run_id: ${{ steps.dispatch.outputs.publication_run_id }}
-      run_url: ${{ steps.dispatch.outputs.publication_run_url }}
-    steps:
-      - name: Check out orchestration code
-        uses: actions/checkout@v7.0.1
-
-      - name: Create wot-src dispatch token
-        id: app-token
-        uses: actions/create-github-app-token@v3.2.0
-        with:
-          client-id: ${{ vars.GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: wot-src
-          permission-actions: write
-
-      - name: Dispatch and wait for exact wot-src run
-        id: dispatch
-        env:
-          FULL_PUBLICATION_BRANCH: ${{ inputs.target }}
-          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          LIGHT_PUBLICATION_BRANCH: test/light-${{ inputs.target }}
-          SNAPSHOT_DESCRIPTOR_SHA256: ${{ needs.workload.outputs.descriptor_sha256 }}
-          SNAPSHOT_ID: ${{ needs.workload.outputs.snapshot_id }}
-          SNAPSHOT_PATH: ${{ needs.workload.outputs.snapshot_path }}
-          SNAPSHOT_PROFILE: ${{ inputs.light && 'light' || 'full' }}
-          TARGET: ${{ inputs.target }}
-          PUBLICATION_REPOSITORY: wotstat/wot-src
-          PUBLISHER_RUNNER_LABEL: ${{ needs.provision.outputs.wot_src_runner_label }}
-        run: |
-          set -Eeuo pipefail
-          if [[ "${SNAPSHOT_PROFILE}" == light ]]; then
-            publication_branch="${LIGHT_PUBLICATION_BRANCH}"
-          else
-            publication_branch="${FULL_PUBLICATION_BRANCH}"
-          fi
-          python3 scripts/runner_lifecycle.py dispatch-publication \
-            --workflow publish-snapshot.yml \
-            --ref main \
-            --runner-label "${PUBLISHER_RUNNER_LABEL}" \
-            --snapshot-path "${SNAPSHOT_PATH}" \
-            --snapshot-id "${SNAPSHOT_ID}" \
-            --descriptor-sha256 "${SNAPSHOT_DESCRIPTOR_SHA256}" \
-            --target "${TARGET}" \
-            --branch "${publication_branch}" \
-            --profile "${SNAPSHOT_PROFILE}" \
-            --timeout-seconds 2700
+    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@7595c5c6a4f1d0484121cd45ad8c31702abe25f6
+    with:
+      runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
+      snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
+      expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
+      expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
+      expected_profile: ${{ inputs.light && 'light' || 'full' }}
+      target: ${{ inputs.target }}
+      branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
+    permissions:
+      contents: read
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -319,57 +273,17 @@ jobs:
     needs:
       - provision
       - workload
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: selectel
-    outputs:
-      run_id: ${{ steps.dispatch.outputs.publication_run_id }}
-      run_url: ${{ steps.dispatch.outputs.publication_run_url }}
-    steps:
-      - name: Check out orchestration code
-        uses: actions/checkout@v7.0.1
-
-      - name: Create wot-gui-assets dispatch token
-        id: app-token
-        uses: actions/create-github-app-token@v3.2.0
-        with:
-          client-id: ${{ vars.GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: wot-gui-assets
-          permission-actions: write
-
-      - name: Dispatch and wait for exact wot-gui-assets run
-        id: dispatch
-        env:
-          FULL_PUBLICATION_BRANCH: ${{ inputs.target }}
-          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          LIGHT_PUBLICATION_BRANCH: test/light-${{ inputs.target }}
-          SNAPSHOT_DESCRIPTOR_SHA256: ${{ needs.workload.outputs.descriptor_sha256 }}
-          SNAPSHOT_ID: ${{ needs.workload.outputs.snapshot_id }}
-          SNAPSHOT_PATH: ${{ needs.workload.outputs.snapshot_path }}
-          SNAPSHOT_PROFILE: ${{ inputs.light && 'light' || 'full' }}
-          TARGET: ${{ inputs.target }}
-          PUBLICATION_REPOSITORY: wotstat/wot-gui-assets
-          PUBLISHER_RUNNER_LABEL: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
-        run: |
-          set -Eeuo pipefail
-          if [[ "${SNAPSHOT_PROFILE}" == light ]]; then
-            publication_branch="${LIGHT_PUBLICATION_BRANCH}"
-          else
-            publication_branch="${FULL_PUBLICATION_BRANCH}"
-          fi
-          python3 scripts/runner_lifecycle.py dispatch-publication \
-            --workflow publish-snapshot.yml \
-            --ref main \
-            --runner-label "${PUBLISHER_RUNNER_LABEL}" \
-            --snapshot-path "${SNAPSHOT_PATH}" \
-            --snapshot-id "${SNAPSHOT_ID}" \
-            --descriptor-sha256 "${SNAPSHOT_DESCRIPTOR_SHA256}" \
-            --target "${TARGET}" \
-            --branch "${publication_branch}" \
-            --profile "${SNAPSHOT_PROFILE}" \
-            --timeout-seconds 2700
+    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@1a02937e2299c41c729dcd0afd2ffb5bd0eb8f4c
+    with:
+      runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
+      snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
+      expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
+      expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
+      expected_profile: ${{ inputs.light && 'light' || 'full' }}
+      target: ${{ inputs.target }}
+      branch: ${{ inputs.light && format('test/light-{0}', inputs.target) || inputs.target }}
+    permissions:
+      contents: read
 
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -396,7 +310,7 @@ jobs:
           client-id: ${{ vars.GH_APP_CLIENT_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: game-unpack-pipeline,wot-src,wot-gui-assets
+          repositories: game-unpack-pipeline
           permission-administration: write
 
       - name: Install OpenStack CLI
@@ -413,11 +327,9 @@ jobs:
           WOT_GUI_ASSETS_PUBLISH_RESULT: ${{ needs.publish-wot-gui-assets.result }}
           WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_gui_assets && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
-          WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets
           WOT_SRC_PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
           WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
-          WOT_SRC_REPOSITORY: wotstat/wot-src
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           WORKLOAD_RESULT: ${{ needs.workload.result }}
@@ -480,6 +392,6 @@ jobs:
             Cleanup: ${{ needs.cleanup.result }} (deleted: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }})
             Snapshot: ${{ needs.workload.outputs.snapshot_id || 'not created' }}
 
-            wot-src run: ${{ !inputs.publish_wot_src && 'disabled' || needs.publish-wot-src.outputs.run_url || 'not started' }}
-            wot-gui-assets run: ${{ !inputs.publish_wot_gui_assets && 'disabled' || needs.publish-wot-gui-assets.outputs.run_url || 'not started' }}
+            wot-src publication: ${{ !inputs.publish_wot_src && 'disabled' || needs.publish-wot-src.outputs.publication_state || 'not started' }} · ${{ needs.publish-wot-src.outputs.commit_sha || 'no commit' }}
+            wot-gui-assets publication: ${{ !inputs.publish_wot_gui_assets && 'disabled' || needs.publish-wot-gui-assets.outputs.publication_state || 'not started' }} · ${{ needs.publish-wot-gui-assets.outputs.commit_sha || 'no commit' }}
             Pipeline run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

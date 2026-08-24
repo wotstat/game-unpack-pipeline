@@ -13,10 +13,10 @@
 workflow_dispatch
   → GitHub-hosted provision job
   → временная VM в Selectel
-  → три repository-level GitHub Actions JIT runner на одной VM
+  → три repository-level GitHub Actions JIT runner оркестратора на одной VM
   → light, benchmark или full pipeline через game-snapshot-builder@v0.3.16
   → sealed GameSnapshot на локальном диске VM
-  → выбранные workflow wot-src@main и/или wot-gui-assets@main
+  → выбранные reusable workflows wot-src и/или wot-gui-assets по pinned commit SHA
   → независимая проверка и обновление выбранных pure-data веток
   → удаление runner registrations, VM, direct public IP и security group
   → итоговый Telegram-отчёт со статусами builder, publisher и cleanup
@@ -86,23 +86,26 @@ region/zone/flavor через dispatch не принимаются.
 1. `Provision` на GitHub-hosted runner получает короткоживущий GitHub App installation token,
    проверяет Selectel authentication, image, flavor, availability zone и свободную квоту direct
    public IP.
-2. Lifecycle создаёт security group без ingress rules, direct-public port, три JIT-конфигурации и
-   одну VM. На VM запускаются отдельные runner для builder, `wot-src` и `wot-gui-assets`.
+2. Lifecycle создаёт security group без ingress rules, direct-public port, три JIT-конфигурации в
+   `game-unpack-pipeline` и одну VM. На VM запускаются отдельные runner для builder, `wot-src` и
+   `wot-gui-assets`.
 3. `Workload` вызывает versioned reusable workflow
    `wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.3.16`. Все стадии остаются
    одной job, но отображаются отдельными GitHub Actions steps с собственными логами и resource
    telemetry.
 4. `Queue watchdog` отменяет run и удаляет инфраструктуру, если builder workload не получил runner
    за 10 минут.
-5. Если builder вернул `snapshot_path`, каждая включённая GitHub-hosted orchestration job вызывает
-   `publish-snapshot.yml@main` в своём data-репозитории и ждёт именно возвращённый GitHub Run ID.
-6. Включённые publisher читают один sealed snapshot с локального диска VM, независимо проверяют
-   identity, descriptor и payload, после чего обновляют свои data-ветки. Большой snapshot не
-   передаётся через Actions artifacts.
+5. Если builder вернул `snapshot_path`, оркестратор вызывает каждый включённый
+   `publish-snapshot.yml` как reusable workflow по закреплённому commit SHA. Publisher jobs входят
+   в тот же run и назначаются на два caller-owned JIT runner без внешнего dispatch и polling.
+6. Каждый reusable workflow checkout’ит собственный репозиторий и собственный pinned SHA, читает
+   общий sealed snapshot с локального диска VM, независимо проверяет identity, descriptor и
+   payload, после чего обновляет свою data-ветку. Большой snapshot не передаётся через Actions
+   artifacts; большие Git object sets предварительно загружаются bounded staging pushes.
 7. `Cleanup` с `always()` удаляет три runner registration и ресурсы Selectel даже после ошибки
    workload или любого publisher.
-8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, snapshot ID, число удалённых
-   ресурсов и ссылки на основной и publisher runs.
+8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, publisher state/commit,
+   snapshot ID, число удалённых ресурсов и ссылку на единый основной run.
 9. [`reconcile-ephemeral-resources.yml`](.github/workflows/reconcile-ephemeral-resources.yml)
    запускается после завершения основного workflow и повторяет идемпотентную очистку в `ru-7` и
    `ru-9`. Его можно запустить вручную по исходным `run_id` и `run_attempt`. Аварийный alert
@@ -116,8 +119,10 @@ README репозиториев [`wot-src`](https://github.com/wotstat/wot-src) 
 
 ## Безопасность и lifecycle
 
-- Selectel credentials и private key GitHub App используются только в GitHub-hosted jobs с
-  Environment `selectel` и не передаются на VM.
+- Selectel credentials используются только в GitHub-hosted lifecycle jobs. Private key GitHub App
+  хранится только в Environment `selectel`; pinned reusable publisher jobs получают его на время
+  шага выпуска repository-scoped `contents: write` installation token. Selectel password
+  publisher jobs не используют.
 - VM получает три одноразовые JIT-конфигурации. Каждая конфигурация хранится в отдельном файле с
   mode `0600`, удаляется перед стартом runner process и обслуживает не более одной job.
 - Builder и publisher работают под разными Unix-пользователями и в разных runner work
@@ -149,7 +154,7 @@ Environments `selectel` и `telegram`, Telegram-бота, secrets и repository 
 .github/workflows/ephemeral-light-snapshot.yml
 .github/workflows/reconcile-ephemeral-resources.yml
 scripts/bootstrap-actions-runner.sh       # cloud-init bootstrap трёх runner
-scripts/runner_lifecycle.py                # provision/watch/dispatch/cleanup
+scripts/runner_lifecycle.py                # provision/watch/cleanup
 tests/test_runner_lifecycle.py
 docs/setup.md
 ```

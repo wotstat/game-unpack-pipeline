@@ -34,16 +34,16 @@ class ResourceIdentityTests(unittest.TestCase):
             "run_id=123456;run_attempt=2;instance_key=manual-123456-2",
         )
 
-        builder = identity.runner("builder", "wotstat/game-unpack-pipeline")
-        assets = identity.runner("wot-gui-assets", "wotstat/wot-gui-assets")
-        source = identity.runner("wot-src", "wotstat/wot-src")
+        builder = identity.runner("builder")
+        assets = identity.runner("wot-gui-assets")
+        source = identity.runner("wot-src")
         self.assertEqual(builder.name, "gup-manual-123456-2-builder")
         self.assertEqual(builder.label, "gup-manual-123456-2-builder")
         self.assertEqual(builder.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(assets.name, "gup-manual-123456-2-wot-gui-assets")
-        self.assertEqual(assets.repository, "wotstat/wot-gui-assets")
+        self.assertEqual(assets.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
-        self.assertEqual(source.repository, "wotstat/wot-src")
+        self.assertEqual(source.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(builder.scope_label, assets.scope_label)
         self.assertEqual(builder.scope_label, source.scope_label)
 
@@ -273,69 +273,6 @@ class HttpJsonTests(unittest.TestCase):
         sleep.assert_called_once()
 
 
-class WorkflowDispatchTests(unittest.TestCase):
-    def test_dispatches_main_and_waits_for_the_exact_returned_run_id(self) -> None:
-        arguments = Mock(
-            workflow="publish-snapshot.yml",
-            ref="main",
-            runner_label="gup-manual-123-1-wot-src",
-            snapshot_path="/var/lib/game-snapshot-builder/run/snapshots/sha256:abc",
-            snapshot_id="sha256:" + "a" * 64,
-            descriptor_sha256="b" * 64,
-            target="wot-eu",
-            branch="test/light-wot-eu",
-            profile="light",
-            timeout_seconds=3600,
-        )
-        responses = [
-            (
-                200,
-                {
-                    "workflow_run_id": 987654,
-                    "html_url": "https://github.com/wotstat/wot-src/actions/runs/987654",
-                },
-                {},
-            ),
-            (
-                200,
-                {
-                    "id": 987654,
-                    "status": "completed",
-                    "conclusion": "success",
-                    "html_url": "https://github.com/wotstat/wot-src/actions/runs/987654",
-                },
-                {},
-            ),
-        ]
-        environment = {
-            "GITHUB_API_URL": "https://api.github.com",
-            "GITHUB_APP_TOKEN": "test-token",
-            "PUBLICATION_REPOSITORY": "wotstat/wot-src",
-        }
-
-        with (
-            patch.dict(os.environ, environment, clear=True),
-            patch.object(lifecycle, "http_json", side_effect=responses) as request,
-        ):
-            lifecycle.dispatch_publication(arguments)
-
-        dispatch_call = request.call_args_list[0]
-        self.assertEqual(dispatch_call.args[0], "POST")
-        self.assertTrue(
-            dispatch_call.args[1].endswith(
-                "/repos/wotstat/wot-src/actions/workflows/"
-                "publish-snapshot.yml/dispatches"
-            )
-        )
-        self.assertEqual(dispatch_call.kwargs["body"]["ref"], "main")
-        self.assertEqual(
-            dispatch_call.kwargs["body"]["inputs"]["runner_label"],
-            arguments.runner_label,
-        )
-        wait_call = request.call_args_list[1]
-        self.assertTrue(wait_call.args[1].endswith("/actions/runs/987654"))
-
-
 class CleanupReportingTests(unittest.TestCase):
     def test_reports_deletions_even_when_later_cleanup_fails(self) -> None:
         arguments = Mock(
@@ -371,8 +308,6 @@ class CleanupReportingTests(unittest.TestCase):
                 "GITHUB_APP_TOKEN": "test-token",
                 "GITHUB_OUTPUT": str(output_path),
                 "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
-                "WOT_GUI_ASSETS_REPOSITORY": "wotstat/wot-gui-assets",
-                "WOT_SRC_REPOSITORY": "wotstat/wot-src",
             }
             with (
                 patch.dict(os.environ, environment, clear=True),
@@ -444,7 +379,7 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
 
-    def test_provisions_cleans_and_dispatches_both_publishers(self) -> None:
+    def test_provisions_and_calls_both_reusable_publishers(self) -> None:
         workflow = (ROOT / ".github/workflows/ephemeral-light-snapshot.yml").read_text(
             encoding="utf-8"
         )
@@ -453,18 +388,27 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("builder_runner_label", workflow)
         self.assertIn("wot_gui_assets_runner_label", workflow)
         self.assertIn("wot_src_runner_label", workflow)
-        self.assertIn("WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets", workflow)
-        self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", workflow)
-        self.assertIn("permission-actions: write", workflow)
-        self.assertIn("game-unpack-pipeline,wot-src,wot-gui-assets", workflow)
+        self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", workflow)
+        self.assertNotIn("WOT_SRC_REPOSITORY", workflow)
+        self.assertNotIn("permission-actions: write", workflow)
+        self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", workflow)
         self.assertIn("--builder-runner-id", workflow)
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
-        self.assertEqual(workflow.count("dispatch-publication"), 2)
+        self.assertNotIn("dispatch-publication", workflow)
+        self.assertRegex(
+            workflow,
+            r"uses: wotstat/wot-src/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
+        )
+        self.assertRegex(
+            workflow,
+            r"uses: wotstat/wot-gui-assets/\.github/workflows/"
+            r"publish-snapshot\.yml@[0-9a-f]{40}",
+        )
+        self.assertNotIn("@0000000000000000000000000000000000000000", workflow)
         self.assertIn("publish-wot-gui-assets:", workflow)
         self.assertIn("publish-wot-src:", workflow)
-        self.assertIn("test/light-${{ inputs.target }}", workflow)
-        self.assertIn("FULL_PUBLICATION_BRANCH: ${{ inputs.target }}", workflow)
+        self.assertIn("format('test/light-{0}', inputs.target)", workflow)
         self.assertIn("notify:", workflow)
         self.assertIn("needs.cleanup.outputs.deleted_count", workflow)
         self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
@@ -474,9 +418,9 @@ class WorkflowContractTests(unittest.TestCase):
         reconciler = (
             ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
-        self.assertIn("WOT_GUI_ASSETS_REPOSITORY: wotstat/wot-gui-assets", reconciler)
-        self.assertIn("WOT_SRC_REPOSITORY: wotstat/wot-src", reconciler)
+        self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
+        self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
+        self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)
         self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
