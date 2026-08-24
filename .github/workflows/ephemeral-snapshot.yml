@@ -53,6 +53,7 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
+  SELECTEL_FLAVOR_ID: "HFL1.16-32768-240"
   SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}
   SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9' }}
   SELECTEL_PUBLIC_NETWORK_API_URL: ${{ inputs.selectel_location == 'ru-7a' && 'https://ru-7.cloud.api.selcloud.ru/public-network' || 'https://ru-9.cloud.api.selcloud.ru/public-network' }}
@@ -105,7 +106,6 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
-          SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}
           SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}

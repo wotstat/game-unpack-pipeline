@@ -75,8 +75,8 @@ target, client type, languages, Selectel location и два независимы
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только builder имеет
   `sudo`.
-- Flavor всегда берётся из `SELECTEL_FLAVOR_ID`; location задаёт zone, region и Public Network
-  endpoint.
+- Production flavor зафиксирован как HighFreq `HFL1.16-32768-240`; Standard и выбор flavor не
+  поддерживаются. Location задаёт zone, region и Public Network endpoint.
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет Telegram-отчёт после cleanup при любом результате. Reconciler

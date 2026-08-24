@@ -15,15 +15,15 @@ Workflow не имеет dry-run режима. Сразу после нажат�
 4. Сохранить пароль service user в менеджере секретов: после создания его нельзя будет прочитать
    повторно.
 5. Пополнить баланс и проверить квоты проекта.
-6. Выбрать образ Ubuntu 24.04 x64 и Standard flavor с локальным диском для
-   `SELECTEL_IMAGE_ID`/`SELECTEL_FLAVOR_ID`.
+6. Выбрать образ Ubuntu 24.04 x64 для `SELECTEL_IMAGE_ID`. Production flavor уже зафиксирован в
+   workflow как HighFreq `HFL1.16-32768-240`.
 
 Один параллельный pipeline run требует:
 
 - 1 cloud server;
 - 1 direct public IP;
 - 16 vCPU и 32 ГБ RAM при текущих профилях;
-- 256 ГБ local disk для рекомендуемого Standard `SL1.16-32768-256`.
+- 240 ГБ local disk HighFreq `HFL1.16-32768-240`.
 
 Для `N` одновременно работающих runs нужны как минимум `N` server и direct-IP slots, `16 × N`
 vCPU и `32 × N` ГБ RAM. Оркестратор не отменяет предыдущий ручной run, поэтому лимит реального
@@ -39,8 +39,8 @@ cleanup диск удаляется вместе с сервером. Отдел
 | `ru-7a` (по умолчанию) | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 | `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
-Flavor всегда берётся из `SELECTEL_FLAVOR_ID`; рекомендуемое значение — стабильное имя
-`SL1.16-32768-256`. Если планируется использовать обе location, image и flavor должны однозначно
+Flavor зафиксирован как `HFL1.16-32768-240`. Standard и выбор flavor не поддерживаются. Если
+планируется использовать обе location, image и фиксированный HighFreq flavor должны однозначно
 разрешаться в каждой из них.
 
 ## 2. Repository-level GitHub App
@@ -109,12 +109,11 @@ Self-hosted builder и reusable publisher jobs не используют Environ
 | `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
 | `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
 | `SELECTEL_IMAGE_ID` | Уникальное имя или UUID выбранного Ubuntu 24.04 x64 image |
-| `SELECTEL_FLAVOR_ID` | Уникальное имя или UUID Standard flavor; рекомендуется `SL1.16-32768-256` |
 
 `SELECTEL_OS_PROJECT_ID` может быть UUID с дефисами или 32 шестнадцатеричными символами. Image и
-flavor разрешаются OpenStack CLI в выбранном run region. До создания ресурсов preflight проверяет
-authentication, image, flavor, availability zone и наличие свободного direct-public-IP slot; при
-отсутствующем или неоднозначном имени run завершается на этом этапе.
+фиксированный HighFreq flavor разрешаются OpenStack CLI в выбранном run region. До создания
+ресурсов preflight проверяет authentication, image, flavor, availability zone и наличие свободного
+direct-public-IP slot; при отсутствующем или неоднозначном имени run завершается на этом этапе.
 
 ## 5. Telegram-уведомления
 

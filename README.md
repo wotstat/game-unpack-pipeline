@@ -55,9 +55,9 @@ snapshot до стадии `snapshot` и предоставляет только
 | `selectel_location` | `ru-7a` по умолчанию или `ru-9a` |
 
 Publisher можно независимо отключить для ручного рерана. Если отключить оба, workflow только
-соберёт и проверит snapshot, после чего удалит VM. Flavor всегда берётся из repository variable
-`SELECTEL_FLAVOR_ID`; location определяет OpenStack region, availability zone и Selectel Public
-Network endpoint.
+соберёт и проверит snapshot, после чего удалит VM. Production flavor зафиксирован как HighFreq
+`HFL1.16-32768-240`; Standard и выбор flavor не поддерживаются. Location определяет OpenStack
+region, availability zone и Selectel Public Network endpoint.
 
 ## Reusable workflows publisher
 

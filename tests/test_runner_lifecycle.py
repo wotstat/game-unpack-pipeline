@@ -369,7 +369,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("default: ru-7a", workflow)
         self.assertIn("SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location }}", workflow)
         self.assertIn("inputs.selectel_location == 'ru-7a' && 'ru-7' || 'ru-9'", workflow)
-        self.assertIn("SELECTEL_FLAVOR_ID: ${{ vars.SELECTEL_FLAVOR_ID }}", workflow)
+        self.assertIn('SELECTEL_FLAVOR_ID: "HFL1.16-32768-240"', workflow)
+        self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
             "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.0",
             workflow,
