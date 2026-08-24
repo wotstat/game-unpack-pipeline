@@ -1,0 +1,12 @@
+name: Validate reusable environment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate-reusable-environment-callee.yml
+    secrets: inherit
