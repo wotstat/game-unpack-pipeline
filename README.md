@@ -101,7 +101,8 @@ region/zone/flavor через dispatch не принимаются.
 6. Orchestrator-owned workflow checkout’ит соответствующий data-репозиторий на pinned SHA, читает
    общий sealed snapshot с локального диска VM, независимо проверяет identity, descriptor и
    payload, после чего обновляет свою data-ветку. Большой snapshot не передаётся через Actions
-   artifacts; большие Git object sets предварительно загружаются bounded staging pushes.
+   artifacts; большие Git object sets загружаются bounded staging pushes как предки финального
+   version commit, после чего production-ref переключается на уже существующий remote commit.
 7. `Cleanup` с `always()` удаляет три runner registration и ресурсы Selectel даже после ошибки
    workload или любого publisher.
 8. Финальная GitHub-hosted job отправляет в Telegram статусы всех jobs, publisher state/commit,
