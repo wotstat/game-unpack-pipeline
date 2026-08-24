@@ -67,9 +67,11 @@ Workflows создают минимально scoped короткоживущи�
 - reusable publisher job `wot-gui-assets` — `Contents: write` только для `wot-gui-assets`.
 
 `Actions: write` приложению больше не нужен: publisher не запускаются внешним dispatch. Private
-key хранится только в Environment `selectel`. Reusable workflow соответствующего data-репозитория
-использует его на self-hosted job лишь для выпуска repository-scoped installation token; checkout
-сохраняет этот token как credentials для push data-ветки.
+key хранится как repository-level Actions secret `GH_APP_PRIVATE_KEY` только в
+`game-unpack-pipeline` и явно передаётся обоим reusable workflows. Data-репозитории собственных
+секретов не хранят. Publisher использует ключ на self-hosted job лишь для выпуска
+repository-scoped installation token; checkout сохраняет этот token как credentials для push
+data-ветки.
 
 ## 3. GitHub Environment
 
@@ -80,15 +82,20 @@ key хранится только в Environment `selectel`. Reusable workflow �
 если автоматический `workflow_run` reconciler должен выполнять аварийную очистку без ожидания
 ручного approval.
 
-Добавить Environment secrets:
+Добавить Environment secret:
+
+| Secret | Значение |
+| --- | --- |
+| `SELECTEL_OS_PASSWORD` | Пароль Selectel service user |
+
+В `Settings → Secrets and variables → Actions → Secrets` добавить repository secret:
 
 | Secret | Значение |
 | --- | --- |
 | `GH_APP_PRIVATE_KEY` | Полный PEM private key GitHub App |
-| `SELECTEL_OS_PASSWORD` | Пароль Selectel service user |
 
-Self-hosted builder не использует Environment `selectel`. Reusable publisher jobs используют его
-для `GH_APP_PRIVATE_KEY`, но не обращаются к `SELECTEL_OS_PASSWORD`.
+Self-hosted builder и reusable publisher jobs не используют Environment `selectel`. Publisher jobs
+получают только явно переданный `GH_APP_PRIVATE_KEY` и не обращаются к `SELECTEL_OS_PASSWORD`.
 
 ## 4. Repository Variables
 

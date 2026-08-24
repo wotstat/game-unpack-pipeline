@@ -87,7 +87,9 @@ target, client type, languages, Selectel location и два независимы
 ## Секреты и реальные операции
 
 - Код, workflows, несекретная конфигурация и публикуемые данные остаются публичными.
-- `GH_APP_PRIVATE_KEY` и `SELECTEL_OS_PASSWORD` хранятся только в Environment `selectel`.
+- `GH_APP_PRIVATE_KEY` хранится как repository-level Actions secret только в
+  `game-unpack-pipeline` и явно передаётся обоим reusable publisher workflows.
+  `SELECTEL_OS_PASSWORD` хранится только в Environment `selectel`.
   `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` — только в Environment `telegram`.
 - JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
 - Не добавлять credentials, project/account identifiers, runner configs или tokens в код,

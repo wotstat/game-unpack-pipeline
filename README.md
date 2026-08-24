@@ -89,8 +89,9 @@ ID. Затем GitHub Git Database API создаёт один final version com
 - VM получает три одноразовые JIT-конфигурации с отдельными HOME и runner directories.
 - GitHub App выпускает короткоживущие installation tokens: `Administration: write` только для
   регистрации runner и `Contents: write` только для выбранного data-репозитория.
-- `GH_APP_PRIVATE_KEY` и `SELECTEL_OS_PASSWORD` хранятся только в Environment `selectel`;
-  Telegram credentials — только в Environment `telegram`.
+- `GH_APP_PRIVATE_KEY` хранится как repository-level Actions secret только в оркестраторе и явно
+  передаётся reusable publisher workflows. `SELECTEL_OS_PASSWORD` хранится только в Environment
+  `selectel`; Telegram credentials — только в Environment `telegram`.
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок builder и publisher. Reconciler

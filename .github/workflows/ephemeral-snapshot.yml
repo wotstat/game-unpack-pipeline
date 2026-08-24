@@ -206,7 +206,7 @@ jobs:
     needs:
       - provision
       - workload
-    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@6a5e9c235d965b5ebbb747a55888d47f3092e20e
+    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@14ff039f148950a4bb1be88a9fa80b27157731d9
     with:
       runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
@@ -215,6 +215,8 @@ jobs:
       target: ${{ inputs.target }}
     permissions:
       contents: read
+    secrets:
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -222,7 +224,7 @@ jobs:
     needs:
       - provision
       - workload
-    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@b2f1f282e8d3d8e3283c02de1563a2835f71a190
+    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@db083c8630a454f0986b7b42dfb9699a48d6244e
     with:
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
@@ -231,6 +233,8 @@ jobs:
       target: ${{ inputs.target }}
     permissions:
       contents: read
+    secrets:
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})

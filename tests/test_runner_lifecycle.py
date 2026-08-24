@@ -400,6 +400,13 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
             r"uses: wotstat/wot-gui-assets/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
         )
+        self.assertEqual(
+            workflow.count(
+                "secrets:\n"
+                "      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"
+            ),
+            2,
+        )
         self.assertNotIn("secrets: inherit", workflow)
         self.assertFalse((ROOT / ".github/workflows/publish-snapshot.yml").exists())
         self.assertIn("publish-wot-gui-assets:", workflow)
