@@ -39,7 +39,7 @@ publisher с `cancel-in-progress: false`.
 | Этот репозиторий | Provision/cleanup Selectel, lifecycle трёх JIT runner, вызов builder и двух publisher |
 | [`game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder) | Resolve версии, download/verify, сборка VFS, преобразование Python/XML/MO/AS3, stubs и sealed `GameSnapshot` |
 | [`wot-src`](https://github.com/wotstat/wot-src) | Независимая проверка snapshot и публикация исходников, XML/PO, AS3, stubs и Gameface |
-| [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) | Независимая проверка snapshot и публикация `res/gui` без `.xml` и `.py` |
+| [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) | Независимая проверка snapshot и публикация `res/gui` без `.py` |
 
 Оркестратор не содержит и не дублирует протоколы WGUS/LSTUS, логику распаковки клиента или
 правила проекции data-репозиториев.

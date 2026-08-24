@@ -45,7 +45,7 @@ manual workflow_dispatch
   независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и Gameface.
 - [`wotstat/wot-gui-assets`](https://github.com/wotstat/wot-gui-assets), локальный каталог в
   текущем workspace обычно называется `../wot-assets`: независимая проверка snapshot и проекция
-  `res/gui` без `.xml` и `.py`.
+  `res/gui` без `.py`.
 
 Не переносить в этот репозиторий протокол WGUS/LSTUS, реализацию builder или правила publisher без
 отдельного архитектурного решения.

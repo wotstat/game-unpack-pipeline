@@ -279,7 +279,7 @@ jobs:
     uses: ./.github/workflows/publish-snapshot.yml
     with:
       publisher: wot-gui-assets
-      publisher_ref: dcf9147a697c93a6b2a0eb152272368fbb49fe21
+      publisher_ref: b0c44a1652833ee38bd3333029147d97c2616f10
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
       snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
       expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
