@@ -63,6 +63,45 @@ Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и Ac
 абсолютный snapshot path, snapshot ID и SHA-256 canonical descriptor и повторно проверяют snapshot
 перед публикацией.
 
+## Local download
+
+The root-level `download.sh` script runs the same downloader pipeline locally without Selectel,
+GitHub Actions, or publishers. The recommended short form is:
+
+```bash
+./download.sh wot-eu ./.data --language ALL
+```
+
+The equivalent form with a named target is also supported:
+
+```bash
+./download.sh --target wot-eu --language ALL ./.data
+```
+
+The default directory is `./.data`, the default client type is `sd`, and the default language is
+`EN`, so the shortest invocation is:
+
+```bash
+./download.sh wot-eu
+```
+
+Pass multiple languages as a comma-separated list. Additional examples:
+
+```bash
+./download.sh wot-eu ./eu-data --language EN,DE --workers 8
+./download.sh mt-ru ./mt-data --language RU --client hd
+```
+
+The script requires a Unix-like system, [`uv`](https://docs.astral.sh/uv/), Java, and one of `7zz`,
+`7z`, or `bsdtar`. It downloads the pinned FFDec `26.2.1` release into the ignored local `.tools`
+directory, verifies the official archive's SHA-256 checksum, and reuses the installation on later
+runs. The initial FFDec installation also requires `curl` and `unzip`.
+
+The selected directory is a persistent workspace containing the download cache, checkpoints, and
+sealed snapshots. Later runs reuse already verified blobs. The completed result is stored under
+`.data/snapshots/sha256:<identifier>`. It is a `GameSnapshot` for analysis and publication, not a
+launcher-ready game installation.
+
 ## Ручной запуск
 
 Точка входа —

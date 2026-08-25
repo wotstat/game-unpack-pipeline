@@ -10,7 +10,7 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest
-bash -n .github/scripts/run-stage.sh scripts/bootstrap-actions-runner.sh scripts/check.sh
+bash -n download.sh .github/scripts/run-stage.sh scripts/bootstrap-actions-runner.sh scripts/check.sh
 
 ruby <<'RUBY'
 require "yaml"
@@ -22,7 +22,7 @@ end
 RUBY
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck .github/scripts/run-stage.sh scripts/bootstrap-actions-runner.sh scripts/check.sh
+  shellcheck download.sh .github/scripts/run-stage.sh scripts/bootstrap-actions-runner.sh scripts/check.sh
 else
   echo "shellcheck not installed; skipped"
 fi
