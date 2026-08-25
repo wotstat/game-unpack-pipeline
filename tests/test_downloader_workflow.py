@@ -13,7 +13,9 @@ REPOSITORY_ROOT = Path(__file__).parents[1]
 def _workflow() -> dict[str, Any]:
     return cast(
         dict[str, Any],
-        yaml.safe_load((REPOSITORY_ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text()),
+        yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/workflows/process-game-release.yml").read_text()
+        ),
     )
 
 
@@ -36,7 +38,7 @@ def test_download_job_exposes_every_pipeline_stage_as_one_step() -> None:
 
 
 def test_downloader_is_internal_to_the_primary_workflow() -> None:
-    workflow_path = REPOSITORY_ROOT / ".github/workflows/ephemeral-snapshot.yml"
+    workflow_path = REPOSITORY_ROOT / ".github/workflows/process-game-release.yml"
     download = _workflow()["jobs"]["download"]
 
     assert "uses" not in download
@@ -120,7 +122,7 @@ def test_bot_dispatched_pipeline_explicitly_dispatches_reconciler_after_cleanup(
     assert "needs.provision.result != 'skipped'" in job["if"]
     assert job["permissions"] == {"actions": "write", "contents": "read"}
     command = job["steps"][0]["run"]
-    assert "gh workflow run reconcile-ephemeral-resources.yml" in command
+    assert "gh workflow run reconcile-release-resources.yml" in command
     assert '--field source_run_id="${SOURCE_RUN_ID}"' in command
     assert '--field source_run_attempt="${SOURCE_RUN_ATTEMPT}"' in command
 

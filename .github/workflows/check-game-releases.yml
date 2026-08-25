@@ -152,10 +152,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           runs="$(gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ephemeral-snapshot.yml/runs" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/process-game-release.yml/runs" \
             -f event=workflow_dispatch \
             -f per_page=100)"
-          prefix="Snapshot · ${TARGET} · "
+          prefix="Release · ${TARGET} · "
           if jq -e --arg prefix "${prefix}" \
             'any(.workflow_runs[];
               .status != "completed" and ((.display_title // "") | startswith($prefix)))' \
@@ -174,7 +174,7 @@ jobs:
             echo "found=false" >>"${GITHUB_OUTPUT}"
           fi
 
-      - name: Dispatch snapshot pipeline
+      - name: Dispatch game release pipeline
         if: >-
           steps.compare.outputs.mismatch == 'true' &&
           inputs.dispatch_pipelines &&
@@ -186,7 +186,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -Eeuo pipefail
-          gh workflow run ephemeral-snapshot.yml \
+          gh workflow run process-game-release.yml \
             --ref "${DEFAULT_BRANCH}" \
             --field target="${TARGET}" \
             --field client_type=sd \

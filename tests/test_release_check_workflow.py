@@ -61,14 +61,17 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     steps = workflow()["jobs"]["check"]["steps"]
     compare = next(step for step in steps if step["name"] == "Probe and compare release")
     active = next(step for step in steps if step["name"] == "Check for an active pipeline")
-    dispatch = next(step for step in steps if step["name"] == "Dispatch snapshot pipeline")
+    dispatch = next(step for step in steps if step["name"] == "Dispatch game release pipeline")
 
     assert "game-downloader probe-release" in compare["run"]
     assert "scripts/release_status.py read" in compare["run"]
     assert "action=would-dispatch" in compare["run"]
     assert "inputs.dispatch_pipelines" in active["if"]
     assert '.status != "completed"' in active["run"]
+    assert "actions/workflows/process-game-release.yml/runs" in active["run"]
+    assert 'prefix="Release · ${TARGET} · "' in active["run"]
     assert "steps.active.outputs.found == 'false'" in dispatch["if"]
+    assert "gh workflow run process-game-release.yml" in dispatch["run"]
     assert '--ref "${DEFAULT_BRANCH}"' in dispatch["run"]
     assert "--field client_type=sd" in dispatch["run"]
     assert "--field languages=ALL" in dispatch["run"]

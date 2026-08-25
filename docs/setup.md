@@ -4,7 +4,7 @@
 нет реальных credentials: пароли и private keys нужно вводить непосредственно в GitHub Settings,
 не отправляя их в issues, commits, чаты или логи.
 
-`Ephemeral snapshot` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
+`Process game release` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
 direct public IP в Selectel. `Check game releases`, напротив, по умолчанию только сравнивает версии
 и ничего не создаёт.
 
@@ -164,9 +164,9 @@ Status-файлы находятся в `status/<target>.json` и содержа
 probe выполняет только запрос metadata и один patches chain для default language, не создавая
 workspace и не скачивая клиент.
 
-## 7. Ручной запуск snapshot pipeline
+## 7. Ручная обработка игрового релиза
 
-Открыть `Actions → Ephemeral snapshot`, выбрать branch `main` и заполнить inputs.
+Открыть `Actions → Process game release`, выбрать branch `main` и заполнить inputs.
 
 Рекомендуемый первый run:
 
@@ -215,7 +215,7 @@ Publisher можно включать независимо для каждого
     `x.x.x.x #xxx`, target, client type, языками и publisher state; `published` ведёт ссылкой на
     точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
-12. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
+12. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
     явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
@@ -231,9 +231,9 @@ job ограничена 60 минутами; её состояние и шаг�
 
 Если автоматический reconciler завершился с ошибкой:
 
-1. Скопировать numeric Run ID исходного `Ephemeral snapshot` из URL.
+1. Скопировать numeric Run ID исходного `Process game release` из URL.
 2. Посмотреть attempt в интерфейсе run; у первого запуска это `1`.
-3. Открыть `Actions → Reconcile ephemeral runner cleanup → Run workflow` на `main`.
+3. Открыть `Actions → Reconcile release resources → Run workflow` на `main`.
 4. Передать `source_run_id` и `source_run_attempt`.
 5. Повторять manual reconciler безопасно, если Selectel или GitHub API временно недоступны.
 

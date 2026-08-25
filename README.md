@@ -105,7 +105,7 @@ launcher-ready game installation.
 ## Ручной запуск
 
 Точка входа —
-[`ephemeral-snapshot.yml`](.github/workflows/ephemeral-snapshot.yml). Workflow всегда строит полный
+[`process-game-release.yml`](.github/workflows/process-game-release.yml). Workflow всегда строит полный
 snapshot до стадии `snapshot` и предоставляет только production inputs:
 
 | Input | Значение |
@@ -190,15 +190,15 @@ Cron/schedule, внешний status store, полная история запу
 ## Настройка и проверка
 
 Полная настройка Selectel, GitHub App, Environments, variables и Telegram описана в
-[`docs/setup.md`](docs/setup.md). `Ephemeral snapshot` сразу создаёт тарифицируемые ресурсы;
+[`docs/setup.md`](docs/setup.md). `Process game release` сразу создаёт тарифицируемые ресурсы;
 `Check game releases` по умолчанию работает как безопасный dry-run.
 
 ```text
 .github/actions/setup-openstack/
 .github/scripts/
 .github/workflows/check-game-releases.yml
-.github/workflows/ephemeral-snapshot.yml
-.github/workflows/reconcile-ephemeral-resources.yml
+.github/workflows/process-game-release.yml
+.github/workflows/reconcile-release-resources.yml
 contracts/v1/
 scripts/bootstrap-actions-runner.sh
 scripts/release_status.py

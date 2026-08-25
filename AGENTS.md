@@ -54,7 +54,7 @@ workflow или отдельный репозиторий и не перенос
 
 ## Текущие контракты
 
-- Единственная точка ручного production-запуска — `.github/workflows/ephemeral-snapshot.yml`.
+- Единственная точка ручного production-запуска — `.github/workflows/process-game-release.yml`.
 - `.github/workflows/check-game-releases.yml` — пока только ручной checker. Он имеет отдельные
   boolean whitelist inputs для семи targets, `wot-eu: true` по умолчанию и
   `dispatch_pipelines: false`. Реальный dispatch всегда использует default branch, `sd`, `ALL` и

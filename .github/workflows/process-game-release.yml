@@ -1,5 +1,5 @@
-name: Ephemeral snapshot
-run-name: Snapshot · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ru-7b · @${{ github.actor }}
+name: Process game release
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ru-7b · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -571,7 +571,7 @@ jobs:
           SOURCE_RUN_ID: ${{ github.run_id }}
         run: |
           set -Eeuo pipefail
-          gh workflow run reconcile-ephemeral-resources.yml \
+          gh workflow run reconcile-release-resources.yml \
             --ref "${DEFAULT_BRANCH}" \
             --field source_run_id="${SOURCE_RUN_ID}" \
             --field source_run_attempt="${SOURCE_RUN_ATTEMPT}"

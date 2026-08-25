@@ -346,7 +346,7 @@ class CleanupReportingTests(unittest.TestCase):
 
 class WorkflowContractTests(unittest.TestCase):
     def test_dispatch_exposes_only_production_inputs(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/process-game-release.yml").read_text(encoding="utf-8")
 
         for removed_input in (
             "benchmark_percent:",
@@ -392,7 +392,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("run: bash .github/scripts/run-stage.sh snapshot", workflow)
 
     def test_provisions_and_calls_both_reusable_publishers(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/process-game-release.yml").read_text(encoding="utf-8")
 
         self.assertIn('PYTHONUNBUFFERED: "1"', workflow)
         self.assertIn("downloader_runner_label", workflow)
@@ -434,7 +434,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("format: html", workflow)
         self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)
 
-        reconciler = (ROOT / ".github/workflows/reconcile-ephemeral-resources.yml").read_text(
+        reconciler = (ROOT / ".github/workflows/reconcile-release-resources.yml").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)

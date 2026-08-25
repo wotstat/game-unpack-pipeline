@@ -1,10 +1,10 @@
-name: Reconcile ephemeral runner cleanup
-run-name: Cleanup Selectel resources for run ${{ inputs.source_run_id || github.event.workflow_run.id }}
+name: Reconcile release resources
+run-name: "Resources · release run #${{ inputs.source_run_id || github.event.workflow_run.id }}"
 
 on:
   workflow_run:
     workflows:
-      - Ephemeral snapshot
+      - Process game release
     types:
       - completed
     branches:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Run ID of Ephemeral snapshot
+        description: Run ID of Process game release
         required: true
         type: string
       source_run_attempt:
