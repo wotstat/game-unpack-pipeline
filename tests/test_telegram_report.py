@@ -41,11 +41,10 @@ class TelegramReportTests(unittest.TestCase):
             message,
             "\n".join(
                 (
-                    "<b>✅ WoT EU · 2.3.1.5400</b> · <code>SD</code> · "
-                    "<code>ALL</code>",
+                    "<b>✅ WoT EU · 2.3.1.5400</b> · <code>SD</code> · <code>ALL</code>",
                     "📦 <code>wot-src</code> — "
                     '<a href="https://github.com/wotstat/wot-src/commit/'
-                    f"{'a' * 40}\">updated</a>",
+                    f'{"a" * 40}">updated</a>',
                     "🖼 <code>wot-gui-assets</code> — unchanged",
                     "",
                     '<a href="https://github.com/wotstat/game-unpack-pipeline/actions/runs/1">'
@@ -69,8 +68,7 @@ class TelegramReportTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "<b>✅ Мир танков RU · 1.44.0.7899</b> · <code>HD</code> · "
-            "<code>RU, BE</code>",
+            "<b>✅ Мир танков RU · 1.44.0.7899</b> · <code>HD</code> · <code>RU, BE</code>",
             message,
         )
         self.assertIn("📦 <code>wot-src</code> — disabled", message)
@@ -85,7 +83,7 @@ class TelegramReportTests(unittest.TestCase):
                 "CLIENT_TYPE": "sd",
                 "LANGUAGES": "EN",
                 "PROVISION_RESULT": "success",
-                "WORKLOAD_RESULT": "failure",
+                "DOWNLOAD_RESULT": "failure",
                 "QUEUE_WATCHDOG_RESULT": "success",
                 "CLEANUP_RESULT": "success",
                 "CLEANUP_DELETED_COUNT": "6",
@@ -98,7 +96,7 @@ class TelegramReportTests(unittest.TestCase):
         )
 
         self.assertIn("<b>❌ WoT Common Test · version unavailable</b>", message)
-        self.assertIn("Builder — <code>failure</code>", message)
+        self.assertIn("Downloader — <code>failure</code>", message)
         self.assertIn("Cleanup — <code>success</code> (deleted: <code>6</code>)", message)
         self.assertIn("📦 <code>wot-src</code> — not started", message)
         self.assertIn("run?a=1&amp;b=2", message)

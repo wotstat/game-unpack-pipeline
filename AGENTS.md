@@ -2,21 +2,20 @@
 
 ## Назначение репозитория
 
-`game-unpack-pipeline` — публичный оркестратор ручной production-сборки и публикации снимков
-клиентов World of Tanks и «Мира танков». Репозиторий владеет GitHub Actions entrypoint, жизненным
-циклом временной VM и трёх repository-level JIT runner, вызовом reusable builder/publisher,
-cleanup/reconciliation и Telegram-отчётами.
+`game-unpack-pipeline` — публичный pipeline ручного production-скачивания, распаковки и публикации
+снимков клиентов World of Tanks и «Мира танков». Репозиторий владеет основной полезной нагрузкой
+downloader, GitHub Actions entrypoint, жизненным циклом временной VM и трёх repository-level JIT
+runner, вызовом reusable publisher, cleanup/reconciliation и Telegram-отчётами.
 
-Скачивание и распаковка клиента, преобразования и формат `GameSnapshot` здесь не реализуются.
-Автоматическое обнаружение новых версий и публичная история статусов также отсутствуют.
+Автоматическое обнаружение новых версий и публичная история статусов отсутствуют.
 
 ## Реализованный поток
 
 ```text
 manual workflow_dispatch
   → provision одной VM, direct public IP и egress-only security group в Selectel
-  → три JIT runner в game-unpack-pipeline: builder, wot-src и wot-gui-assets
-  → game-snapshot-builder@v0.4.1 на builder runner
+  → три JIT runner в game-unpack-pipeline: downloader, wot-src и wot-gui-assets
+  → встроенные downloader stages на downloader runner
   → sealed snapshot на локальном диске VM
   → параллельные pinned reusable workflows data-репозиториев
   → выбранные production data-ветки target
@@ -32,12 +31,10 @@ target, client type, languages и два независимых переключ
 
 ## Границы компонентов
 
-- Этот репозиторий: `.github/workflows`, Selectel lifecycle, JIT runner bootstrap, вызов reusable
-  workflows, cleanup/reconciliation.
-- [`wotstat/game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder), локально
-  обычно `../game-unpacker`: resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline,
-  transforms, stubs, seal и verify `GameSnapshot`. Оркестратор закрепляет reusable workflow на
-  `v0.4.1`.
+- `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,
+  client/VFS/readable pipeline, transforms, stubs, seal и verify `GameSnapshot`.
+- `.github/workflows`, `.github/scripts`, `scripts`: production entrypoint, stage execution и
+  telemetry, Selectel lifecycle, JIT runner bootstrap, publisher calls, cleanup/reconciliation.
 - [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`: reusable
   publication workflow, независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и
   Gameface.
@@ -45,12 +42,15 @@ target, client type, languages и два независимых переключ
   `../wot-assets`: reusable publication workflow, независимая проверка snapshot и проекция
   `res/gui` без `.py`.
 
-Не переносить сюда протокол WGUS/LSTUS, builder или правила publisher без отдельного
+Downloader — внутренняя часть этого pipeline. Не выделять его обратно во внешний reusable
+workflow или отдельный репозиторий и не переносить сюда правила publisher без отдельного
 архитектурного решения.
 
 ## Текущие контракты
 
-- Единственная точка ручного запуска — `.github/workflows/ephemeral-snapshot.yml`.
+- Единственная точка ручного production-запуска — `.github/workflows/ephemeral-snapshot.yml`.
+- Download job реализован прямо в основном workflow и последовательно выполняет все стадии от
+  `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. Production location
   зафиксирована как `ru-7b` и не вынесена в dispatch input.
@@ -72,16 +72,16 @@ target, client type, languages и два независимых переключ
   `../wot-src/docs/publication-transport.md`, `../wot-assets/AGENTS.md` и
   `../wot-assets/docs/publication-transport.md`. Не считать staging protocol legacy.
 - Snapshot не загружается в Actions artifact. Все runner находятся на одной VM и читают один
-  абсолютный путь; builder открывает publisher только traversal к sealed snapshot.
+  абсолютный путь; downloader открывает publisher только traversal к sealed snapshot.
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
-  Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только builder имеет
+  Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
 - Production flavor зафиксирован как HighFreq с выделенными ядрами
   `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
-  target, builder `version_name`, client type, языками и publisher state. Введённый `ALL`
+  target, downloader `version_name`, client type, языками и publisher state. Введённый `ALL`
   сохраняется в заголовке буквально, а последняя строка показывает полную длительность run рядом
   со ссылкой. Reconciler отправляет recovery alert только при машинно подтверждённом
   `deleted_count > 0`.
@@ -115,10 +115,10 @@ target, client type, languages и два независимых переключ
 
 ## Правила изменения
 
-- Перед правками проверять фактические workflows/lifecycle scripts и pinned interfaces соседних
-  репозиториев.
-- При обновлении builder tag сверять inputs, outputs, stage names и требования к runner. Не
-  ссылаться на floating `main`.
+- Перед правками проверять фактические workflows/lifecycle scripts и pinned publisher interfaces
+  соседних репозиториев.
+- Изменения downloader implementation, stage runner, snapshot contracts и основного download job
+  выполнять атомарно в этом репозитории.
 - При изменении publisher contract обновлять оба call path симметрично и закреплять код на полных
   commit SHA.
 - Документация описывает реализованное состояние; будущие идеи явно помечать нереализованными.

@@ -21,9 +21,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
@@ -122,7 +123,7 @@ class SelectelConfig:
     public_network_api_url: str
 
     @classmethod
-    def from_environment(cls, *, require_compute: bool = True) -> "SelectelConfig":
+    def from_environment(cls, *, require_compute: bool = True) -> SelectelConfig:
         required = {
             "SELECTEL_OS_AUTH_URL": "auth_url",
             "SELECTEL_OS_USERNAME": "username",
@@ -236,9 +237,7 @@ def sanitized(text: str, sensitive_values: Iterable[str] = ()) -> str:
     result = re.sub(r"(--jitconfig(?:=|\s+))\S+", r"\1***", result)
     result = re.sub(r'("encoded_jit_config"\s*:\s*")[^"]+(\")', r"\1***\2", result)
     result = "\n".join(
-        "[redacted jit configuration]"
-        if "jitconfig" in line.lower().replace("_", "")
-        else line
+        "[redacted jit configuration]" if "jitconfig" in line.lower().replace("_", "") else line
         for line in result.splitlines()
     )
     return result
@@ -256,8 +255,7 @@ def run_command(
             list(command),
             env=dict(environment) if environment is not None else None,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
             check=False,
         )
@@ -341,9 +339,7 @@ def http_json(
             response_headers = dict(error.headers.items()) if error.headers else {}
             if status not in expected_statuses:
                 details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
-                raise LifecycleError(
-                    f"{method} {url} returned HTTP {status}: {details}"
-                ) from error
+                raise LifecycleError(f"{method} {url} returned HTTP {status}: {details}") from error
             break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
             if attempt < len(retry_delays):
@@ -386,17 +382,13 @@ def selectel_token(config: SelectelConfig) -> str:
             "scope": {"project": {"id": config.project_id}},
         }
     }
-    _, _, headers = http_json(
-        "POST", endpoint, body=body, expected_statuses=(201,), timeout=60
-    )
+    _, _, headers = http_json("POST", endpoint, body=body, expected_statuses=(201,), timeout=60)
     token = next(
         (value for key, value in headers.items() if key.lower() == "x-subject-token"),
         "",
     )
     if not token:
-        raise LifecycleError(
-            "Selectel identity response did not contain X-Subject-Token"
-        )
+        raise LifecycleError("Selectel identity response did not contain X-Subject-Token")
     add_mask(token)
     return token
 
@@ -433,12 +425,9 @@ def preflight(config: SelectelConfig) -> None:
         public_network_url(config, f"v1/projects/{compact_project_id}/quotas"),
         token=token,
     )
-    entries = (
-        quota.get("network_direct_public_ips", []) if isinstance(quota, dict) else []
-    )
+    entries = quota.get("network_direct_public_ips", []) if isinstance(quota, dict) else []
     has_capacity = any(
-        int(entry.get("value", 0)) < 0
-        or int(entry.get("used", 0)) < int(entry.get("value", 0))
+        int(entry.get("value", 0)) < 0 or int(entry.get("used", 0)) < int(entry.get("value", 0))
         for entry in entries
         if isinstance(entry, dict)
     )
@@ -447,9 +436,7 @@ def preflight(config: SelectelConfig) -> None:
 
     image_name = object_value(image, "name")
     flavor_name = object_value(flavor, "name")
-    print(
-        f"Preflight: image={image_name}, flavor={flavor_name}, zone={config.availability_zone}"
-    )
+    print(f"Preflight: image={image_name}, flavor={flavor_name}, zone={config.availability_zone}")
     append_summary(
         f"- Preflight: image `{image_name}`, flavor `{flavor_name}`, "
         f"zone `{config.availability_zone}`"
@@ -542,24 +529,18 @@ def resolve_runner_package(app_token: str, public_token: str) -> tuple[str, str,
         and item.get("architecture") == "x64"
     ]
     if len(candidates) != 1:
-        raise LifecycleError(
-            "GitHub did not return exactly one linux/x64 runner package"
-        )
+        raise LifecycleError("GitHub did not return exactly one linux/x64 runner package")
     candidate = candidates[0]
     filename = str(candidate.get("filename", ""))
     download_url = str(candidate.get("download_url", ""))
-    version_match = re.fullmatch(
-        r"actions-runner-linux-x64-([0-9.]+)\.tar\.gz", filename
-    )
+    version_match = re.fullmatch(r"actions-runner-linux-x64-([0-9.]+)\.tar\.gz", filename)
     parsed_download = urllib.parse.urlparse(download_url)
     if (
         not version_match
         or parsed_download.scheme != "https"
         or parsed_download.netloc != "github.com"
     ):
-        raise LifecycleError(
-            "GitHub returned an unexpected runner package URL or filename"
-        )
+        raise LifecycleError("GitHub returned an unexpected runner package URL or filename")
     version = version_match.group(1)
 
     _, release, _ = http_json(
@@ -571,20 +552,14 @@ def resolve_runner_package(app_token: str, public_token: str) -> tuple[str, str,
     assets = release.get("assets", []) if isinstance(release, dict) else []
     matches = [asset for asset in assets if asset.get("name") == filename]
     if len(matches) != 1:
-        raise LifecycleError(
-            "Could not find the runner package in its official GitHub release"
-        )
+        raise LifecycleError("Could not find the runner package in its official GitHub release")
     asset = matches[0]
     if asset.get("browser_download_url") != download_url:
-        raise LifecycleError(
-            "Runner download URL differs from the official release asset URL"
-        )
+        raise LifecycleError("Runner download URL differs from the official release asset URL")
     digest = str(asset.get("digest", ""))
     digest_match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest)
     if not digest_match:
-        raise LifecycleError(
-            "Official runner release asset has no usable SHA-256 digest"
-        )
+        raise LifecycleError("Official runner release asset has no usable SHA-256 digest")
     return download_url, digest_match.group(1).lower(), version
 
 
@@ -610,11 +585,7 @@ def create_jit_runner(identity: RunnerIdentity, app_token: str) -> tuple[str, st
     )
     runner = response.get("runner", {}) if isinstance(response, dict) else {}
     runner_id = str(runner.get("id", ""))
-    jit_config = (
-        str(response.get("encoded_jit_config", ""))
-        if isinstance(response, dict)
-        else ""
-    )
+    jit_config = str(response.get("encoded_jit_config", "")) if isinstance(response, dict) else ""
     if not runner_id.isdigit() or not jit_config:
         raise LifecycleError("GitHub returned an invalid JIT runner configuration")
     add_mask(jit_config)
@@ -629,22 +600,21 @@ def render_cloud_config(
     runner_version: str,
     runner_jit_configs: Mapping[str, str],
 ) -> str:
-    expected_roles = {"builder", "wot-gui-assets", "wot-src"}
+    expected_roles = {"downloader", "wot-gui-assets", "wot-src"}
     if set(runner_jit_configs) != expected_roles:
         raise LifecycleError(
-            "cloud config requires builder, wot-src and wot-gui-assets JIT configurations"
+            "cloud config requires downloader, wot-src and wot-gui-assets JIT configurations"
         )
     assignments = {
         "RUNNER_DOWNLOAD_URL": runner_download_url,
         "RUNNER_SHA256": runner_sha256,
         "RUNNER_VERSION": runner_version,
-        "BUILDER_RUNNER_JIT_CONFIG": runner_jit_configs["builder"],
+        "DOWNLOADER_RUNNER_JIT_CONFIG": runner_jit_configs["downloader"],
         "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wot-gui-assets"],
         "WOT_SRC_RUNNER_JIT_CONFIG": runner_jit_configs["wot-src"],
     }
     preamble = "\n".join(
-        f"{'readonly ' if not name.endswith('_JIT_CONFIG') else ''}"
-        f"{name}={shlex.quote(value)}"
+        f"{'readonly ' if not name.endswith('_JIT_CONFIG') else ''}{name}={shlex.quote(value)}"
         for name, value in assignments.items()
     )
     bootstrap = f"#!/usr/bin/env bash\n{preamble}\n{template}"
@@ -707,14 +677,10 @@ def create_server(
     return server_id
 
 
-def wait_for_server_active(
-    config: SelectelConfig, server_id: str, timeout_seconds: int
-) -> None:
+def wait_for_server_active(config: SelectelConfig, server_id: str, timeout_seconds: int) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        result = openstack(
-            config, ["server", "show", server_id, "-f", "json"], check=False
-        )
+        result = openstack(config, ["server", "show", server_id, "-f", "json"], check=False)
         if result.returncode == 0:
             server = parse_json_output(result, "server status lookup")
             status = str(object_value(server, "status")).upper()
@@ -742,9 +708,7 @@ def wait_for_runner_online(
         )
         if status == 200 and isinstance(runner, dict):
             labels = {
-                item.get("name")
-                for item in runner.get("labels", [])
-                if isinstance(item, dict)
+                item.get("name") for item in runner.get("labels", []) if isinstance(item, dict)
             }
             if runner.get("status") == "online" and identity.label in labels:
                 print(f"Runner {identity.role} online")
@@ -754,9 +718,7 @@ def wait_for_runner_online(
     raise LifecycleError("Timed out waiting for the JIT runner to become online")
 
 
-def server_has_ownership_markers(
-    server: Mapping[str, Any], identity: ResourceIdentity
-) -> bool:
+def server_has_ownership_markers(server: Mapping[str, Any], identity: ResourceIdentity) -> bool:
     try:
         if str(object_value(server, "name")) != identity.server_name:
             return False
@@ -771,9 +733,7 @@ def server_has_ownership_markers(
         "gup_instance_key": identity.instance_key,
     }
     if isinstance(properties, Mapping):
-        return all(
-            str(properties.get(key, "")) == value for key, value in expected.items()
-        )
+        return all(str(properties.get(key, "")) == value for key, value in expected.items())
 
     serialized = str(properties)
     return all(
@@ -804,9 +764,7 @@ def find_server_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[
     }
     owned_ids: list[str] = []
     for server_id in sorted(matching_ids):
-        show = openstack(
-            config, ["server", "show", server_id, "-f", "json"], check=False
-        )
+        show = openstack(config, ["server", "show", server_id, "-f", "json"], check=False)
         if show.returncode != 0:
             continue
         server = parse_json_output(show, "server ownership lookup")
@@ -822,9 +780,7 @@ def show_console_log(
     sensitive_values: Iterable[str] = (),
     lines: int = 200,
 ) -> None:
-    result = openstack(
-        config, ["console", "log", "show", server_id], check=False, timeout=60
-    )
+    result = openstack(config, ["console", "log", "show", server_id], check=False, timeout=60)
     if result.returncode != 0:
         print("Console diagnostics are unavailable")
         return
@@ -874,15 +830,8 @@ def delete_github_runners(
     for runner in response.get("runners", []) if isinstance(response, dict) else []:
         if not isinstance(runner, dict):
             continue
-        labels = {
-            item.get("name")
-            for item in runner.get("labels", [])
-            if isinstance(item, dict)
-        }
-        if (
-            runner.get("name") == identity.name
-            and identity.scope_label in labels
-        ):
+        labels = {item.get("name") for item in runner.get("labels", []) if isinstance(item, dict)}
+        if runner.get("name") == identity.name and identity.scope_label in labels:
             candidate_ids.add(str(runner.get("id", "")))
 
     for candidate in sorted(value for value in candidate_ids if value.isdigit()):
@@ -909,35 +858,26 @@ def delete_servers(
     if UUID_RE.fullmatch(server_id):
         candidates.add(server_id)
     for candidate in sorted(candidates):
-        show = openstack(
-            config, ["server", "show", candidate, "-f", "json"], check=False
-        )
+        show = openstack(config, ["server", "show", candidate, "-f", "json"], check=False)
         if show.returncode != 0:
             print(f"Server {candidate}: already absent")
             continue
         server = parse_json_output(show, "server ownership lookup")
-        if not isinstance(server, dict) or not server_has_ownership_markers(
-            server, identity
-        ):
+        if not isinstance(server, dict) or not server_has_ownership_markers(server, identity):
             raise LifecycleError(
                 f"Refusing to delete server {candidate}: ownership markers do not match"
             )
         openstack(config, ["server", "delete", candidate], timeout=120)
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            if (
-                openstack(config, ["server", "show", candidate], check=False).returncode
-                != 0
-            ):
+            if openstack(config, ["server", "show", candidate], check=False).returncode != 0:
                 print(f"Server {candidate}: deleted")
                 if deleted_resources is not None:
                     deleted_resources.append(f"selectel-server:{candidate}")
                 break
             time.sleep(5)
         else:
-            raise LifecycleError(
-                f"Server {candidate} still exists after deletion timeout"
-            )
+            raise LifecycleError(f"Server {candidate} still exists after deletion timeout")
 
 
 def find_public_port_ids(
@@ -1007,15 +947,11 @@ def delete_public_ports(
                     deleted_resources.append(f"selectel-public-port:{candidate}")
                 break
             if time.monotonic() >= deadline:
-                raise LifecycleError(
-                    f"Direct public port {candidate} is still attached"
-                )
+                raise LifecycleError(f"Direct public port {candidate} is still attached")
             time.sleep(5)
 
 
-def find_security_group_ids(
-    config: SelectelConfig, identity: ResourceIdentity
-) -> list[str]:
+def find_security_group_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[str]:
     result = openstack(
         config,
         [
@@ -1076,25 +1012,19 @@ def delete_security_groups(
     for candidate in sorted(candidates):
         deadline = time.monotonic() + 180
         while True:
-            result = openstack(
-                config, ["security", "group", "delete", candidate], check=False
-            )
+            result = openstack(config, ["security", "group", "delete", candidate], check=False)
             if result.returncode == 0:
                 print(f"Security group {candidate}: deleted")
                 if deleted_resources is not None:
                     deleted_resources.append(f"selectel-security-group:{candidate}")
                 break
-            show = openstack(
-                config, ["security", "group", "show", candidate], check=False
-            )
+            show = openstack(config, ["security", "group", "show", candidate], check=False)
             if show.returncode != 0:
                 print(f"Security group {candidate}: already absent")
                 break
             if time.monotonic() >= deadline:
                 details = sanitized(result.stderr.strip())
-                raise LifecycleError(
-                    f"Security group {candidate} could not be deleted: {details}"
-                )
+                raise LifecycleError(f"Security group {candidate} could not be deleted: {details}")
             time.sleep(5)
 
 
@@ -1114,15 +1044,15 @@ def provision(arguments: argparse.Namespace) -> None:
     identity = build_identity(arguments.instance_key)
     app_token = require_environment("GITHUB_APP_TOKEN")
     public_token = require_environment("GITHUB_PUBLIC_TOKEN")
-    builder_runner = identity.runner("builder")
+    downloader_runner = identity.runner("downloader")
     wot_gui_assets_runner = identity.runner("wot-gui-assets")
     wot_src_runner = identity.runner("wot-src")
     add_mask(config.password)
 
     for name, value in {
         "resource_key": identity.instance_key,
-        "builder_runner_name": builder_runner.name,
-        "builder_runner_label": builder_runner.label,
+        "downloader_runner_name": downloader_runner.name,
+        "downloader_runner_label": downloader_runner.label,
         "wot_gui_assets_runner_name": wot_gui_assets_runner.name,
         "wot_gui_assets_runner_label": wot_gui_assets_runner.label,
         "wot_src_runner_name": wot_src_runner.name,
@@ -1146,25 +1076,21 @@ def provision(arguments: argparse.Namespace) -> None:
         write_output("security_group_id", security_group_id)
         print(f"Security group created: {security_group_id}")
 
-        port_id, public_address = create_public_port(
-            config, identity, security_group_id
-        )
+        port_id, public_address = create_public_port(config, identity, security_group_id)
         write_output("port_id", port_id)
         write_output("public_address", public_address)
         print(f"Direct public port created: {port_id}")
 
-        runner_url, runner_sha256, runner_version = resolve_runner_package(
-            app_token, public_token
-        )
+        runner_url, runner_sha256, runner_version = resolve_runner_package(app_token, public_token)
         write_output("runner_version", runner_version)
         print(f"Runner package resolved: {runner_version}")
 
-        builder_runner_id, builder_jit_config = create_jit_runner(
-            builder_runner, app_token
+        downloader_runner_id, downloader_jit_config = create_jit_runner(
+            downloader_runner, app_token
         )
-        jit_configs[builder_runner.role] = builder_jit_config
-        write_output("builder_runner_id", builder_runner_id)
-        print(f"Builder JIT runner reserved: {builder_runner_id}")
+        jit_configs[downloader_runner.role] = downloader_jit_config
+        write_output("downloader_runner_id", downloader_runner_id)
+        print(f"Downloader JIT runner reserved: {downloader_runner_id}")
 
         wot_gui_assets_runner_id, wot_gui_assets_jit_config = create_jit_runner(
             wot_gui_assets_runner, app_token
@@ -1173,9 +1099,7 @@ def provision(arguments: argparse.Namespace) -> None:
         write_output("wot_gui_assets_runner_id", wot_gui_assets_runner_id)
         print(f"wot-gui-assets JIT runner reserved: {wot_gui_assets_runner_id}")
 
-        wot_src_runner_id, wot_src_jit_config = create_jit_runner(
-            wot_src_runner, app_token
-        )
+        wot_src_runner_id, wot_src_jit_config = create_jit_runner(wot_src_runner, app_token)
         jit_configs[wot_src_runner.role] = wot_src_jit_config
         write_output("wot_src_runner_id", wot_src_runner_id)
         print(f"wot-src JIT runner reserved: {wot_src_runner_id}")
@@ -1205,8 +1129,8 @@ def provision(arguments: argparse.Namespace) -> None:
         print(f"Server created: {server_id}")
         wait_for_server_active(config, server_id, timeout_seconds=300)
         wait_for_runner_online(
-            builder_runner,
-            builder_runner_id,
+            downloader_runner,
+            downloader_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
         )
@@ -1245,7 +1169,7 @@ def cleanup(arguments: argparse.Namespace) -> None:
         run_attempt=arguments.run_attempt,
     )
     app_token = require_environment("GITHUB_APP_TOKEN")
-    builder_runner = identity.runner("builder")
+    downloader_runner = identity.runner("downloader")
     wot_gui_assets_runner = identity.runner("wot-gui-assets")
     wot_src_runner = identity.runner("wot-src")
     add_mask(config.password)
@@ -1260,13 +1184,13 @@ def cleanup(arguments: argparse.Namespace) -> None:
 
     failures: list[str] = []
     deleted_resources: list[str] = []
-    operations = [
+    operations: list[tuple[str, Callable[[], None]]] = [
         (
-            "GitHub builder runner registration",
+            "GitHub downloader runner registration",
             lambda: delete_github_runners(
-                builder_runner,
+                downloader_runner,
                 app_token,
-                arguments.builder_runner_id,
+                arguments.downloader_runner_id,
                 deleted_resources=deleted_resources,
             ),
         ),
@@ -1364,13 +1288,12 @@ def watch_queue(arguments: argparse.Namespace) -> None:
             matches = [
                 job
                 for job in response.get("jobs", [])
-                if isinstance(job, dict)
-                and job_targets_runner(job, arguments.runner_label)
+                if isinstance(job, dict) and job_targets_runner(job, arguments.runner_label)
             ]
             if matches:
                 last_status = str(matches[0].get("status", "unknown"))
                 if last_status in ("in_progress", "completed"):
-                    print(f"Workload was assigned to a runner (status={last_status})")
+                    print(f"Download was assigned to a runner (status={last_status})")
                     write_output("timed_out", "false")
                     return
         except LifecycleError as error:
@@ -1378,7 +1301,7 @@ def watch_queue(arguments: argparse.Namespace) -> None:
         time.sleep(10)
 
     print(
-        f"::error::Workload {arguments.instance_key} queue deadline exceeded; "
+        f"::error::Download {arguments.instance_key} queue deadline exceeded; "
         f"last status: {sanitized(last_status)}"
     )
     write_output("timed_out", "true")
@@ -1396,7 +1319,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--instance-key", required=True)
     cleanup_parser.add_argument("--run-id")
     cleanup_parser.add_argument("--run-attempt")
-    cleanup_parser.add_argument("--builder-runner-id", default="")
+    cleanup_parser.add_argument("--downloader-runner-id", default="")
     cleanup_parser.add_argument("--wot-gui-assets-runner-id", default="")
     cleanup_parser.add_argument("--wot-src-runner-id", default="")
     cleanup_parser.add_argument("--server-id", default="")

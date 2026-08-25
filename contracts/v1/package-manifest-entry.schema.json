@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wotstat.info/contracts/game-downloader/package-manifest-entry/v1.0.0.json",
+  "title": "GameSnapshot v1 package manifest entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "size", "sha256", "part", "part_version", "container", "precedence", "entries"],
+  "properties": {
+    "path": { "$ref": "#/$defs/relativePath" },
+    "size": { "type": "integer", "minimum": 0 },
+    "sha256": { "$ref": "#/$defs/sha256" },
+    "part": { "type": "string", "enum": ["client", "sdcontent", "hdcontent", "locale"] },
+    "part_version": { "type": "string", "minLength": 1 },
+    "language": { "$ref": "#/$defs/language" },
+    "container": { "const": "zip" },
+    "precedence": { "type": "integer", "minimum": 0 },
+    "entries": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "language": { "type": "string", "pattern": "^[A-Z]{2}(?:_[A-Z]{2})?$" }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wotstat.info/contracts/game-downloader/conflict-manifest-entry/v1.0.0.json",
+  "title": "GameSnapshot v1 VFS conflict manifest entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["canonical_path", "layer", "candidates", "winner", "resolution_rule", "resolved"],
+  "properties": {
+    "canonical_path": { "$ref": "#/$defs/relativePath" },
+    "layer": { "type": "string", "pattern": "^(base|locale:[A-Z]{2}(?:_[A-Z]{2})?)$" },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate" },
+      "minItems": 2
+    },
+    "winner": { "$ref": "#/$defs/candidate" },
+    "resolution_rule": { "type": "string", "minLength": 1 },
+    "resolved": { "const": true }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_path", "source_sha256", "entry_path", "precedence"],
+      "properties": {
+        "source_kind": { "type": "string", "enum": ["game-package", "loose-file"] },
+        "source_path": { "$ref": "#/$defs/relativePath" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "entry_path": { "$ref": "#/$defs/relativePath" },
+        "precedence": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

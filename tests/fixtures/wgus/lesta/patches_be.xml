@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="patches_chain" version="1.11" wgc_publisher_id="lesta">
+  <patches_chain type="install">
+    <patch>
+      <part>locale</part><version_to>1.37.0.4001</version_to>
+      <files><file name="bundle-release/locale.wgpkg" size="3" unpacked_size="5" /></files>
+      <torrent>
+        <hash>21e2818af314995e1d3529434cec744196d851a5c3e86ecc91647de502bb2bc4</hash>
+        <urls><url>https://cdn.example.test/patch/bundle.torrent</url></urls>
+      </torrent>
+    </patch>
+    <patch><part>client</part><version_to>1.44.0.7721</version_to></patch>
+    <patch><part>client</part><version_to>1.44.0.7743</version_to></patch>
+    <patch><part>client</part><version_to>1.44.0.7899</version_to></patch>
+    <patch><part>sdcontent</part><version_to>1.44.0.7721</version_to></patch>
+    <patch><part>hdcontent</part><version_to>1.44.0.7721</version_to></patch>
+  </patches_chain>
+  <web_seeds><url threads="2">http://cdn.example.test/patches/</url></web_seeds>
+  <meta_need_update>false</meta_need_update>
+  <version_name>1.44.0.7899</version_name>
+</protocol>

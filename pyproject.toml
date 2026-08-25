@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "game-downloader"
+version = "0.4.1"
+description = "Download and unpack official game clients into verified GameSnapshot directories"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "wotstat" }]
+dependencies = [
+  "capstone>=5.0.6,<6",
+  "click>=8.1.8,<9",
+  "defusedxml>=0.7.1,<1",
+  "fissix==24.4.24",
+  "httpx>=0.28,<1",
+  "ijson>=3.4,<4",
+  "jsonschema[format]>=4.23,<5",
+  "jsonschema-rs>=0.51,<0.52",
+  "pydantic>=2.10,<3",
+  "pyyaml>=6.0.2,<7",
+  "uncompyle6==3.9.3",
+]
+
+[project.scripts]
+game-downloader = "game_downloader.cli:main"
+game-downloader-pyc = "game_downloader.pyc_decompiler:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1",
+  "types-defusedxml>=0.7.0,<1",
+  "types-jsonschema>=4.23,<5",
+  "types-pyyaml>=6.0.12,<7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/game_downloader"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"contracts" = "game_downloader/_contracts"
+"config/targets.example.yaml" = "game_downloader/_config/targets.yaml"
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+  "live: opt-in test that calls official WGUS/LSTUS endpoints",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["contracts", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+explicit_package_bases = true
+mypy_path = ["src"]
+files = ["src", ".github/scripts", "scripts", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+disallow_untyped_defs = false

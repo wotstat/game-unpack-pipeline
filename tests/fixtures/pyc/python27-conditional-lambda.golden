@@ -1,0 +1,2 @@
+def choose(ctx):
+    return (lambda item: ctx.installable(item) and not item.all_season() if ctx.editable else (lambda item: not item.all_season()))

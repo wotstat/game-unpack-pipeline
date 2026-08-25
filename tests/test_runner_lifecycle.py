@@ -4,16 +4,14 @@ import base64
 import http.client
 import os
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+from scripts import runner_lifecycle as lifecycle
 
-import runner_lifecycle as lifecycle  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ResourceIdentityTests(unittest.TestCase):
@@ -34,18 +32,18 @@ class ResourceIdentityTests(unittest.TestCase):
             "run_id=123456;run_attempt=2;instance_key=manual-123456-2",
         )
 
-        builder = identity.runner("builder")
+        downloader = identity.runner("downloader")
         assets = identity.runner("wot-gui-assets")
         source = identity.runner("wot-src")
-        self.assertEqual(builder.name, "gup-manual-123456-2-builder")
-        self.assertEqual(builder.label, "gup-manual-123456-2-builder")
-        self.assertEqual(builder.repository, "wotstat/game-unpack-pipeline")
+        self.assertEqual(downloader.name, "gup-manual-123456-2-downloader")
+        self.assertEqual(downloader.label, "gup-manual-123456-2-downloader")
+        self.assertEqual(downloader.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(assets.name, "gup-manual-123456-2-wot-gui-assets")
         self.assertEqual(assets.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
         self.assertEqual(source.repository, "wotstat/game-unpack-pipeline")
-        self.assertEqual(builder.scope_label, assets.scope_label)
-        self.assertEqual(builder.scope_label, source.scope_label)
+        self.assertEqual(downloader.scope_label, assets.scope_label)
+        self.assertEqual(downloader.scope_label, source.scope_label)
 
     def test_rejects_unsafe_instance_keys(self) -> None:
         rejected = ["", "UPPER", "-leading", "trailing-", "has space", "a" * 49]
@@ -71,8 +69,8 @@ class IdentifierTests(unittest.TestCase):
 
 class JobRoutingTests(unittest.TestCase):
     def test_matches_the_unique_runner_label_independently_of_job_name(self) -> None:
-        job = {
-            "name": "Workload / Build snapshot (wot-eu, sd)",
+        job: dict[str, object] = {
+            "name": "Download and unpack (wot-eu, sd)",
             "labels": ["self-hosted", "gup-manual-123456-2"],
         }
 
@@ -108,17 +106,11 @@ class OwnershipTests(unittest.TestCase):
         mapping_server = {"name": self.identity.server_name, "properties": properties}
         serialized_server = {
             "name": self.identity.server_name,
-            "properties": ", ".join(
-                f"{key}='{value}'" for key, value in properties.items()
-            ),
+            "properties": ", ".join(f"{key}='{value}'" for key, value in properties.items()),
         }
 
-        self.assertTrue(
-            lifecycle.server_has_ownership_markers(mapping_server, self.identity)
-        )
-        self.assertTrue(
-            lifecycle.server_has_ownership_markers(serialized_server, self.identity)
-        )
+        self.assertTrue(lifecycle.server_has_ownership_markers(mapping_server, self.identity))
+        self.assertTrue(lifecycle.server_has_ownership_markers(serialized_server, self.identity))
 
     def test_rejects_server_with_only_matching_name(self) -> None:
         server = {"name": self.identity.server_name, "properties": {}}
@@ -129,7 +121,7 @@ class CloudConfigTests(unittest.TestCase):
     def test_jit_configs_are_encoded_and_runners_use_isolated_users(self) -> None:
         template = (ROOT / "scripts" / "bootstrap-actions-runner.sh").read_text()
         assets_jit_config = "sensitive-assets-jit-configuration"
-        builder_jit_config = "sensitive-builder-jit-configuration"
+        downloader_jit_config = "sensitive-downloader-jit-configuration"
         source_jit_config = "sensitive-source-jit-configuration"
         cloud_config = lifecycle.render_cloud_config(
             template,
@@ -140,21 +132,22 @@ class CloudConfigTests(unittest.TestCase):
             runner_sha256="a" * 64,
             runner_version="2.999.0",
             runner_jit_configs={
-                "builder": builder_jit_config,
+                "downloader": downloader_jit_config,
                 "wot-gui-assets": assets_jit_config,
                 "wot-src": source_jit_config,
             },
         )
 
         self.assertTrue(cloud_config.startswith("#cloud-config\n"))
-        self.assertNotIn(builder_jit_config, cloud_config)
+        self.assertNotIn(downloader_jit_config, cloud_config)
         self.assertNotIn(assets_jit_config, cloud_config)
         self.assertNotIn(source_jit_config, cloud_config)
         encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
         self.assertIsNotNone(encoded)
+        assert encoded is not None
         bootstrap = base64.b64decode(encoded.group(1)).decode()
         self.assertIn(
-            "BUILDER_RUNNER_JIT_CONFIG=sensitive-builder-jit-configuration",
+            "DOWNLOADER_RUNNER_JIT_CONFIG=sensitive-downloader-jit-configuration",
             bootstrap,
         )
         self.assertIn(
@@ -167,7 +160,7 @@ class CloudConfigTests(unittest.TestCase):
         )
         self.assertIn("WOT_GUI_ASSETS_RUNNER_JIT_CONFIG", bootstrap)
         self.assertIn("unset \\\n", bootstrap)
-        self.assertIn("User=snapshot-builder", bootstrap)
+        self.assertIn("User=game-downloader", bootstrap)
         self.assertIn("User=wot-gui-assets-publisher", bootstrap)
         self.assertIn("User=wot-src-publisher", bootstrap)
         self.assertIn(
@@ -175,8 +168,8 @@ class CloudConfigTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn(
-            "install -d -o snapshot-builder -g snapshot-builder -m 0700 \\\n"
-            "  /run/actions-runner/builder",
+            "install -d -o game-downloader -g game-downloader -m 0700 \\\n"
+            "  /run/actions-runner/downloader",
             bootstrap,
         )
         self.assertIn(
@@ -193,8 +186,8 @@ class CloudConfigTests(unittest.TestCase):
             'readonly jit_config_file="/run/actions-runner/${role}/jit-config"',
             bootstrap,
         )
-        self.assertNotIn('/run/actions-runner-${role}-jit-config', bootstrap)
-        self.assertIn("snapshot-builder ALL=(ALL) NOPASSWD: ALL", bootstrap)
+        self.assertNotIn("/run/actions-runner-${role}-jit-config", bootstrap)
+        self.assertIn("game-downloader ALL=(ALL) NOPASSWD: ALL", bootstrap)
         self.assertNotIn("wot-gui-assets-publisher ALL=", bootstrap)
         self.assertNotIn("wot-src-publisher ALL=", bootstrap)
         self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
@@ -256,12 +249,11 @@ class HttpJsonTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
 
         with (
-            patch.object(
-                lifecycle.urllib.request,
-                "urlopen",
-                side_effect=[http.client.RemoteDisconnected(), response],
+            patch(
+                "scripts.runner_lifecycle.urllib.request.urlopen",
+                side_effect=[http.client.RemoteDisconnected("test"), response],
             ) as urlopen,
-            patch.object(lifecycle.time, "sleep") as sleep,
+            patch("scripts.runner_lifecycle.time.sleep") as sleep,
         ):
             status, payload, _ = lifecycle.http_json(
                 "GET", "https://api.example.test/v1/public_ports"
@@ -280,7 +272,7 @@ class CleanupReportingTests(unittest.TestCase):
             run_id="123456",
             run_attempt="2",
             diagnostics=False,
-            builder_runner_id="1",
+            downloader_runner_id="1",
             wot_gui_assets_runner_id="2",
             wot_src_runner_id="3",
             server_id="",
@@ -289,16 +281,36 @@ class CleanupReportingTests(unittest.TestCase):
         )
         config = Mock(password="not-a-real-secret")
 
-        def record_runner(*_args, deleted_resources=None, **_kwargs) -> None:
+        def record_runner(
+            *_args: object,
+            deleted_resources: list[str] | None = None,
+            **_kwargs: object,
+        ) -> None:
+            assert deleted_resources is not None
             deleted_resources.append("github-runner")
 
-        def record_server(*_args, deleted_resources=None, **_kwargs) -> None:
+        def record_server(
+            *_args: object,
+            deleted_resources: list[str] | None = None,
+            **_kwargs: object,
+        ) -> None:
+            assert deleted_resources is not None
             deleted_resources.append("selectel-server")
 
-        def record_port(*_args, deleted_resources=None, **_kwargs) -> None:
+        def record_port(
+            *_args: object,
+            deleted_resources: list[str] | None = None,
+            **_kwargs: object,
+        ) -> None:
+            assert deleted_resources is not None
             deleted_resources.append("selectel-public-port")
 
-        def delete_security_group(*_args, deleted_resources=None, **_kwargs) -> None:
+        def delete_security_group(
+            *_args: object,
+            deleted_resources: list[str] | None = None,
+            **_kwargs: object,
+        ) -> None:
+            assert deleted_resources is not None
             deleted_resources.append("selectel-security-group")
             raise lifecycle.LifecycleError("simulated post-delete failure")
 
@@ -334,9 +346,7 @@ class CleanupReportingTests(unittest.TestCase):
 
 class WorkflowContractTests(unittest.TestCase):
     def test_dispatch_exposes_only_production_inputs(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(encoding="utf-8")
 
         for removed_input in (
             "benchmark_percent:",
@@ -371,29 +381,28 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("ru-9a", workflow)
         self.assertIn('SELECTEL_AVAILABILITY_ZONE: "ru-7b"', workflow)
         self.assertIn('SELECTEL_OS_REGION_NAME: "ru-7"', workflow)
-        self.assertIn(
-            'SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"', workflow
-        )
+        self.assertIn('SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"', workflow)
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
-            "wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.1",
+            "  download:\n"
+            "    name: Download and unpack (manual-${{ github.run_id }}-${{ github.run_attempt }})",
             workflow,
         )
+        self.assertNotIn("wotstat/game-snapshot-builder", workflow)
+        self.assertIn("run: bash .github/scripts/run-stage.sh snapshot", workflow)
 
     def test_provisions_and_calls_both_reusable_publishers(self) -> None:
-        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (ROOT / ".github/workflows/ephemeral-snapshot.yml").read_text(encoding="utf-8")
 
         self.assertIn('PYTHONUNBUFFERED: "1"', workflow)
-        self.assertIn("builder_runner_label", workflow)
+        self.assertIn("downloader_runner_label", workflow)
         self.assertIn("wot_gui_assets_runner_label", workflow)
         self.assertIn("wot_src_runner_label", workflow)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", workflow)
         self.assertNotIn("WOT_SRC_REPOSITORY", workflow)
         self.assertNotIn("permission-actions: write", workflow)
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", workflow)
-        self.assertIn("--builder-runner-id", workflow)
+        self.assertIn("--downloader-runner-id", workflow)
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
@@ -406,10 +415,7 @@ class WorkflowContractTests(unittest.TestCase):
             r"uses: wotstat/wot-gui-assets/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
         )
         self.assertEqual(
-            workflow.count(
-                "secrets:\n"
-                "      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"
-            ),
+            workflow.count("secrets:\n      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"),
             2,
         )
         self.assertNotIn("secrets: inherit", workflow)
@@ -421,15 +427,15 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
         self.assertIn("secrets.TELEGRAM_CHAT_ID", workflow)
         self.assertIn("environment: telegram", workflow)
-        self.assertIn("VERSION_NAME: ${{ needs.workload.outputs.version_name }}", workflow)
+        self.assertIn("VERSION_NAME: ${{ needs.download.outputs.version_name }}", workflow)
         self.assertIn("actions: read", workflow)
         self.assertIn("PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}", workflow)
         self.assertIn("format: html", workflow)
         self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)
 
-        reconciler = (
-            ROOT / ".github/workflows/reconcile-ephemeral-resources.yml"
-        ).read_text(encoding="utf-8")
+        reconciler = (ROOT / ".github/workflows/reconcile-ephemeral-resources.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
         self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)

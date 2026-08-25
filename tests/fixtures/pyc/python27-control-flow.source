@@ -1,0 +1,13 @@
+clamp = lambda minimum, maximum, value: minimum if value < minimum else maximum if value > maximum else value
+
+
+def enabled_or_default(config, default):
+    return config and config.enabled or default
+
+
+def is_between(lower, value, upper):
+    return lower < value < upper
+
+
+def variadic_tuple(tuple_type, item_type):
+    return tuple_type[item_type, ...]

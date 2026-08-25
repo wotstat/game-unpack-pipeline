@@ -5,9 +5,8 @@ import os
 import re
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote
-
 
 TARGET_LABELS = {
     "wot-eu": "WoT EU",
@@ -46,7 +45,7 @@ def _timestamp(value: str) -> datetime | None:
 
 def _pipeline_duration(started_at: str, finished_at: str = "") -> str | None:
     started = _timestamp(started_at)
-    finished = _timestamp(finished_at) if finished_at else datetime.now(timezone.utc)
+    finished = _timestamp(finished_at) if finished_at else datetime.now(UTC)
     if started is None or finished is None or finished < started:
         return None
     elapsed = int((finished - started).total_seconds())
@@ -122,12 +121,10 @@ def render_message(environment: Mapping[str, str]) -> str:
     if pipeline_result not in {"success", "warning"}:
         for label, variable in (
             ("Provision", "PROVISION_RESULT"),
-            ("Builder", "WORKLOAD_RESULT"),
+            ("Downloader", "DOWNLOAD_RESULT"),
             ("Queue watchdog", "QUEUE_WATCHDOG_RESULT"),
         ):
-            lines.append(
-                f"{label} — <code>{_escaped(environment.get(variable, 'unknown'))}</code>"
-            )
+            lines.append(f"{label} — <code>{_escaped(environment.get(variable, 'unknown'))}</code>")
         cleanup_result = _escaped(environment.get("CLEANUP_RESULT", "unknown"))
         deleted_count = _escaped(environment.get("CLEANUP_DELETED_COUNT", "unknown"))
         lines.append(

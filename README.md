@@ -1,9 +1,9 @@
 # game-unpack-pipeline
 
-Публичный оркестратор ручной production-сборки и публикации снимков клиентов World of Tanks и
-«Мира танков». Репозиторий управляет временной инфраструктурой и GitHub Actions jobs; скачивание,
-распаковка и преобразование клиента находятся в отдельном
-[`game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder).
+Публичный pipeline ручного скачивания, распаковки и публикации снимков клиентов World of Tanks и
+«Мира танков». Репозиторий содержит всю основную полезную нагрузку: протоколы WGUS/LSTUS,
+download/verify, распаковку VFS, readable transforms, sealed `GameSnapshot`, временную Selectel VM
+и вызов publisher workflows.
 
 ## Поток
 
@@ -11,16 +11,16 @@
 workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
   → три изолированных repository-level JIT runner на этой VM
-  → game-snapshot-builder@v0.4.1 собирает полный sealed GameSnapshot
+  → встроенный download job собирает полный sealed GameSnapshot
   → выбранные pinned reusable workflows wot-src и wot-gui-assets публикуют snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
   → Telegram-отчёт
   → workflow_run reconciler повторно проверяет ru-7 и ru-9
 ```
 
-Snapshot не загружается в Actions artifact. Builder и оба publisher читают один абсолютный путь
+Snapshot не загружается в Actions artifact. Downloader и оба publisher читают один абсолютный путь
 на локальном диске VM, работая под отдельными Unix-пользователями и в разных runner directories.
-Только builder имеет `sudo`.
+Только downloader имеет `sudo`.
 
 Несколько ручных запусков независимы и получают разные имена, labels и облачные ресурсы на основе
 `github.run_id` и `github.run_attempt`. Отменяющий `concurrency` на уровне orchestrator не
@@ -31,13 +31,37 @@ publisher с `cancel-in-progress: false`.
 
 | Компонент | Ответственность |
 | --- | --- |
-| Этот репозиторий | Provision/cleanup Selectel, lifecycle трёх JIT runner, вызов builder и publisher workflows |
-| [`game-snapshot-builder`](https://github.com/wotstat/game-snapshot-builder) | Resolve версии, download/verify, VFS, Python/XML/MO/AS3, stubs и sealed `GameSnapshot` |
+| `src/game_downloader` | Resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline, stubs и sealed `GameSnapshot` |
+| `.github/workflows` и `scripts` | Production entrypoint, Selectel lifecycle, три JIT runner, cleanup/reconciliation и отчёты |
 | [`wot-src`](https://github.com/wotstat/wot-src) | Reusable publication workflow, проверка snapshot и публикация исходников, XML/PO, AS3, stubs и Gameface |
 | [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) | Reusable publication workflow, проверка snapshot и публикация `res/gui` без `.py` |
 
-Оркестратор не содержит протоколы WGUS/LSTUS, реализацию builder или правила проекции
-data-репозиториев.
+Downloader не является отдельным reusable workflow или внешним продуктом. Его production-интерфейс
+совпадает с download job основного workflow; устойчивым seam для publisher остаётся только sealed
+`GameSnapshot`. Правила проекции data-репозиториев принадлежат самим publisher.
+
+## Download pipeline
+
+Основная реализация находится в [`src/game_downloader`](src/game_downloader), а GitHub-specific
+stage runner и сбор диагностик — в [`.github/scripts`](.github/scripts). Download job выполняет
+фиксированную последовательность:
+
+```text
+resolve → plan-acquisition → download → verify → assemble-client
+  → index-vfs → materialize-vfs
+  → plan-readable → transform-readable → decompile-actionscript
+  → assemble-readable → generate-engine-stubs → finalize-readable
+  → snapshot
+```
+
+Стадии сохраняют атомарные checkpoints внутри run directory. Переход читает непосредственный
+checkpoint, проверяет его digest и завершает процесс полной независимой проверкой snapshot.
+Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и ActionScript из SWC, сохраняет
+исходные assets и формирует provenance manifests. `READY` появляется последним.
+
+Формат результата закреплён схемами из [`contracts/v1`](contracts/v1). Publisher получают только
+абсолютный snapshot path, snapshot ID и SHA-256 canonical descriptor и повторно проверяют snapshot
+перед публикацией.
 
 ## Ручной запуск
 
@@ -58,7 +82,7 @@ Publisher можно независимо отключить для ручног
 HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7b`: 16 vCPU, 32 ГБ RAM и
 256 ГБ локального диска. Standard, обычный HighFreq, выбор flavor и location не поддерживаются.
 
-## Reusable workflows publisher
+## Reusable publisher workflows
 
 Оркестратор вызывает каждый data-репозиторий напрямую по полному SHA:
 
@@ -93,7 +117,7 @@ ID. Затем GitHub Git Database API создаёт один final version com
   `selectel`; Telegram credentials — только в Environment `telegram`.
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
-- Основной cleanup выполняется с `always()` после ошибок builder и publisher. Reconciler
+- Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
   идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7` и `ru-9`.
 - Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
   reconciler машинно подтвердил `deleted_count > 0`.
@@ -109,11 +133,14 @@ dry-run режима нет.
 
 ```text
 .github/actions/setup-openstack/
+.github/scripts/
 .github/workflows/ephemeral-snapshot.yml
 .github/workflows/reconcile-ephemeral-resources.yml
+contracts/v1/
 scripts/bootstrap-actions-runner.sh
 scripts/runner_lifecycle.py
-tests/test_runner_lifecycle.py
+src/game_downloader/
+tests/
 docs/setup.md
 ```
 

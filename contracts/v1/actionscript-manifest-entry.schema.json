@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wotstat.info/contracts/game-downloader/actionscript-manifest-entry/v1.0.0.json",
+  "title": "GameSnapshot v1 ActionScript manifest entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "size", "sha256", "source", "representation"],
+  "properties": {
+    "path": { "$ref": "#/$defs/relativePath" },
+    "size": { "type": "integer", "minimum": 0 },
+    "sha256": { "$ref": "#/$defs/sha256" },
+    "source": {
+      "oneOf": [
+        { "$ref": "#/$defs/gamePackageSource" },
+        { "$ref": "#/$defs/looseFileSource" }
+      ]
+    },
+    "representation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source_path",
+        "source_sha256",
+        "tool",
+        "tool_version",
+        "diagnostics"
+      ],
+      "properties": {
+        "kind": { "const": "swc-to-as" },
+        "source_path": { "$ref": "#/$defs/relativePath" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "tool": { "type": "string", "minLength": 1 },
+        "tool_version": { "type": "string", "minLength": 1 },
+        "diagnostics": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "part": {
+      "type": "string",
+      "enum": ["client", "sdcontent", "hdcontent"]
+    },
+    "gamePackageSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "part",
+        "part_version",
+        "game_package_path",
+        "game_package_sha256",
+        "entry_path",
+        "entry_sha256"
+      ],
+      "properties": {
+        "kind": { "const": "game-package" },
+        "part": { "$ref": "#/$defs/part" },
+        "part_version": { "type": "string", "minLength": 1 },
+        "game_package_path": { "$ref": "#/$defs/relativePath" },
+        "game_package_sha256": { "$ref": "#/$defs/sha256" },
+        "entry_path": { "$ref": "#/$defs/relativePath" },
+        "entry_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "looseFileSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "part",
+        "part_version",
+        "client_tree_path",
+        "client_tree_sha256",
+        "entry_path",
+        "entry_sha256"
+      ],
+      "properties": {
+        "kind": { "const": "loose-file" },
+        "part": { "$ref": "#/$defs/part" },
+        "part_version": { "type": "string", "minLength": 1 },
+        "client_tree_path": { "$ref": "#/$defs/relativePath" },
+        "client_tree_sha256": { "$ref": "#/$defs/sha256" },
+        "entry_path": { "$ref": "#/$defs/relativePath" },
+        "entry_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="changed_game_info" version="1.0">
+  <new_url>https://canonical.example.test</new_url>
+  <new_game_id>WOT.EU.PRODUCTION</new_game_id>
+  <future_redirect_field>preserved-in-raw-xml</future_redirect_field>
+</protocol>

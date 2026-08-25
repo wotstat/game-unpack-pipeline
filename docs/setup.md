@@ -95,7 +95,7 @@ data-ветки.
 | --- | --- |
 | `GH_APP_PRIVATE_KEY` | Полный PEM private key GitHub App |
 
-Self-hosted builder и reusable publisher jobs не используют Environment `selectel`. Publisher jobs
+Self-hosted downloader и reusable publisher jobs не используют Environment `selectel`. Publisher jobs
 получают только явно переданный `GH_APP_PRIVATE_KEY` и не обращаются к `SELECTEL_OS_PASSWORD`.
 
 ## 4. Repository Variables
@@ -166,14 +166,15 @@ Publisher можно включать независимо для каждого
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
-2. Provision резервирует все три runner в `game-unpack-pipeline`: builder и по одному runner для
+2. Provision резервирует все три runner в `game-unpack-pipeline`: downloader и по одному runner для
    jobs `wot-src`/`wot-gui-assets`, затем создаёт VM.
 3. Cloud-init скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и запускает
    три systemd service под разными Unix-пользователями.
 4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех трёх runner.
-5. `Workload` вызывает `game-snapshot-builder@v0.4.1`. Все стадии от `resolve` до `snapshot` видны
-   отдельными Actions steps; metrics и небольшие diagnostic files загружаются как artifact.
-6. После seal builder возвращает version name, snapshot ID, абсолютный path и SHA-256 canonical
+5. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
+   стадии от `resolve` до `snapshot` видны отдельными Actions steps; metrics и небольшие
+   diagnostic files загружаются как artifact.
+6. После seal downloader возвращает version name, snapshot ID, абсолютный path и SHA-256 canonical
    descriptor.
 7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно вызывают reusable workflow
    соответствующего data-репозитория через прямой `uses: ...@<commit-sha>`. Jobs входят в основной
@@ -190,7 +191,7 @@ Publisher можно включать независимо для каждого
 11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 
-Queue watchdog ждёт назначения builder workload 10 минут. Каждая self-hosted publisher
+Queue watchdog ждёт назначения download job на downloader runner 10 минут. Каждая self-hosted publisher
 job ограничена 60 минутами; её состояние и шаги видны непосредственно в основном run.
 
 ## 8. Отмена и повторная очистка
@@ -219,7 +220,7 @@ log не сохраняется как artifact.
 
 Нельзя вставлять в issue или лог содержимое cloud-init user data, `/run/actions-runner/*/jit-config`,
 GitHub App private key или Selectel password. Если нужно показать сбой, использовать Actions
-summary, diagnostic artifact builder и уже очищенный console tail из cleanup job.
+summary, diagnostic artifact downloader и уже очищенный console tail из cleanup job.
 
 ## Первичные справочники
 

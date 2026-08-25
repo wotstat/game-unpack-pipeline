@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wotstat.info/contracts/game-downloader/stub-manifest-entry/v1.0.0.json",
+  "title": "GameSnapshot v1 engine stub manifest entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "size", "sha256"],
+  "properties": {
+    "path": {
+      "allOf": [
+        { "$ref": "#/$defs/relativePath" },
+        { "pattern": "^(?:manifest\\.json|py\\.typed|.+\\.pyi)$" }
+      ]
+    },
+    "size": { "type": "integer", "minimum": 0 },
+    "sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

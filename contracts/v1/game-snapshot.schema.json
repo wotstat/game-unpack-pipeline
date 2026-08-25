@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wotstat.info/contracts/game-downloader/game-snapshot/v1.1.0.json",
+  "title": "GameSnapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contract_version",
+    "snapshot_id",
+    "created_at",
+    "source",
+    "payload",
+    "manifests",
+    "policies",
+    "tools",
+    "quality"
+  ],
+  "properties": {
+    "contract": { "const": "game-snapshot" },
+    "contract_version": { "const": "1.1.0" },
+    "snapshot_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "source": { "$ref": "#/$defs/source" },
+    "payload": { "$ref": "#/$defs/payload" },
+    "manifests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "actionscript", "stubs", "packages", "conflicts"],
+      "properties": {
+        "files": { "$ref": "#/$defs/manifestReference" },
+        "actionscript": { "$ref": "#/$defs/manifestReference" },
+        "stubs": { "$ref": "#/$defs/manifestReference" },
+        "packages": { "$ref": "#/$defs/manifestReference" },
+        "conflicts": { "$ref": "#/$defs/manifestReference" }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vfs", "readable", "source_tree"],
+      "properties": {
+        "vfs": { "$ref": "#/$defs/policyReference" },
+        "readable": { "$ref": "#/$defs/policyReference" },
+        "source_tree": { "$ref": "#/$defs/policyReference" }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tool" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unresolved_conflicts",
+        "required_transform_failures",
+        "unmanifested_payload_files"
+      ],
+      "properties": {
+        "unresolved_conflicts": { "const": 0 },
+        "required_transform_failures": { "const": 0 },
+        "unmanifested_payload_files": { "const": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))[^/\\u0000]+(?:/[^/\\u0000]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "language": { "type": "string", "pattern": "^[A-Z]{2}(?:_[A-Z]{2})?$" },
+    "partVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "acquisition_mode"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["client", "sdcontent", "hdcontent", "locale"]
+        },
+        "language": { "$ref": "#/$defs/language" },
+        "version": { "type": "string", "minLength": 1 },
+        "acquisition_mode": {
+          "type": "string",
+          "enum": ["reference", "install-bundle"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "name": { "const": "locale" } } },
+          "then": { "required": ["language"] },
+          "else": { "not": { "required": ["language"] } }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "publisher",
+        "api_host",
+        "resolved_app_id",
+        "chain_id",
+        "client_type",
+        "languages",
+        "metadata_version",
+        "release_name",
+        "version_vector"
+      ],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "publisher": { "type": "string", "minLength": 1 },
+        "api_host": { "type": "string", "format": "uri" },
+        "resolved_app_id": { "type": "string", "minLength": 1 },
+        "chain_id": { "type": "string", "minLength": 1 },
+        "client_type": { "type": "string", "enum": ["sd", "hd"] },
+        "languages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/language" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "metadata_version": { "type": "string", "minLength": 1 },
+        "release_name": { "type": "string", "minLength": 1 },
+        "version_vector": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/partVersion" },
+          "minItems": 3
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_root",
+        "locale_roots",
+        "actionscript_root",
+        "stubs_root",
+        "overlay_order"
+      ],
+      "properties": {
+        "base_root": { "$ref": "#/$defs/relativePath" },
+        "locale_roots": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/language" },
+          "additionalProperties": { "$ref": "#/$defs/relativePath" }
+        },
+        "actionscript_root": { "$ref": "#/$defs/relativePath" },
+        "stubs_root": { "$ref": "#/$defs/relativePath" },
+        "overlay_order": {
+          "type": "array",
+          "prefixItems": [{ "const": "base" }, { "const": "locale:{language}" }],
+          "items": false
+        }
+      }
+    },
+    "manifestReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "records"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "records": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "policyReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "sha256"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "format": "uri" }
+      }
+    }
+  }
+}

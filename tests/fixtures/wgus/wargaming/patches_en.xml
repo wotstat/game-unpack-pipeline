@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="patches_chain" version="1.11" wgc_publisher_id="wargaming,steam">
+  <parts_info />
+  <patches_chain type="install">
+    <patch>
+      <part>client</part>
+      <version_from>2.3.1.23950</version_from>
+      <version_to>2.3.1.23990</version_to>
+      <files><file name="client_23990.wgpkg" size="20" unpacked_size="40" /></files>
+    </patch>
+    <patch>
+      <part>locale</part>
+      <version_from>0</version_from>
+      <version_to>2.3.1.2598153</version_to>
+      <files>
+        <file name="bundle-release/locale.wgpkg" size="3" unpacked_size="5" />
+      </files>
+      <torrent>
+        <hash>21e2818af314995e1d3529434cec744196d851a5c3e86ecc91647de502bb2bc4</hash>
+        <urls><url>https://cdn.example.test/patch/bundle.torrent</url></urls>
+      </torrent>
+    </patch>
+    <patch>
+      <part>client</part>
+      <version_from>0</version_from>
+      <version_to>2.3.1.23950</version_to>
+      <files><file><name>client_23950.wgpkg</name><size>10</size></file></files>
+    </patch>
+    <patch>
+      <part>sdcontent</part>
+      <version_from>0</version_from>
+      <version_to>2.3.1.23990</version_to>
+      <files>
+        <file name="bundle-release/sdcontent.wgpkg.001" size="2" unpacked_size="8" />
+        <file name="bundle-release/sdcontent.wgpkg.002" size="2" unpacked_size="0" />
+      </files>
+      <torrent>
+        <hash>21e2818af314995e1d3529434cec744196d851a5c3e86ecc91647de502bb2bc4</hash>
+        <urls><url>https://cdn.example.test/patch/bundle.torrent</url></urls>
+      </torrent>
+    </patch>
+  </patches_chain>
+  <web_seeds><url threads="3">http://cdn.example.test/patches/</url></web_seeds>
+  <meta_need_update>False</meta_need_update>
+  <version_name>2.3.1.5400</version_name>
+</protocol>

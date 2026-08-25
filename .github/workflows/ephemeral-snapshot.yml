@@ -60,9 +60,9 @@ jobs:
       port_id: ${{ steps.provision.outputs.port_id }}
       public_address: ${{ steps.provision.outputs.public_address }}
       resource_key: ${{ steps.provision.outputs.resource_key }}
-      builder_runner_id: ${{ steps.provision.outputs.builder_runner_id }}
-      builder_runner_label: ${{ steps.provision.outputs.builder_runner_label }}
-      builder_runner_name: ${{ steps.provision.outputs.builder_runner_name }}
+      downloader_runner_id: ${{ steps.provision.outputs.downloader_runner_id }}
+      downloader_runner_label: ${{ steps.provision.outputs.downloader_runner_label }}
+      downloader_runner_name: ${{ steps.provision.outputs.downloader_runner_name }}
       wot_gui_assets_runner_id: ${{ steps.provision.outputs.wot_gui_assets_runner_id }}
       wot_gui_assets_runner_label: ${{ steps.provision.outputs.wot_gui_assets_runner_label }}
       wot_gui_assets_runner_name: ${{ steps.provision.outputs.wot_gui_assets_runner_name }}
@@ -108,17 +108,208 @@ jobs:
           python3 scripts/runner_lifecycle.py provision
           --instance-key "${INSTANCE_KEY}"
 
-  workload:
-    name: Workload (manual-${{ github.run_id }}-${{ github.run_attempt }})
+  download:
+    name: Download and unpack (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
-    uses: wotstat/game-snapshot-builder/.github/workflows/build-snapshot.yml@v0.4.1
-    with:
-      runner_label: ${{ needs.provision.outputs.builder_runner_label }}
-      target: ${{ inputs.target }}
-      client_type: ${{ inputs.client_type }}
-      languages: ${{ inputs.languages }}
-    permissions:
-      contents: read
+    runs-on:
+      - self-hosted
+      - ${{ needs.provision.outputs.downloader_runner_label }}
+    timeout-minutes: 360
+    outputs:
+      snapshot_id: ${{ steps.result.outputs.snapshot_id }}
+      version_name: ${{ steps.result.outputs.version_name }}
+      snapshot_path: ${{ steps.result.outputs.snapshot_path }}
+      descriptor_sha256: ${{ steps.result.outputs.descriptor_sha256 }}
+    env:
+      GAME_DOWNLOADER_CLIENT_TYPE: ${{ inputs.client_type }}
+      GAME_DOWNLOADER_DATA_ROOT: /var/lib/game-downloader-data/${{ github.run_id }}-${{ github.run_attempt }}
+      GAME_DOWNLOADER_LANGUAGES: ${{ inputs.languages }}
+      GAME_DOWNLOADER_REPORT_DIR: /var/lib/game-downloader-data/${{ github.run_id }}-${{ github.run_attempt }}/action-reports
+      GAME_DOWNLOADER_TARGET: ${{ inputs.target }}
+      UV_COMPILE_BYTECODE: "1"
+      UV_LINK_MODE: copy
+    steps:
+      - name: Check out pipeline code
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Inspect runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          online_cpus="$(getconf _NPROCESSORS_ONLN)"
+          selected_workers="${online_cpus}"
+          if (( selected_workers > 32 )); then
+            selected_workers=32
+          fi
+          install -d -m 0700 \
+            "${GAME_DOWNLOADER_DATA_ROOT}" \
+            "${GAME_DOWNLOADER_REPORT_DIR}"
+          echo "Host: $(hostname)"
+          echo "Kernel: $(uname -srmo)"
+          echo "CPUs: ${online_cpus}"
+          echo "Workers: ${selected_workers}"
+          printf 'GAME_DOWNLOADER_DOWNLOAD_WORKERS=%s\n' \
+            "${selected_workers}" >>"${GITHUB_ENV}"
+          free -h
+          df -h "${GAME_DOWNLOADER_DATA_ROOT}"
+
+      - name: Install system tools
+        shell: bash
+        env:
+          FFDEC_SHA256: 0333b56998a55bd83f4e0deb678a811fcdc45607582b4f5dd438309c8c3ad5ce
+          FFDEC_VERSION: 26.2.1
+        run: |
+          set -Eeuo pipefail
+          if (( EUID == 0 )); then
+            apt=(apt-get)
+            privileged=()
+          else
+            apt=(sudo apt-get)
+            privileged=(sudo)
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          "${apt[@]}" update
+          "${apt[@]}" install --yes --no-install-recommends \
+            aria2 ca-certificates curl openjdk-17-jre-headless p7zip-full sysstat time unzip
+          "${apt[@]}" clean
+          "${privileged[@]}" rm -rf /var/lib/apt/lists/*
+
+          ffdec_root="${RUNNER_TEMP}/ffdec"
+          ffdec_archive="${RUNNER_TEMP}/ffdec.zip"
+          curl --fail --location --silent --show-error \
+            "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version${FFDEC_VERSION}/ffdec_${FFDEC_VERSION}.zip" \
+            --output "${ffdec_archive}"
+          echo "${FFDEC_SHA256}  ${ffdec_archive}" | sha256sum --check --strict
+          mkdir -p "${ffdec_root}"
+          unzip -q "${ffdec_archive}" -d "${ffdec_root}"
+          chmod 0555 "${ffdec_root}/ffdec" "${ffdec_root}/ffdec.sh"
+          printf 'GAME_DOWNLOADER_FFDEC=%s/ffdec\n' "${ffdec_root}" >>"${GITHUB_ENV}"
+
+      - name: Record runner performance inventory
+        shell: bash
+        run: >-
+          python3 .github/scripts/performance-metrics.py inventory
+          --data-root "${GAME_DOWNLOADER_DATA_ROOT}"
+          --output "${GAME_DOWNLOADER_REPORT_DIR}/host-performance.json"
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.11.28"
+          python-version: "3.13.14"
+
+      - name: Install downloader
+        shell: bash
+        run: uv sync --frozen --no-dev
+
+      - name: Check runtime
+        shell: bash
+        run: uv run --no-sync game-downloader doctor --data-root "${GAME_DOWNLOADER_DATA_ROOT}"
+
+      - name: Resolve release
+        id: resolve
+        shell: bash
+        run: bash .github/scripts/run-stage.sh resolve
+
+      - name: Plan acquisition
+        shell: bash
+        run: bash .github/scripts/run-stage.sh plan-acquisition
+
+      - name: Download artifacts
+        shell: bash
+        run: bash .github/scripts/run-stage.sh download
+
+      - name: Verify downloads
+        shell: bash
+        run: bash .github/scripts/run-stage.sh verify
+
+      - name: Assemble client
+        shell: bash
+        run: bash .github/scripts/run-stage.sh assemble-client
+
+      - name: Index VFS
+        shell: bash
+        run: bash .github/scripts/run-stage.sh index-vfs
+
+      - name: Materialize VFS
+        shell: bash
+        run: bash .github/scripts/run-stage.sh materialize-vfs
+
+      - name: Readable · Plan output
+        shell: bash
+        run: bash .github/scripts/run-stage.sh plan-readable
+
+      - name: Readable · Transform Python, XML and translations
+        shell: bash
+        run: bash .github/scripts/run-stage.sh transform-readable
+
+      - name: Readable · Decompile ActionScript
+        shell: bash
+        run: bash .github/scripts/run-stage.sh decompile-actionscript
+
+      - name: Readable · Assemble and link tree
+        shell: bash
+        run: bash .github/scripts/run-stage.sh assemble-readable
+
+      - name: Readable · Generate engine stubs
+        shell: bash
+        run: bash .github/scripts/run-stage.sh generate-engine-stubs
+
+      - name: Readable · Finalize references
+        shell: bash
+        run: bash .github/scripts/run-stage.sh finalize-readable
+
+      - name: Seal snapshot
+        shell: bash
+        run: bash .github/scripts/run-stage.sh snapshot
+
+      - name: Render downloader report
+        id: result
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${GAME_DOWNLOADER_RUN_ID:-}" ]]; then
+            {
+              echo '## Game download'
+              echo
+              echo 'The downloader failed before creating a Run.'
+            } | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          uv run --no-sync python .github/scripts/collect-result.py
+
+      - name: Expose sealed snapshot to publisher runners
+        if: always() && steps.result.outputs.snapshot_path != ''
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          snapshot_path='${{ steps.result.outputs.snapshot_path }}'
+          case "${snapshot_path}" in
+            "${GAME_DOWNLOADER_DATA_ROOT}"/snapshots/sha256:*) ;;
+            *)
+              echo "snapshot path is outside the canonical snapshots directory" >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! -d "${snapshot_path}" || -L "${snapshot_path}" ]]; then
+            echo "snapshot path is not a sealed directory" >&2
+            exit 1
+          fi
+          chmod 0711 "${GAME_DOWNLOADER_DATA_ROOT}"
+          chmod 0711 "${GAME_DOWNLOADER_DATA_ROOT}/snapshots"
+
+      - name: Upload diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: game-downloader-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.GAME_DOWNLOADER_REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 9
 
   queue-watchdog:
     name: Queue watchdog (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -130,12 +321,12 @@ jobs:
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
 
-      - name: Wait for workload assignment
+      - name: Wait for download assignment
         id: watch
         env:
           GITHUB_WATCH_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
-          RUNNER_LABEL: ${{ needs.provision.outputs.builder_runner_label }}
+          RUNNER_LABEL: ${{ needs.provision.outputs.downloader_runner_label }}
         run: >-
           python3 scripts/runner_lifecycle.py watch-queue
           --instance-key "${INSTANCE_KEY}"
@@ -163,7 +354,7 @@ jobs:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           PORT_ID: ${{ needs.provision.outputs.port_id }}
-          BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
+          DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
@@ -176,7 +367,7 @@ jobs:
         run: >-
           python3 scripts/runner_lifecycle.py cleanup
           --instance-key "${INSTANCE_KEY}"
-          --builder-runner-id "${BUILDER_RUNNER_ID}"
+          --downloader-runner-id "${DOWNLOADER_RUNNER_ID}"
           --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}"
           --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
           --server-id "${SERVER_ID}"
@@ -194,16 +385,16 @@ jobs:
 
   publish-wot-src:
     name: Publish wot-src (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: inputs.publish_wot_src && needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
+    if: inputs.publish_wot_src && needs.download.result == 'success' && needs.download.outputs.snapshot_path != ''
     needs:
       - provision
-      - workload
+      - download
     uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@c03924970a344741e417a6cc70f3158651c4ae0a
     with:
       runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
-      snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
-      expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
-      expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
+      snapshot_path: ${{ needs.download.outputs.snapshot_path }}
+      expected_snapshot_id: ${{ needs.download.outputs.snapshot_id }}
+      expected_descriptor_sha256: ${{ needs.download.outputs.descriptor_sha256 }}
       target: ${{ inputs.target }}
     permissions:
       contents: read
@@ -212,16 +403,16 @@ jobs:
 
   publish-wot-gui-assets:
     name: Publish wot-gui-assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: inputs.publish_wot_gui_assets && needs.workload.result == 'success' && needs.workload.outputs.snapshot_path != ''
+    if: inputs.publish_wot_gui_assets && needs.download.result == 'success' && needs.download.outputs.snapshot_path != ''
     needs:
       - provision
-      - workload
+      - download
     uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@ca2c9bc062a97b9dcfd6d73f645624f1d4dc3d0c
     with:
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
-      snapshot_path: ${{ needs.workload.outputs.snapshot_path }}
-      expected_snapshot_id: ${{ needs.workload.outputs.snapshot_id }}
-      expected_descriptor_sha256: ${{ needs.workload.outputs.descriptor_sha256 }}
+      snapshot_path: ${{ needs.download.outputs.snapshot_path }}
+      expected_snapshot_id: ${{ needs.download.outputs.snapshot_id }}
+      expected_descriptor_sha256: ${{ needs.download.outputs.descriptor_sha256 }}
       target: ${{ inputs.target }}
     permissions:
       contents: read
@@ -233,7 +424,7 @@ jobs:
     if: always() && needs.provision.result != 'skipped'
     needs:
       - provision
-      - workload
+      - download
       - queue-watchdog
       - publish-wot-gui-assets
       - publish-wot-src
@@ -266,16 +457,16 @@ jobs:
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           PORT_ID: ${{ needs.provision.outputs.port_id }}
           PROVISION_RESULT: ${{ needs.provision.result }}
-          BUILDER_RUNNER_ID: ${{ needs.provision.outputs.builder_runner_id }}
+          DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
           WOT_GUI_ASSETS_PUBLISH_RESULT: ${{ needs.publish-wot-gui-assets.result }}
-          WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_gui_assets && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
+          WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_gui_assets && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
           WOT_SRC_PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
-          WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.workload.outputs.snapshot_path != '' && 'success' || 'skipped' }}
+          WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
-          WORKLOAD_RESULT: ${{ needs.workload.result }}
+          DOWNLOAD_RESULT: ${{ needs.download.result }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
@@ -285,14 +476,14 @@ jobs:
           set -Eeuo pipefail
           diagnostics=()
           if [[ "${PROVISION_RESULT}" != success \
-            || "${WORKLOAD_RESULT}" != success \
+            || "${DOWNLOAD_RESULT}" != success \
             || "${WOT_GUI_ASSETS_PUBLISH_RESULT}" != "${WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT}" \
             || "${WOT_SRC_PUBLISH_RESULT}" != "${WOT_SRC_PUBLISH_EXPECTED_RESULT}" ]]; then
             diagnostics+=(--diagnostics)
           fi
           python3 scripts/runner_lifecycle.py cleanup \
             --instance-key "${INSTANCE_KEY}" \
-            --builder-runner-id "${BUILDER_RUNNER_ID}" \
+            --downloader-runner-id "${DOWNLOADER_RUNNER_ID}" \
             --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}" \
             --wot-src-runner-id "${WOT_SRC_RUNNER_ID}" \
             --server-id "${SERVER_ID}" \
@@ -305,7 +496,7 @@ jobs:
     if: always()
     needs:
       - provision
-      - workload
+      - download
       - queue-watchdog
       - publish-wot-gui-assets
       - publish-wot-src
@@ -337,11 +528,11 @@ jobs:
         env:
           PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
           TARGET: ${{ inputs.target }}
-          VERSION_NAME: ${{ needs.workload.outputs.version_name }}
+          VERSION_NAME: ${{ needs.download.outputs.version_name }}
           CLIENT_TYPE: ${{ inputs.client_type }}
           LANGUAGES: ${{ inputs.languages }}
           PROVISION_RESULT: ${{ needs.provision.result }}
-          WORKLOAD_RESULT: ${{ needs.workload.result }}
+          DOWNLOAD_RESULT: ${{ needs.download.result }}
           QUEUE_WATCHDOG_RESULT: ${{ needs.queue-watchdog.result }}
           WOT_SRC_ENABLED: ${{ inputs.publish_wot_src }}
           WOT_SRC_RESULT: ${{ needs.publish-wot-src.result }}

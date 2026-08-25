@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="integrity_check" version="1.7" wgc_publisher_id="wargaming,steam">
+  <torrents>
+    <torrent>
+      <file>https://cdn.example.test/reference/client.torrent</file>
+      <blacklist>https://cdn.example.test/reference/client.blacklist</blacklist>
+      <part>client</part>
+      <version>2.3.1.23990</version>
+      <hash>fcc327c921e63fdb536c96af5afc13a1c162ca13b25d453935d902239f2e7321</hash>
+    </torrent>
+  </torrents>
+  <web_seeds>
+    <url threads="3">http://cdn.example.test/reference/</url>
+  </web_seeds>
+  <future_integrity_field>preserved-in-raw-xml</future_integrity_field>
+</protocol>

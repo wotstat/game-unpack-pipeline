@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="integrity_check" version="1.7" wgc_publisher_id="wargaming,steam">
+  <torrents />
+  <web_seeds><url threads="3">http://cdn.example.test/reference/</url></web_seeds>
+</protocol>

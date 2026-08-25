@@ -1,0 +1,62 @@
+# Versions are discovered live. Never add version_name or Part versions here.
+defaults:
+  installation_id: game-downloader
+
+targets:
+  wot-eu:
+    publisher: wargaming
+    host: https://wgus-woteu.wargaming.net
+    app_id: WOT.EU.PRODUCTION
+    metadata_protocol: "7.5"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  wot-na:
+    publisher: wargaming
+    host: https://wgus-wotna.wargaming.net
+    app_id: WOT.NA.PRODUCTION
+    metadata_protocol: "7.5"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  wot-asia:
+    publisher: wargaming
+    host: https://wgus-wotasia.wargaming.net
+    app_id: WOT.ASIA.PRODUCTION
+    metadata_protocol: "7.5"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  wot-common-test:
+    publisher: wargaming
+    host: https://wgus-eu.wargaming.net
+    app_id: WOT.CT.PRODUCTION
+    metadata_protocol: "7.5"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  mt-ru:
+    publisher: lesta
+    host: https://lstus-ru.lesta.ru
+    app_id: MT.RU.PRODUCTION
+    metadata_protocol: "7.6"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  mt-public-test:
+    publisher: lesta
+    host: https://lstus-ru.lesta.ru
+    app_id: MT.PT.PRODUCTION
+    metadata_protocol: "7.6"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"
+
+  wot-cn:
+    publisher: qihoo
+    # HTTPS is canonical. An explicitly configured HTTP fallback may be needed
+    # if the current China endpoint keeps timing out; never downgrade globally.
+    host: https://wgus-cn360.wggames.cn
+    app_id: WOT.CN.PRODUCTION
+    metadata_protocol: "7.5"
+    patches_protocol: "1.11"
+    integrity_protocol: "1.7"

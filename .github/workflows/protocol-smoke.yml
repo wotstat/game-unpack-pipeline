@@ -1,0 +1,25 @@
+name: Downloader protocol smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  wgus-lstus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.11.28"
+          python-version: "3.13.14"
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - run: uv run pytest -m live tests/test_wgus_live.py
+        env:
+          GAME_DOWNLOADER_LIVE: "1"
