@@ -3,7 +3,7 @@ name: Downloader protocol smoke
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 4 * * 2"
+    - cron: "37 4 */2 * *"
 
 permissions:
   contents: read
