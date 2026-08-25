@@ -1,0 +1,195 @@
+name: Check game releases
+run-name: Release check · ${{ inputs.dispatch_pipelines && 'dispatch' || 'dry-run' }} · @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      check_wot_eu:
+        description: Check WoT EU
+        required: true
+        default: true
+        type: boolean
+      check_wot_na:
+        description: Check WoT NA
+        required: true
+        default: false
+        type: boolean
+      check_wot_asia:
+        description: Check WoT Asia
+        required: true
+        default: false
+        type: boolean
+      check_wot_common_test:
+        description: Check WoT Common Test
+        required: true
+        default: false
+        type: boolean
+      check_wot_cn:
+        description: Check WoT CN
+        required: true
+        default: false
+        type: boolean
+      check_mt_ru:
+        description: Check Мир танков RU
+        required: true
+        default: false
+        type: boolean
+      check_mt_public_test:
+        description: Check Мир танков Public Test
+        required: true
+        default: false
+        type: boolean
+      dispatch_pipelines:
+        description: Dispatch pipelines for mismatched releases
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-game-releases
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Select targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Build target matrix
+        id: targets
+        env:
+          CHECK_MT_PUBLIC_TEST: ${{ inputs.check_mt_public_test }}
+          CHECK_MT_RU: ${{ inputs.check_mt_ru }}
+          CHECK_WOT_ASIA: ${{ inputs.check_wot_asia }}
+          CHECK_WOT_CN: ${{ inputs.check_wot_cn }}
+          CHECK_WOT_COMMON_TEST: ${{ inputs.check_wot_common_test }}
+          CHECK_WOT_EU: ${{ inputs.check_wot_eu }}
+          CHECK_WOT_NA: ${{ inputs.check_wot_na }}
+        run: |
+          set -Eeuo pipefail
+          selected=()
+          [[ "${CHECK_WOT_EU}" == true ]] && selected+=(wot-eu)
+          [[ "${CHECK_WOT_NA}" == true ]] && selected+=(wot-na)
+          [[ "${CHECK_WOT_ASIA}" == true ]] && selected+=(wot-asia)
+          [[ "${CHECK_WOT_COMMON_TEST}" == true ]] && selected+=(wot-common-test)
+          [[ "${CHECK_WOT_CN}" == true ]] && selected+=(wot-cn)
+          [[ "${CHECK_MT_RU}" == true ]] && selected+=(mt-ru)
+          [[ "${CHECK_MT_PUBLIC_TEST}" == true ]] && selected+=(mt-public-test)
+          if ((${#selected[@]} == 0)); then
+            targets='[]'
+          else
+            targets="$(printf '%s\n' "${selected[@]}" \
+              | jq --raw-input --slurp 'split("\n") | map(select(length > 0))')"
+          fi
+          echo "targets=${targets}" >>"${GITHUB_OUTPUT}"
+          echo "Selected targets: ${targets}"
+
+  check:
+    name: Check ${{ matrix.target }}
+    if: needs.plan.outputs.targets != '[]'
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out latest default branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.11.28"
+          python-version: "3.13.14"
+          enable-cache: true
+
+      - name: Install release probe
+        run: uv sync --frozen --no-dev
+
+      - name: Probe and compare release
+        id: compare
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -Eeuo pipefail
+          current_json="$(uv run --no-sync game-downloader probe-release \
+            --target "${TARGET}" \
+            --client-type sd \
+            --json)"
+          current="$(jq -er '.release_name | select(type == "string" and length > 0)' \
+            <<<"${current_json}")"
+          stored_json="$(python3 scripts/release_status.py read --target "${TARGET}")"
+          stored="$(jq -r 'if .release_name == null then "null" else .release_name end' \
+            <<<"${stored_json}")"
+          echo "release_name=${current}" >>"${GITHUB_OUTPUT}"
+          if [[ "${stored}" == "${current}" ]]; then
+            echo "mismatch=false" >>"${GITHUB_OUTPUT}"
+            echo "${TARGET}: stored=${stored}, current=${current}, action=none"
+          else
+            echo "mismatch=true" >>"${GITHUB_OUTPUT}"
+            echo "${TARGET}: stored=${stored}, current=${current}, action=would-dispatch"
+          fi
+
+      - name: Check for an active pipeline
+        id: active
+        if: steps.compare.outputs.mismatch == 'true' && inputs.dispatch_pipelines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -Eeuo pipefail
+          runs="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ephemeral-snapshot.yml/runs" \
+            -f event=workflow_dispatch \
+            -f per_page=100)"
+          prefix="Snapshot · ${TARGET} · "
+          if jq -e --arg prefix "${prefix}" \
+            'any(.workflow_runs[];
+              .status != "completed" and ((.display_title // "") | startswith($prefix)))' \
+            <<<"${runs}" >/dev/null; then
+            echo "found=true" >>"${GITHUB_OUTPUT}"
+            echo "${TARGET}: action=already-running"
+            jq -r --arg prefix "${prefix}" \
+              '.workflow_runs[]
+                | select(
+                    .status != "completed"
+                    and ((.display_title // "") | startswith($prefix))
+                  )
+                | "Active run: \(.html_url) (\(.status))"' \
+              <<<"${runs}"
+          else
+            echo "found=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Dispatch snapshot pipeline
+        if: >-
+          steps.compare.outputs.mismatch == 'true' &&
+          inputs.dispatch_pipelines &&
+          steps.active.outputs.found == 'false'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ steps.compare.outputs.release_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -Eeuo pipefail
+          gh workflow run ephemeral-snapshot.yml \
+            --ref "${DEFAULT_BRANCH}" \
+            --field target="${TARGET}" \
+            --field client_type=sd \
+            --field languages=ALL \
+            --field publish_wot_src=true \
+            --field publish_wot_gui_assets=true
+          echo "${TARGET}: current=${RELEASE_NAME}, action=dispatched"

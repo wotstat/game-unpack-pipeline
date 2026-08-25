@@ -1003,6 +1003,43 @@ class WgusResolver:
             f"WGUS source did not stabilize after bounded metadata refreshes: {last_change}"
         )
 
+    def probe_release_name(self, client_type: ClientType = ClientType.SD) -> str:
+        """Resolve the current release without creating a Run or downloading payloads."""
+
+        host = self._target.host
+        app_id = self._target.app_id
+        last_change = "metadata requested an update"
+
+        for attempt in range(1, self._policy.max_metadata_refreshes + 2):
+            metadata, host, app_id, _redirects, _raw = self._load_metadata(host, app_id, attempt)
+            request = RunRequest(
+                target=self._target.target_id,
+                client_type=client_type,
+                languages=(metadata.default_language,),
+            )
+            selected = self._validate_request(metadata, request, request.languages)
+            patches, _patches_raw = self._load_patches(
+                host,
+                app_id,
+                metadata,
+                selected,
+                metadata.default_language,
+                client_type,
+                attempt,
+            )
+            if patches.meta_need_update:
+                last_change = (
+                    f"patches_chain for {metadata.default_language} requested fresh metadata"
+                )
+                continue
+            if patches.release_name is None:
+                raise ProtocolIncompatibleError("patches_chain response has no release name")
+            return patches.release_name
+
+        raise SourceChangedError(
+            f"WGUS source did not stabilize after bounded metadata refreshes: {last_change}"
+        )
+
     def _load_metadata(
         self,
         initial_host: str,

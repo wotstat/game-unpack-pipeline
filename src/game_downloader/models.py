@@ -24,6 +24,10 @@ LanguageSelector = Annotated[
     str,
     StringConstraints(pattern=r"^(?:ALL|[A-Z]{2}(?:_[A-Z]{2})?)$"),
 ]
+ReleaseName = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=256, pattern=r"^[^\r\n]+$"),
+]
 
 
 def _validate_relative_path(value: str) -> str:
@@ -207,7 +211,7 @@ class PatchesChainDocument(FrozenModel):
     observed_protocol_version: Annotated[str, StringConstraints(min_length=1)]
     observed_publishers: Annotated[str, StringConstraints(min_length=1)] | None = None
     meta_need_update: bool
-    release_name: Annotated[str, StringConstraints(min_length=1)] | None = None
+    release_name: ReleaseName | None = None
     transitions: tuple[PatchTransition, ...] = ()
     web_seeds: tuple[ProtocolWebSeed, ...] = ()
     unknown_top_level_fields: tuple[Annotated[str, StringConstraints(min_length=1)], ...] = ()
@@ -837,7 +841,7 @@ class ResolveResult(FrozenModel):
     client_type: ClientType
     languages: tuple[Language, ...] = Field(min_length=1)
     metadata_version: Annotated[str, StringConstraints(min_length=1)]
-    release_name: Annotated[str, StringConstraints(min_length=1)]
+    release_name: ReleaseName
     metadata: ResolvedMetadata
     version_vector: tuple[ResolvedPart, ...] = Field(min_length=3)
     raw_responses: tuple[RawProtocolResponse, ...] = Field(min_length=2)
@@ -889,7 +893,7 @@ class SnapshotSource(FrozenModel):
     client_type: ClientType
     languages: tuple[Language, ...] = Field(min_length=1)
     metadata_version: Annotated[str, StringConstraints(min_length=1)]
-    release_name: Annotated[str, StringConstraints(min_length=1)]
+    release_name: ReleaseName
     version_vector: tuple[PartVersion, ...] = Field(min_length=3)
 
     @field_validator("languages")
@@ -1394,7 +1398,7 @@ class SnapshotResult(FrozenModel):
     schema_version: Literal[1] = 1
     readable_result_sha256: Digest
     snapshot_id: SnapshotId
-    version_name: Annotated[str, StringConstraints(min_length=1)]
+    version_name: ReleaseName
     snapshot_path: RelativePath
     descriptor_sha256: Sha256
     file_records: Annotated[int, Field(ge=0)]

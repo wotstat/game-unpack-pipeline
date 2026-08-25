@@ -139,6 +139,40 @@ def test_wargaming_resolve_builds_exact_version_vector_and_preserves_raw_xml() -
     assert transport.responses == []
 
 
+def test_release_probe_uses_only_metadata_default_language() -> None:
+    host = "https://wgus-woteu.wargaming.net"
+    resolver, transport = resolver_for(
+        "wot-eu",
+        [
+            ExpectedResponse(host, "/api/v1/metadata/", fixture("wargaming/metadata.xml")),
+            ExpectedResponse(host, "/api/v1/patches_chain/", fixture("wargaming/patches_en.xml")),
+        ],
+    )
+
+    assert resolver.probe_release_name() == "2.3.1.5400"
+    assert len(transport.calls) == 2
+    assert transport.calls[1][2]["client_type"] == "sd"
+    assert transport.calls[1][2]["lang"] == "EN"
+    assert transport.responses == []
+
+
+def test_release_probe_refetches_metadata_when_requested() -> None:
+    host = "https://wgus-woteu.wargaming.net"
+    resolver, transport = resolver_for(
+        "wot-eu",
+        [
+            ExpectedResponse(host, "/api/v1/metadata/", fixture("wargaming/metadata.xml")),
+            ExpectedResponse(host, "/api/v1/patches_chain/", fixture("meta_need_update.xml")),
+            ExpectedResponse(host, "/api/v1/metadata/", fixture("wargaming/metadata.xml")),
+            ExpectedResponse(host, "/api/v1/patches_chain/", fixture("wargaming/patches_en.xml")),
+        ],
+        max_metadata_refreshes=1,
+    )
+
+    assert resolver.probe_release_name() == "2.3.1.5400"
+    assert len(transport.calls) == 4
+
+
 def test_all_languages_resolves_every_language_supported_by_pinned_metadata() -> None:
     host = "https://wgus-woteu.wargaming.net"
     resolver, transport = resolver_for(

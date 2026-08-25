@@ -72,6 +72,45 @@ def test_download_job_exposes_only_the_sealed_snapshot_tree_to_publishers() -> N
     assert "chmod -R" not in share["run"]
 
 
+def test_successful_pipeline_records_release_status_in_default_branch() -> None:
+    job = _workflow()["jobs"]["record-status"]
+
+    assert set(job["needs"]) == {
+        "provision",
+        "download",
+        "queue-watchdog",
+        "publish-wot-gui-assets",
+        "publish-wot-src",
+        "cleanup",
+    }
+    assert "needs.download.result == 'success'" in job["if"]
+    assert "needs.cleanup.result == 'success'" in job["if"]
+    assert "!inputs.publish_wot_src || needs.publish-wot-src.result == 'success'" in job["if"]
+    assert (
+        "!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success'"
+        in job["if"]
+    )
+    assert job["permissions"] == {"contents": "write"}
+    assert job["concurrency"] == {
+        "group": "release-status-${{ github.repository }}",
+        "cancel-in-progress": False,
+    }
+    checkout = job["steps"][0]
+    assert checkout["with"]["ref"] == "${{ github.event.repository.default_branch }}"
+    assert "scripts/release_status.py write" in job["steps"][1]["run"]
+    assert 'git add -- "status/${TARGET}.json"' in job["steps"][2]["run"]
+    assert 'git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"' in job["steps"][2]["run"]
+
+
+def test_status_recording_and_telegram_notification_are_parallel_final_jobs() -> None:
+    jobs = _workflow()["jobs"]
+
+    assert "record-status" not in jobs["notify"]["needs"]
+    assert "notify" not in jobs["record-status"]["needs"]
+    assert "cleanup" in jobs["notify"]["needs"]
+    assert "cleanup" in jobs["record-status"]["needs"]
+
+
 def test_stage_runner_uses_the_canonical_stage_sequence_numbers() -> None:
     script = (REPOSITORY_ROOT / ".github/scripts/run-stage.sh").read_text()
 

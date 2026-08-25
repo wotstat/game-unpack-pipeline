@@ -36,6 +36,7 @@ from game_downloader.pipeline import (
     Pipeline,
     PipelineInterrupted,
     PipelineRunError,
+    StageExecutionError,
 )
 from game_downloader.readable import (
     FfdecTransformer,
@@ -55,9 +56,12 @@ from game_downloader.vfs import (
     create_materialize_vfs_implementation,
 )
 from game_downloader.wgus import (
+    HttpxTransport,
+    ResolvePolicy,
     TargetConfig,
     TargetConfigurationError,
     TargetRegistry,
+    WgusResolver,
     create_resolve_implementation,
 )
 from game_downloader.workspace import Workspace, WorkspaceError
@@ -199,6 +203,51 @@ def version(json_output: bool) -> None:
         click.echo(canonical_json_bytes(payload).decode("utf-8"), nl=False)
     else:
         click.echo(f"game-downloader {__version__} (Python {payload['python']})")
+
+
+@cli.command(name="probe-release")
+@click.option("--target", required=True, help="Configured Target ID.")
+@click.option(
+    "--client-type",
+    type=click.Choice([member.value for member in ClientType], case_sensitive=False),
+    default=ClientType.SD.value,
+    show_default=True,
+)
+@click.option(
+    "--targets-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Override the packaged TargetConfig YAML.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit machine-readable JSON.")
+def probe_release(
+    target: str,
+    client_type: str,
+    targets_config: Path | None,
+    json_output: bool,
+) -> None:
+    """Read the current release name without creating a Run or downloading payloads."""
+
+    try:
+        target_config = TargetRegistry.load(targets_config).get(target)
+        policy = ResolvePolicy()
+        release_name = WgusResolver(
+            target_config,
+            HttpxTransport(policy),
+            policy,
+        ).probe_release_name(ClientType(client_type.lower()))
+    except (TargetConfigurationError, ValidationError, ValueError) as exc:
+        raise CliFailure(str(exc), EXIT_VALIDATION) from exc
+    except StageExecutionError as exc:
+        raise CliFailure(
+            f"{exc.error.code}: {exc.error.message}",
+            _pipeline_error_exit_code(exc.error.code),
+        ) from exc
+
+    payload = {"release_name": release_name, "target": target}
+    if json_output:
+        click.echo(canonical_json_bytes(payload).decode("utf-8"), nl=False)
+    else:
+        click.echo(f"{target}: {release_name}")
 
 
 @cli.command()

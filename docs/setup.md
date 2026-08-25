@@ -1,11 +1,12 @@
 # Настройка и эксплуатация pipeline
 
-Эта инструкция описывает текущий ручной production workflow. В ней нет реальных
-credentials: пароли и private keys нужно вводить непосредственно в GitHub Settings, не отправляя
-их в issues, commits, чаты или логи.
+Эта инструкция описывает текущий ручной production workflow и ручной checker новых версий. В ней
+нет реальных credentials: пароли и private keys нужно вводить непосредственно в GitHub Settings,
+не отправляя их в issues, commits, чаты или логи.
 
-Workflow не имеет dry-run режима. Сразу после нажатия **Run workflow** он создаёт тарифицируемую VM
-и direct public IP в Selectel.
+`Ephemeral snapshot` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
+direct public IP в Selectel. `Check game releases`, напротив, по умолчанию только сравнивает версии
+и ничего не создаёт.
 
 ## 1. Selectel project и ёмкость
 
@@ -142,7 +143,28 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 `deleted_count` больше нуля. Используемый `appleboy/telegram-action` закреплён на полном commit SHA
 версии `v1.1.1`.
 
-## 6. Ручной запуск
+## 6. Ручная проверка новых версий
+
+Открыть `Actions → Check game releases → Run workflow` на `main`. Workflow пока не имеет schedule.
+Он предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
+`check_wot_eu`. `dispatch_pipelines` по умолчанию выключен, поэтому первый запуск безопасно покажет
+в логе одно из состояний:
+
+- `action=none` — release name совпадает со status;
+- `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;
+- `action=already-running` — для target уже есть ожидающий или работающий pipeline.
+
+При `dispatch_pipelines: true` отличающиеся targets запускаются параллельно через основной workflow
+на default branch с фиксированными `client_type: sd`, `languages: ALL` и обоими publisher. Ошибка
+одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
+красным.
+
+Status-файлы находятся в `status/<target>.json` и содержат только `release_name`. Bootstrap `null`
+является валидным несовпадением; отсутствующий или повреждённый файл блокирует target. Lightweight
+probe выполняет только запрос metadata и один patches chain для default language, не создавая
+workspace и не скачивая клиент.
+
+## 7. Ручной запуск snapshot pipeline
 
 Открыть `Actions → Ephemeral snapshot`, выбрать branch `main` и заполнить inputs.
 
@@ -162,7 +184,7 @@ Publisher можно включать независимо для каждого
 оставить `publish_wot_src: true` и установить `publish_wot_gui_assets: false`. Оба переключателя
 включены по умолчанию; если отключить оба, workflow соберёт snapshot без публикации.
 
-## 7. Ожидаемая последовательность jobs
+## 8. Ожидаемая последовательность jobs
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
@@ -185,17 +207,21 @@ Publisher можно включать независимо для каждого
 8. Каждый включённый publisher независимо проверяет snapshot и либо создаёт version commit, либо
    успешно завершает повторную публикацию как `unchanged`.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. `Telegram report` после cleanup отправляет компактный HTML-отчёт с читаемой версией
+10. После успешного cleanup `Record release status` записывает WGUS/LSTUS version name в
+    `status/<target>.json` на default branch. Параллельные status-job сериализуются и не отменяют
+    друг друга. Любой полностью успешный ручной run обновляет региональный status независимо от
+    client type, languages и отключённых publisher.
+11. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
     `x.x.x.x #xxx`, target, client type, языками и publisher state; `published` ведёт ссылкой на
     точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
-11. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
+12. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
 
 Queue watchdog ждёт назначения download job на downloader runner 10 минут. Каждая self-hosted publisher
 job ограничена 60 минутами; её состояние и шаги видны непосредственно в основном run.
 
-## 8. Отмена и повторная очистка
+## 9. Отмена и повторная очистка
 
 Обычная кнопка **Cancel workflow** не должна оставлять инфраструктуру: основной cleanup использует
 `always()`, а после завершения run с branch `main` запускается отдельный `workflow_run` reconciler.
@@ -213,7 +239,7 @@ repository/run/attempt ownership-маркерами. Уже отсутствую
 ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
 перечнем незавершённых действий.
 
-## 9. Диагностика без утечки секретов
+## 10. Диагностика без утечки секретов
 
 При ошибке cleanup запрашивает serial console и выводит только очищенный хвост. Из него удаляются
 JIT-конфигурации, известные tokens/passwords и распространённые GitHub token formats. Полный console

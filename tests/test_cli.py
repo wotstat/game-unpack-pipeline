@@ -22,6 +22,29 @@ def test_version_command() -> None:
     assert json.loads(result.output)["name"] == "game-downloader"
 
 
+def test_probe_release_command_is_machine_readable_and_has_no_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "game_downloader.cli.WgusResolver.probe_release_name",
+        lambda _resolver, _client_type: "2.3.1.5400",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["probe-release", "--target", "wot-eu", "--client-type", "sd", "--json"],
+        env={"GAME_DOWNLOADER_DATA_ROOT": str(tmp_path)},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "release_name": "2.3.1.5400",
+        "target": "wot-eu",
+    }
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("logical_workers", "expected"),
     [(1, 1), (6, 1), (8, 1), (16, 2), (24, 3), (32, 4)],

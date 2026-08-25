@@ -14,7 +14,7 @@ workflow_dispatch
   → встроенный download job собирает полный sealed GameSnapshot
   → выбранные pinned reusable workflows wot-src и wot-gui-assets публикуют snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
-  → Telegram-отчёт
+  → release name записывается в status параллельно с Telegram-отчётом
   → workflow_run reconciler повторно проверяет ru-7 и ru-9
 ```
 
@@ -82,6 +82,25 @@ Publisher можно независимо отключить для ручног
 HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7b`: 16 vCPU, 32 ГБ RAM и
 256 ГБ локального диска. Standard, обычный HighFreq, выбор flavor и location не поддерживаются.
 
+## Проверка новых версий
+
+[`check-game-releases.yml`](.github/workflows/check-game-releases.yml) — отдельный ручной checker
+без schedule. Он не создаёт downloader Run и не скачивает клиент: для каждого выбранного target
+lightweight probe запрашивает WGUS/LSTUS metadata и один patches chain для объявленной default
+language, затем сравнивает `release_name` с [`status`](status).
+
+Workflow предоставляет семь независимых whitelist-чекбоксов. По умолчанию включён только
+`wot-eu`, а `dispatch_pipelines` выключен: несовпадение лишь выводится в лог как
+`action=would-dispatch`. При явном включении dispatch checker сначала исключает уже ожидающий или
+работающий pipeline того же target, после чего запускает отличающиеся targets параллельно на
+default branch с `sd`, `ALL` и обоими publisher.
+
+Каждый status-файл содержит только `release_name`; `null` означает, что успешная версия ещё не
+зафиксирована. Отсутствующий файл, неверный JSON, лишнее поле или значение другого типа блокирует
+dispatch для target. После успешных download, всех включённых publisher и cleanup основной workflow
+обновляет status в default branch. Конфигурация ручного run при этом намеренно не входит в status:
+оператор сам отвечает за завершение частичных ручных публикаций.
+
 ## Reusable publisher workflows
 
 Оркестратор вызывает каждый data-репозиторий напрямую по полному SHA:
@@ -122,22 +141,24 @@ ID. Затем GitHub Git Database API создаёт один final version com
 - Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
   reconciler машинно подтвердил `deleted_count > 0`.
 
-Автоматическое обнаружение релизов, cron, публичный status store, GitHub Pages, S3 и БД не входят в
+Cron/schedule, внешний status store, полная история запусков, GitHub Pages, S3 и БД не входят в
 текущую систему.
 
 ## Настройка и проверка
 
 Полная настройка Selectel, GitHub App, Environments, variables и Telegram описана в
-[`docs/setup.md`](docs/setup.md). Нажатие **Run workflow** сразу создаёт тарифицируемые ресурсы;
-dry-run режима нет.
+[`docs/setup.md`](docs/setup.md). `Ephemeral snapshot` сразу создаёт тарифицируемые ресурсы;
+`Check game releases` по умолчанию работает как безопасный dry-run.
 
 ```text
 .github/actions/setup-openstack/
 .github/scripts/
+.github/workflows/check-game-releases.yml
 .github/workflows/ephemeral-snapshot.yml
 .github/workflows/reconcile-ephemeral-resources.yml
 contracts/v1/
 scripts/bootstrap-actions-runner.sh
+scripts/release_status.py
 scripts/runner_lifecycle.py
 src/game_downloader/
 tests/

@@ -7,7 +7,8 @@
 downloader, GitHub Actions entrypoint, жизненным циклом временной VM и трёх repository-level JIT
 runner, вызовом reusable publisher, cleanup/reconciliation и Telegram-отчётами.
 
-Автоматическое обнаружение новых версий и публичная история статусов отсутствуют.
+Ручной checker новых версий и минимальные repository status-файлы реализованы. Cron и внешняя
+публичная история статусов отсутствуют.
 
 ## Реализованный поток
 
@@ -20,10 +21,15 @@ manual workflow_dispatch
   → параллельные pinned reusable workflows data-репозиториев
   → выбранные production data-ветки target
   → cleanup с always()
-  → итоговый Telegram-отчёт
+  → параллельно запись release name в status и итоговый Telegram-отчёт
   → workflow_run reconciler в ru-7 и ru-9
   → recovery alert только при deleted_count > 0
 ```
+
+Отдельный ручной `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe
+проверяет выбранные targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме
+параллельно запускает основной workflow для отличающихся targets. По умолчанию он проверяет только
+`wot-eu` и работает как безопасный dry-run. Schedule пока отсутствует.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
 target, client type, languages и два независимых переключателя
@@ -49,6 +55,17 @@ workflow или отдельный репозиторий и не перенос
 ## Текущие контракты
 
 - Единственная точка ручного production-запуска — `.github/workflows/ephemeral-snapshot.yml`.
+- `.github/workflows/check-game-releases.yml` — пока только ручной checker. Он имеет отдельные
+  boolean whitelist inputs для семи targets, `wot-eu: true` по умолчанию и
+  `dispatch_pipelines: false`. Реальный dispatch всегда использует default branch, `sd`, `ALL` и
+  оба publisher.
+- Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
+  затем один patches chain для объявленной default language. Отсутствующий или некорректный status
+  блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
+- `status/<target>.json` содержит ровно поле `release_name` со строкой либо bootstrap `null`.
+  Любой полностью успешный основной run записывает WGUS/LSTUS version name после cleanup независимо
+  от его client type, languages и выбранных publisher. Status-job сериализованы общей non-cancelling
+  concurrency-группой и выполняются параллельно Telegram.
 - Download job реализован прямо в основном workflow и последовательно выполняет все стадии от
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
@@ -105,9 +122,10 @@ workflow или отдельный репозиторий и не перенос
 
 ## Что не входит в систему
 
-- cron и watcher новых WGUS/LSTUS releases;
-- release identity/state/retry на уровне orchestrator;
-- публичный status store или GitHub Pages;
+- cron/schedule для checker новых WGUS/LSTUS releases;
+- отдельная release identity, история попыток и retry policy сверх минимального `release_name`
+  status и подавления дубликата активного run;
+- внешний status store, полная история запусков или GitHub Pages;
 - processors для S3 и БД;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
 
