@@ -81,10 +81,10 @@ workflow или отдельный репозиторий и не перенос
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
-  target, downloader `version_name`, client type, языками и publisher state. Введённый `ALL`
-  сохраняется в заголовке буквально, а последняя строка показывает полную длительность run рядом
-  со ссылкой. Reconciler отправляет recovery alert только при машинно подтверждённом
-  `deleted_count > 0`.
+  target, downloader `readable_version` в формате `x.x.x.x #xxx`, client type, языками и publisher
+  state. Введённый `ALL` сохраняется в заголовке буквально, а последняя строка показывает полную
+  длительность run рядом со ссылкой. Reconciler отправляет recovery alert только при машинно
+  подтверждённом `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
   `cancel-in-progress: false`.
 

@@ -53,6 +53,7 @@ def test_download_job_exports_sealed_snapshot_identity() -> None:
     assert outputs == {
         "snapshot_id": "${{ steps.result.outputs.snapshot_id }}",
         "version_name": "${{ steps.result.outputs.version_name }}",
+        "readable_version": "${{ steps.result.outputs.readable_version }}",
         "snapshot_path": "${{ steps.result.outputs.snapshot_path }}",
         "descriptor_sha256": "${{ steps.result.outputs.descriptor_sha256 }}",
     }

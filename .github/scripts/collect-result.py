@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,21 @@ from game_downloader._json import canonical_json_bytes
 from game_downloader.models import SnapshotResult, Stage, StageResult
 from game_downloader.pipeline import Pipeline
 from game_downloader.workspace import Workspace
+
+VERSION_XML_READABLE_RE = re.compile(r"^v\.[0-9]+(?:\.[0-9]+){3} #[0-9]+$")
+
+
+def _readable_version(snapshot_path: Path) -> str:
+    version_path = snapshot_path / "sources/base/version.xml"
+    try:
+        root = ElementTree.fromstring(version_path.read_bytes())
+    except (OSError, ElementTree.ParseError) as error:
+        raise ValueError(f"cannot parse root version.xml: {error}") from error
+    version = root.find("version")
+    value = " ".join(version.text.split()) if version is not None and version.text else ""
+    if not VERSION_XML_READABLE_RE.fullmatch(value):
+        raise ValueError(f"root version.xml has an invalid readable version: {value!r}")
+    return value.removeprefix("v.")
 
 
 def _format_duration(seconds: object) -> str:
@@ -164,9 +181,12 @@ def main() -> None:
     _write_output("run_id", report.run_id)
     _write_output("data_root", data_root.as_posix())
     if snapshot is not None:
+        snapshot_path = data_root / snapshot.snapshot_path
+        readable_version = _readable_version(snapshot_path)
         _write_output("snapshot_id", snapshot.snapshot_id)
         _write_output("version_name", snapshot.version_name)
-        _write_output("snapshot_path", (data_root / snapshot.snapshot_path).as_posix())
+        _write_output("readable_version", readable_version)
+        _write_output("snapshot_path", snapshot_path.as_posix())
         _write_output("descriptor_sha256", snapshot.descriptor_sha256)
 
     state_icons = {
@@ -189,6 +209,7 @@ def main() -> None:
     if snapshot is not None:
         lines.append(f"- Snapshot: `{_escape(snapshot.snapshot_id)}`")
         lines.append(f"- Version: `{_escape(snapshot.version_name)}`")
+        lines.append(f"- Readable version: `{_escape(readable_version)}`")
     lines.extend(
         [
             "",

@@ -21,7 +21,7 @@ class TelegramReportTests(unittest.TestCase):
             {
                 "PIPELINE_RESULT": "success",
                 "TARGET": "wot-eu",
-                "VERSION_NAME": "2.3.1.5400",
+                "READABLE_VERSION": "2.3.1.5400 #1827",
                 "CLIENT_TYPE": "sd",
                 "LANGUAGES": "all",
                 "GITHUB_REPOSITORY_OWNER": "wotstat",
@@ -41,7 +41,7 @@ class TelegramReportTests(unittest.TestCase):
             message,
             "\n".join(
                 (
-                    "<b>✅ WoT EU · 2.3.1.5400</b> · <code>SD</code> · <code>ALL</code>",
+                    "<b>✅ WoT EU · 2.3.1.5400 #1827</b> · <code>SD</code> · <code>ALL</code>",
                     "📦 <code>wot-src</code> — "
                     '<a href="https://github.com/wotstat/wot-src/commit/'
                     f'{"a" * 40}">updated</a>',
@@ -58,7 +58,7 @@ class TelegramReportTests(unittest.TestCase):
             {
                 "PIPELINE_RESULT": "success",
                 "TARGET": "mt-ru",
-                "VERSION_NAME": "1.44.0.7899",
+                "READABLE_VERSION": "1.44.0.7899 #903",
                 "CLIENT_TYPE": "hd",
                 "LANGUAGES": "ru, be",
                 "WOT_SRC_ENABLED": "false",
@@ -68,7 +68,7 @@ class TelegramReportTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "<b>✅ Мир танков RU · 1.44.0.7899</b> · <code>HD</code> · <code>RU, BE</code>",
+            "<b>✅ Мир танков RU · 1.44.0.7899 #903</b> · <code>HD</code> · <code>RU, BE</code>",
             message,
         )
         self.assertIn("📦 <code>wot-src</code> — disabled", message)
@@ -79,7 +79,7 @@ class TelegramReportTests(unittest.TestCase):
             {
                 "PIPELINE_RESULT": "failure",
                 "TARGET": "wot-common-test",
-                "VERSION_NAME": "",
+                "READABLE_VERSION": "",
                 "CLIENT_TYPE": "sd",
                 "LANGUAGES": "EN",
                 "PROVISION_RESULT": "success",
@@ -106,7 +106,7 @@ class TelegramReportTests(unittest.TestCase):
             {
                 "PIPELINE_RESULT": "success",
                 "TARGET": "wot-na",
-                "VERSION_NAME": "2.3.1.5400",
+                "READABLE_VERSION": "2.3.1.5400 #1827",
                 "CLIENT_TYPE": "sd",
                 "LANGUAGES": "ALL",
                 "WOT_SRC_ENABLED": "true",

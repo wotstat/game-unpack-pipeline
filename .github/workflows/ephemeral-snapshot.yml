@@ -118,6 +118,7 @@ jobs:
     outputs:
       snapshot_id: ${{ steps.result.outputs.snapshot_id }}
       version_name: ${{ steps.result.outputs.version_name }}
+      readable_version: ${{ steps.result.outputs.readable_version }}
       snapshot_path: ${{ steps.result.outputs.snapshot_path }}
       descriptor_sha256: ${{ steps.result.outputs.descriptor_sha256 }}
     env:
@@ -528,7 +529,7 @@ jobs:
         env:
           PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
           TARGET: ${{ inputs.target }}
-          VERSION_NAME: ${{ needs.download.outputs.version_name }}
+          READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
           CLIENT_TYPE: ${{ inputs.client_type }}
           LANGUAGES: ${{ inputs.languages }}
           PROVISION_RESULT: ${{ needs.provision.result }}
