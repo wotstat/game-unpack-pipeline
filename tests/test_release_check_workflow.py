@@ -84,3 +84,25 @@ def test_release_checker_serializes_checks_without_cancelling_running_work() -> 
         "group": "check-game-releases",
         "cancel-in-progress": False,
     }
+
+
+def test_release_checker_collects_matrix_results_into_one_report() -> None:
+    jobs = workflow()["jobs"]
+    check = jobs["check"]
+    report = jobs["report"]
+    steps = check["steps"]
+    record = next(step for step in steps if step["name"] == "Record check result")
+    upload = next(step for step in steps if step["name"] == "Upload check result")
+    download = next(step for step in report["steps"] if step["name"] == "Download check results")
+    render = next(step for step in report["steps"] if step["name"] == "Render release check report")
+
+    assert record["if"] == "always()"
+    assert "state=up_to_date" in record["run"]
+    assert "state=update_available" in record["run"]
+    assert upload["if"] == "always()"
+    assert upload["uses"] == "actions/upload-artifact@v7.0.1"
+    assert report["if"] == "always()"
+    assert set(report["needs"]) == {"plan", "check"}
+    assert download["uses"] == "actions/download-artifact@v8.0.1"
+    assert download["with"]["merge-multiple"] is True
+    assert "render_release_check_report.py" in render["run"]

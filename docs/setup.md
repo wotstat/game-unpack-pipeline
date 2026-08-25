@@ -154,6 +154,10 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 - `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;
 - `action=already-running` — для target уже есть ожидающий или работающий pipeline.
 
+Итоговый job `Release check report` собирает результаты всех выбранных targets в одну таблицу Job
+Summary: сохранённый и найденный release name, результат сравнения и фактическое действие checker.
+Ошибки probe, чтения status, поиска активного run и dispatch отображаются в строке своего target.
+
 При `dispatch_pipelines: true` отличающиеся targets запускаются параллельно через основной workflow
 на default branch с фиксированными `client_type: sd`, `languages: ALL` и обоими publisher. Ошибка
 одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
