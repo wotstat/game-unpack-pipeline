@@ -111,6 +111,20 @@ def test_status_recording_and_telegram_notification_are_parallel_final_jobs() ->
     assert "cleanup" in jobs["record-status"]["needs"]
 
 
+def test_bot_dispatched_pipeline_explicitly_dispatches_reconciler_after_cleanup() -> None:
+    job = _workflow()["jobs"]["dispatch-reconciler"]
+
+    assert set(job["needs"]) == {"provision", "cleanup"}
+    assert "always()" in job["if"]
+    assert "github.actor == 'github-actions[bot]'" in job["if"]
+    assert "needs.provision.result != 'skipped'" in job["if"]
+    assert job["permissions"] == {"actions": "write", "contents": "read"}
+    command = job["steps"][0]["run"]
+    assert "gh workflow run reconcile-ephemeral-resources.yml" in command
+    assert '--field source_run_id="${SOURCE_RUN_ID}"' in command
+    assert '--field source_run_attempt="${SOURCE_RUN_ATTEMPT}"' in command
+
+
 def test_stage_runner_uses_the_canonical_stage_sequence_numbers() -> None:
     script = (REPOSITORY_ROOT / ".github/scripts/run-stage.sh").read_text()
 

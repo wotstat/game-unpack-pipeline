@@ -140,6 +140,10 @@ ID. Затем GitHub Git Database API создаёт один final version com
   идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7` и `ru-9`.
 - Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
   reconciler машинно подтвердил `deleted_count > 0`.
+- Для обычного ручного run reconciler стартует по `workflow_run`. Если snapshot был запущен
+  checker'ом через repository `GITHUB_TOKEN`, основной workflow после cleanup явно создаёт
+  эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
+  token-originated цепочке.
 
 Cron/schedule, внешний status store, полная история запусков, GitHub Pages, S3 и БД не входят в
 текущую систему.

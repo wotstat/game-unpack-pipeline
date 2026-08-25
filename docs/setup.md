@@ -216,7 +216,10 @@ Publisher можно включать независимо для каждого
     точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 12. `Reconcile ephemeral runner cleanup` после завершения повторяет безопасный поиск и удаление в
-    `ru-7` и `ru-9`. Если он вынужден что-либо удалить, приходит отдельный recovery alert.
+    `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
+    явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
+    `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
+    приходит отдельный recovery alert.
 
 Queue watchdog ждёт назначения download job на downloader runner 10 минут. Каждая self-hosted publisher
 job ограничена 60 минутами; её состояние и шаги видны непосредственно в основном run.

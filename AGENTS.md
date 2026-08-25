@@ -97,6 +97,10 @@ workflow или отдельный репозиторий и не перенос
   `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок обоих publisher. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
+- Для ручного snapshot run reconciler запускается через `workflow_run`. Snapshot run, созданный
+  checker через repository `GITHUB_TOKEN`, после cleanup явно dispatch'ит reconciler, потому что
+  GitHub подавляет последующий `workflow_run` для token-originated chain. Оба пути передают исходные
+  `run_id`/`run_attempt`; reconciliation остаётся идемпотентной.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
   target, downloader `readable_version` в формате `x.x.x.x #xxx`, client type, языками и publisher
   state. Введённый `ALL` сохраняется в заголовке буквально, а последняя строка показывает полную
