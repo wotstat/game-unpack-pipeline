@@ -28,7 +28,7 @@ on:
       languages:
         description: Comma-separated languages or ALL
         required: true
-        default: EN
+        default: ALL
         type: string
       publish_wot_src:
         description: Publish the snapshot to wot-src
