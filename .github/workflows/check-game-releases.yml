@@ -84,7 +84,8 @@ jobs:
             targets='[]'
           else
             targets="$(printf '%s\n' "${selected[@]}" \
-              | jq --raw-input --slurp 'split("\n") | map(select(length > 0))')"
+              | jq --raw-input --slurp --compact-output \
+                'split("\n") | map(select(length > 0))')"
           fi
           echo "targets=${targets}" >>"${GITHUB_OUTPUT}"
           echo "Selected targets: ${targets}"

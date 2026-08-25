@@ -51,6 +51,7 @@ def test_release_checker_builds_a_parallel_fail_slow_matrix() -> None:
     ):
         assert f"selected+=({target})" in matrix_script
     assert "targets='[]'" in matrix_script
+    assert "--compact-output" in matrix_script
     assert check["strategy"]["fail-fast"] is False
     assert check["strategy"]["matrix"]["target"] == ("${{ fromJSON(needs.plan.outputs.targets) }}")
     assert check["permissions"] == {"actions": "write", "contents": "read"}
