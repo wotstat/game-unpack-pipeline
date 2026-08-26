@@ -182,12 +182,12 @@ def test_mo_converter_preserves_contexts_plurals_and_charset(endian: str) -> Non
 def test_packed_xml_decoder_produces_deterministic_textual_xml() -> None:
     decoder = PackedXmlDecoder(ReadablePolicy())
 
-    first, diagnostics = decoder.decode(_packed_xml_fixture(), "fixture.xml")
-    second, _ = PackedXmlDecoder(ReadablePolicy()).decode(_packed_xml_fixture(), "fixture.xml")
+    first, diagnostics = decoder.decode(_packed_xml_fixture())
+    second, _ = PackedXmlDecoder(ReadablePolicy()).decode(_packed_xml_fixture())
 
     assert first == second
     root = ElementTree.fromstring(first)
-    assert root.tag == "fixture.xml"
+    assert root.tag == "root"
     assert root.findtext("title") == "café"
     assert root.findtext("count") == "-42"
     assert root.findtext("enabled") == "true"
@@ -198,9 +198,7 @@ def test_packed_xml_decoder_produces_deterministic_textual_xml() -> None:
 
 
 def test_packed_xml_decoder_restores_namespaces_and_wide_integers() -> None:
-    output, diagnostics = PackedXmlDecoder(ReadablePolicy()).decode(
-        _packed_xml_namespace_fixture(), "fixture.xml"
-    )
+    output, diagnostics = PackedXmlDecoder(ReadablePolicy()).decode(_packed_xml_namespace_fixture())
 
     root = ElementTree.fromstring(output)
     assert root.findtext("{usa}A01") == "qualified"

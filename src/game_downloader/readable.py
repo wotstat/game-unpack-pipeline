@@ -71,7 +71,7 @@ PACKED_SECTION_MAGIC = b"EN\xa1b"
 PACKED_SECTION_VERSION = 0
 PYTHON_27_MAGIC = b"\x03\xf3\r\n"
 
-PACKED_XML_TOOL = ToolIdentity(name="game-downloader-packed-section", version="1")
+PACKED_XML_TOOL = ToolIdentity(name="game-downloader-packed-section", version="2")
 MO_TOOL = ToolIdentity(name="game-downloader-mo-catalogue", version="1")
 PYTHON27_SYNTAX_TOOL = ToolIdentity(
     name="fissix",
@@ -90,7 +90,7 @@ class ReadablePolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = "wot-readable"
-    version: str = "11"
+    version: str = "12"
     pyc_tool_name: str = "game-downloader-pyc"
     pyc_tool_version: str = "4+uncompyle6-3.9.3"
     pyc_tool_source: str = "https://github.com/rocky/python-uncompyle6"
@@ -955,7 +955,7 @@ class PackedXmlDecoder:
         self._namespace_declarations = 0
         self._duplicate_namespace_declarations = 0
 
-    def decode(self, data: bytes, root_name: str) -> tuple[bytes, tuple[str, ...]]:
+    def decode(self, data: bytes) -> tuple[bytes, tuple[str, ...]]:
         if len(data) > self._policy.max_packed_xml_bytes:
             raise TransformFailedError("packed XML exceeds the configured size limit")
         if len(data) < 6 or data[:4] != PACKED_SECTION_MAGIC:
@@ -968,7 +968,7 @@ class PackedXmlDecoder:
         self._namespace_declarations = 0
         self._duplicate_namespace_declarations = 0
         node = self._read_node(
-            self._safe_tag(root_name, root=True),
+            "root",
             memoryview(data)[section_start:],
             0,
             strings,
@@ -1058,7 +1058,7 @@ class PackedXmlDecoder:
             key = keys[index]
             if key < 0 or key >= len(strings):
                 raise TransformFailedError("packed XML child references an unknown tag")
-            child_name = self._safe_tag(strings[key], root=False)
+            child_name = self._safe_tag(strings[key])
             children.append(
                 self._read_node(
                     child_name,
@@ -1132,18 +1132,14 @@ class PackedXmlDecoder:
             raise TransformFailedError("packed XML string contains an XML control character")
 
     @classmethod
-    def _safe_tag(cls, value: str, *, root: bool) -> str:
+    def _safe_tag(cls, value: str) -> str:
         candidate = value.replace(" ", "..")
         if candidate and candidate[0].isdigit():
             candidate = "id." + candidate
         if not candidate:
-            if root:
-                return "root"
             raise TransformFailedError("packed XML contains an empty tag")
         parts = candidate.split(":")
         if len(parts) > 2 or any(cls._xml_name.fullmatch(part) is None for part in parts):
-            if root:
-                return "root"
             raise TransformFailedError(f"packed XML contains an invalid tag {value!r}") from None
         return candidate
 
@@ -1707,7 +1703,7 @@ class ReadableAssembler:
             return self._finish_pyc_transform(plan, root, output, diagnostics)
         elif plan.representation is RepresentationKind.PACKED_XML_TO_XML:
             output, diagnostics = PackedXmlDecoder(self._policy).decode(
-                plan.source_path.read_bytes(), Path(plan.source.path).name
+                plan.source_path.read_bytes()
             )
             tool = PACKED_XML_TOOL
         elif plan.representation is RepresentationKind.MO_TO_PO:
@@ -2686,7 +2682,7 @@ def create_readable_implementations(
             configuration=configuration,
         ),
         Stage.TRANSFORM_READABLE: StageImplementation(
-            implementation_version="transform-readable-v4",
+            implementation_version="transform-readable-v5",
             execute=execute_transforms,
             validate=validate_transforms,
             audit=audit_transforms,
