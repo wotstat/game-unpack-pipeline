@@ -472,7 +472,7 @@ def render_page(
       content="Текущие версии по регионам и история запусков pipeline." />
     <meta property="og:type" content="website" />
     {canonical}
-    <title>game-unpack-pipeline — статус</title>
+    <title>WOTSTAT – Unpack status</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
