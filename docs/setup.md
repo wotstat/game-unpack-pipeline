@@ -234,7 +234,7 @@ Consumer можно включать независимо для каждого 
    descriptor.
 7. Включённые `Publish wot-src`, `Publish wot-gui-assets` и `Upload wotstat assets` параллельно
    вызывают reusable workflow соответствующего репозитория через прямой
-   `uses: ...@<commit-sha>`. Jobs входят в основной run, checkout’ят собственный consumer-код через
+   `uses: ...@main`. Jobs входят в основной run, checkout’ят собственный consumer-код через
    `job.workflow_repository` и `job.workflow_sha` и получают одинаковую snapshot identity.
    Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
 8. Каждый включённый consumer проверяет sealed handoff. Data publisher создаёт version commit или

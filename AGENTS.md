@@ -18,7 +18,7 @@ manual workflow_dispatch
   → четыре JIT runner в game-unpack-pipeline: downloader, wot-src, wot-gui-assets и wotstat-assets
   → встроенные downloader stages на downloader runner
   → sealed snapshot на локальном диске VM
-  → параллельные pinned reusable workflows двух data-репозиториев и wotstat-assets-uploader
+  → параллельные reusable workflows из main двух data-репозиториев и wotstat-assets-uploader
   → выбранные production data-ветки target
   → cleanup с always()
   → параллельно запись release name в status и итоговый Telegram-отчёт
@@ -77,9 +77,9 @@ workflow или отдельный репозиторий и не перенос
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
-  `uses: owner/repo/.github/workflows/publish-snapshot.yml@<full-sha>`. Не возвращать
-  cross-repository dispatch/polling, локальный универсальный publisher workflow или floating
-  `main`.
+  `uses: owner/repo/.github/workflows/publish-snapshot.yml@main`. Все принадлежащие проекту
+  cross-repository reusable workflows используют `@main`; не возвращать full-SHA pins,
+  cross-repository dispatch/polling или локальный универсальный publisher workflow.
 - Called workflow checkout’ит собственный код через `job.workflow_repository` и
   `job.workflow_sha`, а не default checkout caller-репозитория.
 - `wotstat-assets-uploader` получает settings через Environment `wotstat-assets-uploader` в
@@ -147,12 +147,12 @@ workflow или отдельный репозиторий и не перенос
 
 ## Правила изменения
 
-- Перед правками проверять фактические workflows/lifecycle scripts и pinned publisher interfaces
+- Перед правками проверять фактические workflows/lifecycle scripts и текущие publisher interfaces
   соседних репозиториев.
 - Изменения downloader implementation, stage runner, snapshot contracts и основного download job
   выполнять атомарно в этом репозитории.
-- При изменении publisher contract обновлять оба call path симметрично и закреплять код на полных
-  commit SHA.
+- При изменении publisher contract обновлять оба call path симметрично; project-owned reusable
+  workflows продолжают вызываться через `@main`.
 - Документация описывает реализованное состояние; будущие идеи явно помечать нереализованными.
 - После изменений запускать `./scripts/check.sh`. При правках соседних контрактов дополнительно
   запускать их собственные pytest/Ruff/mypy.

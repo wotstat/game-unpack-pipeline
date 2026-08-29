@@ -400,7 +400,7 @@ jobs:
     needs:
       - provision
       - download
-    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@29f46bcfbac7d3e230eb763aaff5ce33f0b0d815
+    uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@main
     with:
       runner_label: ${{ needs.provision.outputs.wot_src_runner_label }}
       snapshot_path: ${{ needs.download.outputs.snapshot_path }}
@@ -418,7 +418,7 @@ jobs:
     needs:
       - provision
       - download
-    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@bf7e276b659668c4f61fa31905812f6dc3b5ac0a
+    uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@main
     with:
       runner_label: ${{ needs.provision.outputs.wot_gui_assets_runner_label }}
       snapshot_path: ${{ needs.download.outputs.snapshot_path }}
@@ -436,7 +436,7 @@ jobs:
     needs:
       - provision
       - download
-    uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@58f3f0b9c359dc2ea8a509909dde995d985e2e09
+    uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@main
     with:
       runner_label: ${{ needs.provision.outputs.wotstat_assets_runner_label }}
       snapshot_path: ${{ needs.download.outputs.snapshot_path }}

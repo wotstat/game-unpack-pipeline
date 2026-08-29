@@ -437,18 +437,17 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertIn("--wotstat-assets-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
-        self.assertRegex(
+        self.assertIn(
+            "uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@main",
             workflow,
-            r"uses: wotstat/wot-src/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
         )
-        self.assertRegex(
+        self.assertIn(
+            "uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@main",
             workflow,
-            r"uses: wotstat/wot-gui-assets/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
         )
-        self.assertRegex(
+        self.assertIn(
+            "uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@main",
             workflow,
-            r"uses: wotstat/wotstat-assets-uploader/\.github/workflows/"
-            r"upload-snapshot\.yml@[0-9a-f]{40}",
         )
         self.assertEqual(
             workflow.count("secrets:\n      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"),

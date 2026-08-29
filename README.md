@@ -12,7 +12,7 @@ workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
   → четыре изолированных repository-level JIT runner на этой VM
   → встроенный download job собирает полный sealed GameSnapshot
-  → выбранные pinned reusable workflows wot-src, wot-gui-assets и wotstat-assets-uploader
+  → выбранные reusable workflows из main: wot-src, wot-gui-assets и wotstat-assets-uploader
     обрабатывают snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
   → release name записывается в status параллельно с Telegram-отчётом
@@ -147,17 +147,18 @@ dispatch для target. После успешных download, всех вклю�
 
 ## Reusable snapshot consumer workflows
 
-Оркестратор вызывает каждый data-репозиторий напрямую по полному SHA:
+Оркестратор вызывает каждый consumer напрямую из его ветки `main`:
 
 ```yaml
-uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@<commit-sha>
-uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@<commit-sha>
-uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@<commit-sha>
+uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@main
+uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@main
+uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@main
 ```
 
 Это обычные reusable workflows внутри caller run, а не cross-repository dispatch. Каждый workflow
 checkout’ит собственный репозиторий через `job.workflow_repository` и `job.workflow_sha`, поэтому
-исполняемый consumer-код совпадает с SHA в `uses`. Он получает выделенный JIT runner, локальный
+исполняемый consumer-код совпадает с commit, в который GitHub разрешил `main` для данного run. Он
+получает выделенный JIT runner, локальный
 snapshot path, target, snapshot ID и descriptor digest. Data-репозитории выводят branch и правила
 проекции из своей конфигурации; uploader получает ClickHouse/S3 settings только из отдельного
 Environment `wotstat-assets-uploader` caller-репозитория.
