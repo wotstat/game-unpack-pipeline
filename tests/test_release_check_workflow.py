@@ -77,6 +77,7 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert "--field languages=ALL" in dispatch["run"]
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]
+    assert "--field publish_wotstat_assets=true" in dispatch["run"]
 
 
 def test_release_checker_serializes_checks_without_cancelling_running_work() -> None:

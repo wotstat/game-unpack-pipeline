@@ -40,6 +40,11 @@ on:
         required: true
         default: true
         type: boolean
+      publish_wotstat_assets:
+        description: Upload the snapshot with wotstat-assets-uploader
+        required: true
+        default: true
+        type: boolean
 permissions:
   contents: read
 
@@ -69,6 +74,9 @@ jobs:
       wot_src_runner_id: ${{ steps.provision.outputs.wot_src_runner_id }}
       wot_src_runner_label: ${{ steps.provision.outputs.wot_src_runner_label }}
       wot_src_runner_name: ${{ steps.provision.outputs.wot_src_runner_name }}
+      wotstat_assets_runner_id: ${{ steps.provision.outputs.wotstat_assets_runner_id }}
+      wotstat_assets_runner_label: ${{ steps.provision.outputs.wotstat_assets_runner_label }}
+      wotstat_assets_runner_name: ${{ steps.provision.outputs.wotstat_assets_runner_name }}
       runner_scope_label: ${{ steps.provision.outputs.runner_scope_label }}
       runner_version: ${{ steps.provision.outputs.runner_version }}
       security_group_id: ${{ steps.provision.outputs.security_group_id }}
@@ -358,6 +366,7 @@ jobs:
           DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
+          WOTSTAT_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wotstat_assets_runner_id }}
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
@@ -371,6 +380,7 @@ jobs:
           --downloader-runner-id "${DOWNLOADER_RUNNER_ID}"
           --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}"
           --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
+          --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}"
           --server-id "${SERVER_ID}"
           --port-id "${PORT_ID}"
           --security-group-id "${SECURITY_GROUP_ID}"
@@ -420,6 +430,23 @@ jobs:
     secrets:
       GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
+  publish-wotstat-assets:
+    name: Upload wotstat assets (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    if: inputs.publish_wotstat_assets && needs.download.result == 'success' && needs.download.outputs.snapshot_path != ''
+    needs:
+      - provision
+      - download
+    uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@58f3f0b9c359dc2ea8a509909dde995d985e2e09
+    with:
+      runner_label: ${{ needs.provision.outputs.wotstat_assets_runner_label }}
+      snapshot_path: ${{ needs.download.outputs.snapshot_path }}
+      expected_snapshot_id: ${{ needs.download.outputs.snapshot_id }}
+      expected_descriptor_sha256: ${{ needs.download.outputs.descriptor_sha256 }}
+      target: ${{ inputs.target }}
+      configuration_environment: wotstat-assets-uploader
+    permissions:
+      contents: read
+
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})
     if: always() && needs.provision.result != 'skipped'
@@ -429,6 +456,7 @@ jobs:
       - queue-watchdog
       - publish-wot-gui-assets
       - publish-wot-src
+      - publish-wotstat-assets
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: selectel
@@ -465,6 +493,9 @@ jobs:
           WOT_SRC_PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
           WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
+          WOTSTAT_ASSETS_UPLOAD_RESULT: ${{ needs.publish-wotstat-assets.result }}
+          WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT: ${{ inputs.publish_wotstat_assets && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
+          WOTSTAT_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wotstat_assets_runner_id }}
           SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           DOWNLOAD_RESULT: ${{ needs.download.result }}
@@ -479,7 +510,8 @@ jobs:
           if [[ "${PROVISION_RESULT}" != success \
             || "${DOWNLOAD_RESULT}" != success \
             || "${WOT_GUI_ASSETS_PUBLISH_RESULT}" != "${WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT}" \
-            || "${WOT_SRC_PUBLISH_RESULT}" != "${WOT_SRC_PUBLISH_EXPECTED_RESULT}" ]]; then
+            || "${WOT_SRC_PUBLISH_RESULT}" != "${WOT_SRC_PUBLISH_EXPECTED_RESULT}" \
+            || "${WOTSTAT_ASSETS_UPLOAD_RESULT}" != "${WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT}" ]]; then
             diagnostics+=(--diagnostics)
           fi
           python3 scripts/runner_lifecycle.py cleanup \
@@ -487,6 +519,7 @@ jobs:
             --downloader-runner-id "${DOWNLOADER_RUNNER_ID}" \
             --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}" \
             --wot-src-runner-id "${WOT_SRC_RUNNER_ID}" \
+            --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}" \
             --server-id "${SERVER_ID}" \
             --port-id "${PORT_ID}" \
             --security-group-id "${SECURITY_GROUP_ID}" \
@@ -500,13 +533,15 @@ jobs:
       needs.queue-watchdog.result == 'success' &&
       needs.cleanup.result == 'success' &&
       (!inputs.publish_wot_src || needs.publish-wot-src.result == 'success') &&
-      (!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success')
+      (!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success') &&
+      (!inputs.publish_wotstat_assets || needs.publish-wotstat-assets.result == 'success')
     needs:
       - provision
       - download
       - queue-watchdog
       - publish-wot-gui-assets
       - publish-wot-src
+      - publish-wotstat-assets
       - cleanup
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -585,6 +620,7 @@ jobs:
       - queue-watchdog
       - publish-wot-gui-assets
       - publish-wot-src
+      - publish-wotstat-assets
       - cleanup
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -627,6 +663,9 @@ jobs:
           WOT_GUI_ASSETS_RESULT: ${{ needs.publish-wot-gui-assets.result }}
           WOT_GUI_ASSETS_PUBLICATION_STATE: ${{ needs.publish-wot-gui-assets.outputs.publication_state }}
           WOT_GUI_ASSETS_COMMIT_SHA: ${{ needs.publish-wot-gui-assets.outputs.commit_sha }}
+          WOTSTAT_ASSETS_ENABLED: ${{ inputs.publish_wotstat_assets }}
+          WOTSTAT_ASSETS_RESULT: ${{ needs.publish-wotstat-assets.result }}
+          WOTSTAT_ASSETS_UPLOAD_STATE: ${{ needs.publish-wotstat-assets.outputs.upload_state }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
           CLEANUP_DELETED_COUNT: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }}
           PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}

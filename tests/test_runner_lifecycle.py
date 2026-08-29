@@ -35,6 +35,7 @@ class ResourceIdentityTests(unittest.TestCase):
         downloader = identity.runner("downloader")
         assets = identity.runner("wot-gui-assets")
         source = identity.runner("wot-src")
+        uploader = identity.runner("wotstat-assets")
         self.assertEqual(downloader.name, "gup-manual-123456-2-downloader")
         self.assertEqual(downloader.label, "gup-manual-123456-2-downloader")
         self.assertEqual(downloader.repository, "wotstat/game-unpack-pipeline")
@@ -42,8 +43,11 @@ class ResourceIdentityTests(unittest.TestCase):
         self.assertEqual(assets.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
         self.assertEqual(source.repository, "wotstat/game-unpack-pipeline")
+        self.assertEqual(uploader.name, "gup-manual-123456-2-wotstat-assets")
+        self.assertEqual(uploader.repository, "wotstat/game-unpack-pipeline")
         self.assertEqual(downloader.scope_label, assets.scope_label)
         self.assertEqual(downloader.scope_label, source.scope_label)
+        self.assertEqual(downloader.scope_label, uploader.scope_label)
 
     def test_rejects_unsafe_instance_keys(self) -> None:
         rejected = ["", "UPPER", "-leading", "trailing-", "has space", "a" * 49]
@@ -123,6 +127,7 @@ class CloudConfigTests(unittest.TestCase):
         assets_jit_config = "sensitive-assets-jit-configuration"
         downloader_jit_config = "sensitive-downloader-jit-configuration"
         source_jit_config = "sensitive-source-jit-configuration"
+        uploader_jit_config = "sensitive-uploader-jit-configuration"
         cloud_config = lifecycle.render_cloud_config(
             template,
             runner_download_url=(
@@ -135,6 +140,7 @@ class CloudConfigTests(unittest.TestCase):
                 "downloader": downloader_jit_config,
                 "wot-gui-assets": assets_jit_config,
                 "wot-src": source_jit_config,
+                "wotstat-assets": uploader_jit_config,
             },
         )
 
@@ -142,6 +148,7 @@ class CloudConfigTests(unittest.TestCase):
         self.assertNotIn(downloader_jit_config, cloud_config)
         self.assertNotIn(assets_jit_config, cloud_config)
         self.assertNotIn(source_jit_config, cloud_config)
+        self.assertNotIn(uploader_jit_config, cloud_config)
         encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
         self.assertIsNotNone(encoded)
         assert encoded is not None
@@ -158,11 +165,16 @@ class CloudConfigTests(unittest.TestCase):
             "WOT_SRC_RUNNER_JIT_CONFIG=sensitive-source-jit-configuration",
             bootstrap,
         )
+        self.assertIn(
+            "WOTSTAT_ASSETS_RUNNER_JIT_CONFIG=sensitive-uploader-jit-configuration",
+            bootstrap,
+        )
         self.assertIn("WOT_GUI_ASSETS_RUNNER_JIT_CONFIG", bootstrap)
         self.assertIn("unset \\\n", bootstrap)
         self.assertIn("User=game-downloader", bootstrap)
         self.assertIn("User=wot-gui-assets-publisher", bootstrap)
         self.assertIn("User=wot-src-publisher", bootstrap)
+        self.assertIn("User=wotstat-assets-uploader", bootstrap)
         self.assertIn(
             "apt-get install --yes --no-install-recommends git",
             bootstrap,
@@ -183,6 +195,11 @@ class CloudConfigTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn(
+            "install -d -o wotstat-assets-uploader -g wotstat-assets-uploader -m 0700 \\\n"
+            "  /run/actions-runner/wotstat-assets",
+            bootstrap,
+        )
+        self.assertIn(
             'readonly jit_config_file="/run/actions-runner/${role}/jit-config"',
             bootstrap,
         )
@@ -190,6 +207,7 @@ class CloudConfigTests(unittest.TestCase):
         self.assertIn("game-downloader ALL=(ALL) NOPASSWD: ALL", bootstrap)
         self.assertNotIn("wot-gui-assets-publisher ALL=", bootstrap)
         self.assertNotIn("wot-src-publisher ALL=", bootstrap)
+        self.assertNotIn("wotstat-assets-uploader ALL=", bootstrap)
         self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
         self.assertNotIn("set -x", bootstrap)
         self.assertIn("permissions: '0700'", cloud_config)
@@ -275,6 +293,7 @@ class CleanupReportingTests(unittest.TestCase):
             downloader_runner_id="1",
             wot_gui_assets_runner_id="2",
             wot_src_runner_id="3",
+            wotstat_assets_runner_id="4",
             server_id="",
             port_id="",
             security_group_id="",
@@ -341,7 +360,7 @@ class CleanupReportingTests(unittest.TestCase):
             ):
                 lifecycle.cleanup(arguments)
 
-            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=6\n")
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=7\n")
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -372,10 +391,20 @@ class WorkflowContractTests(unittest.TestCase):
             "        type: boolean",
             workflow,
         )
+        self.assertIn(
+            "      publish_wotstat_assets:\n"
+            "        description: Upload the snapshot with wotstat-assets-uploader\n"
+            "        required: true\n"
+            "        default: true\n"
+            "        type: boolean",
+            workflow,
+        )
         self.assertIn("if: inputs.publish_wot_src &&", workflow)
         self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
+        self.assertIn("if: inputs.publish_wotstat_assets &&", workflow)
         self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
+        self.assertIn("WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT", workflow)
         self.assertNotIn("selectel_location", workflow)
         self.assertNotIn("ru-7a", workflow)
         self.assertNotIn("ru-9a", workflow)
@@ -391,13 +420,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("wotstat/game-snapshot-builder", workflow)
         self.assertIn("run: bash .github/scripts/run-stage.sh snapshot", workflow)
 
-    def test_provisions_and_calls_both_reusable_publishers(self) -> None:
+    def test_provisions_and_calls_all_snapshot_consumers(self) -> None:
         workflow = (ROOT / ".github/workflows/process-game-release.yml").read_text(encoding="utf-8")
 
         self.assertIn('PYTHONUNBUFFERED: "1"', workflow)
         self.assertIn("downloader_runner_label", workflow)
         self.assertIn("wot_gui_assets_runner_label", workflow)
         self.assertIn("wot_src_runner_label", workflow)
+        self.assertIn("wotstat_assets_runner_label", workflow)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", workflow)
         self.assertNotIn("WOT_SRC_REPOSITORY", workflow)
         self.assertNotIn("permission-actions: write", workflow)
@@ -405,6 +435,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--downloader-runner-id", workflow)
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
+        self.assertIn("--wotstat-assets-runner-id", workflow)
         self.assertNotIn("dispatch-publication", workflow)
         self.assertRegex(
             workflow,
@@ -414,6 +445,11 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
             r"uses: wotstat/wot-gui-assets/\.github/workflows/publish-snapshot\.yml@[0-9a-f]{40}",
         )
+        self.assertRegex(
+            workflow,
+            r"uses: wotstat/wotstat-assets-uploader/\.github/workflows/"
+            r"upload-snapshot\.yml@[0-9a-f]{40}",
+        )
         self.assertEqual(
             workflow.count("secrets:\n      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"),
             2,
@@ -422,6 +458,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertFalse((ROOT / ".github/workflows/publish-snapshot.yml").exists())
         self.assertIn("publish-wot-gui-assets:", workflow)
         self.assertIn("publish-wot-src:", workflow)
+        self.assertIn("publish-wotstat-assets:", workflow)
+        self.assertIn("configuration_environment: wotstat-assets-uploader", workflow)
+        self.assertNotIn("wotstat-assets-tmp", workflow)
         self.assertIn("notify:", workflow)
         self.assertIn("needs.cleanup.outputs.deleted_count", workflow)
         self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)

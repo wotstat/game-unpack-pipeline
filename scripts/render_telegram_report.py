@@ -91,6 +91,8 @@ def _publication_line(
     if publication_state == "published":
         commit_url = _commit_url(owner, repository, commit_sha)
         return label + (f'<a href="{commit_url}">updated</a>' if commit_url else "updated")
+    if publication_state == "uploaded":
+        return label + "uploaded"
     return label + "completed"
 
 
@@ -149,6 +151,15 @@ def render_message(environment: Mapping[str, str]) -> str:
                 job_result=environment.get("WOT_GUI_ASSETS_RESULT", "skipped"),
                 publication_state=environment.get("WOT_GUI_ASSETS_PUBLICATION_STATE", ""),
                 commit_sha=environment.get("WOT_GUI_ASSETS_COMMIT_SHA", ""),
+                owner=owner,
+            ),
+            _publication_line(
+                icon="🗄",
+                repository="wotstat-assets-uploader",
+                enabled=_enabled(environment.get("WOTSTAT_ASSETS_ENABLED", "false")),
+                job_result=environment.get("WOTSTAT_ASSETS_RESULT", "skipped"),
+                publication_state=environment.get("WOTSTAT_ASSETS_UPLOAD_STATE", ""),
+                commit_sha="",
                 owner=owner,
             ),
         )

@@ -10,15 +10,16 @@ download/verify, распаковку VFS, readable transforms, sealed `GameSnap
 ```text
 workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
-  → три изолированных repository-level JIT runner на этой VM
+  → четыре изолированных repository-level JIT runner на этой VM
   → встроенный download job собирает полный sealed GameSnapshot
-  → выбранные pinned reusable workflows wot-src и wot-gui-assets публикуют snapshot параллельно
+  → выбранные pinned reusable workflows wot-src, wot-gui-assets и wotstat-assets-uploader
+    обрабатывают snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
   → release name записывается в status параллельно с Telegram-отчётом
   → workflow_run reconciler повторно проверяет ru-7 и ru-9
 ```
 
-Snapshot не загружается в Actions artifact. Downloader и оба publisher читают один абсолютный путь
+Snapshot не загружается в Actions artifact. Downloader и три consumer читают один абсолютный путь
 на локальном диске VM, работая под отдельными Unix-пользователями и в разных runner directories.
 Только downloader имеет `sudo`.
 
@@ -32,9 +33,10 @@ publisher с `cancel-in-progress: false`.
 | Компонент | Ответственность |
 | --- | --- |
 | `src/game_downloader` | Resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline, stubs и sealed `GameSnapshot` |
-| `.github/workflows` и `scripts` | Production entrypoint, Selectel lifecycle, три JIT runner, cleanup/reconciliation и отчёты |
+| `.github/workflows` и `scripts` | Production entrypoint, Selectel lifecycle, четыре JIT runner, cleanup/reconciliation и отчёты |
 | [`wot-src`](https://github.com/wotstat/wot-src) | Reusable publication workflow, проверка snapshot и публикация исходников, XML/PO, AS3, stubs и Gameface |
 | [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) | Reusable publication workflow, проверка snapshot и публикация `res/gui` без `.py` |
+| [`wotstat-assets-uploader`](https://github.com/wotstat/wotstat-assets-uploader) | Reusable upload workflow, проверка snapshot и загрузка временных данных в ClickHouse и S3 |
 
 Downloader не является отдельным reusable workflow или внешним продуктом. Его production-интерфейс
 совпадает с download job основного workflow; устойчивым seam для publisher остаётся только sealed
@@ -60,8 +62,8 @@ Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и Ac
 исходные assets и формирует provenance manifests. `READY` появляется последним.
 
 Формат результата закреплён схемами из [`contracts/v1`](contracts/v1). Publisher получают только
-абсолютный snapshot path, snapshot ID и SHA-256 canonical descriptor и повторно проверяют snapshot
-перед публикацией.
+абсолютный snapshot path, snapshot ID и SHA-256 canonical descriptor и повторно проверяют handoff
+перед обработкой.
 
 ## Local download
 
@@ -115,8 +117,9 @@ snapshot до стадии `snapshot` и предоставляет только
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `EN` |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
+| `publish_wotstat_assets` | Включить временную загрузку через `wotstat-assets-uploader`; по умолчанию `true` |
 
-Publisher можно независимо отключить для ручного рерана. Если отключить оба, workflow только
+Каждый consumer можно независимо отключить для ручного рерана. Если отключить все три, workflow только
 соберёт и проверит snapshot, после чего удалит VM. Production-конфигурация зафиксирована как
 HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7b`: 16 vCPU, 32 ГБ RAM и
 256 ГБ локального диска. Standard, обычный HighFreq, выбор flavor и location не поддерживаются.
@@ -132,7 +135,7 @@ Workflow предоставляет семь независимых whitelist-ч
 `wot-eu`, а `dispatch_pipelines` выключен: несовпадение лишь выводится в лог как
 `action=would-dispatch`. При явном включении dispatch checker сначала исключает уже ожидающий или
 работающий pipeline того же target, после чего запускает отличающиеся targets параллельно на
-default branch с `sd`, `ALL` и обоими publisher. После завершения матрицы общий Job Summary
+default branch с `sd`, `ALL` и всеми тремя consumer. После завершения матрицы общий Job Summary
 показывает таблицу с сохранённой и найденной версиями, результатом сравнения и действием для каждого
 выбранного target; сбои отдельных targets остаются видны отдельными строками.
 
@@ -142,20 +145,22 @@ dispatch для target. После успешных download, всех вклю�
 обновляет status в default branch. Конфигурация ручного run при этом намеренно не входит в status:
 оператор сам отвечает за завершение частичных ручных публикаций.
 
-## Reusable publisher workflows
+## Reusable snapshot consumer workflows
 
 Оркестратор вызывает каждый data-репозиторий напрямую по полному SHA:
 
 ```yaml
 uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@<commit-sha>
 uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@<commit-sha>
+uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@<commit-sha>
 ```
 
 Это обычные reusable workflows внутри caller run, а не cross-repository dispatch. Каждый workflow
 checkout’ит собственный репозиторий через `job.workflow_repository` и `job.workflow_sha`, поэтому
-исполняемый publisher-код совпадает с SHA в `uses`. Он получает выделенный JIT runner, локальный
-snapshot path, target, version name, snapshot ID и descriptor digest; branch и правила проекции
-выводятся из конфигурации самого data-репозитория.
+исполняемый consumer-код совпадает с SHA в `uses`. Он получает выделенный JIT runner, локальный
+snapshot path, target, snapshot ID и descriptor digest. Data-репозитории выводят branch и правила
+проекции из своей конфигурации; uploader получает ClickHouse/S3 settings только из отдельного
+Environment `wotstat-assets-uploader` caller-репозитория.
 
 Отсутствующая data-ветка создаётся первой публикацией сразу на version commit. Существующая ветка
 обязана содержать `.publication.json`; markerless ref считается чужим состоянием и приводит к hard
@@ -169,12 +174,14 @@ ID. Затем GitHub Git Database API создаёт один final version com
 
 ## Cleanup и безопасность
 
-- VM получает три одноразовые JIT-конфигурации с отдельными HOME и runner directories.
+- VM получает четыре одноразовые JIT-конфигурации с отдельными HOME и runner directories.
 - GitHub App выпускает короткоживущие installation tokens: `Administration: write` только для
   регистрации runner и `Contents: write` только для выбранного data-репозитория.
 - `GH_APP_PRIVATE_KEY` хранится как repository-level Actions secret только в оркестраторе и явно
   передаётся reusable publisher workflows. `SELECTEL_OS_PASSWORD` хранится только в Environment
   `selectel`; Telegram credentials — только в Environment `telegram`.
+- ClickHouse и S3 secrets/variables uploader хранятся только в Environment
+  `wotstat-assets-uploader` и доступны лишь его reusable job.
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
@@ -186,8 +193,8 @@ ID. Затем GitHub Git Database API создаёт один final version com
   эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
   token-originated цепочке.
 
-Cron/schedule, внешний status store, полная история запусков, GitHub Pages, S3 и БД не входят в
-текущую систему.
+Cron/schedule, внешний status store, полная история запусков и GitHub Pages не входят в текущую
+систему. Загрузка в S3 и ClickHouse пока использует временные namespaces uploader.
 
 ## Настройка и проверка
 

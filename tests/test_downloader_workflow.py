@@ -83,6 +83,7 @@ def test_successful_pipeline_records_release_status_in_default_branch() -> None:
         "queue-watchdog",
         "publish-wot-gui-assets",
         "publish-wot-src",
+        "publish-wotstat-assets",
         "cleanup",
     }
     assert "needs.download.result == 'success'" in job["if"]
@@ -90,6 +91,10 @@ def test_successful_pipeline_records_release_status_in_default_branch() -> None:
     assert "!inputs.publish_wot_src || needs.publish-wot-src.result == 'success'" in job["if"]
     assert (
         "!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success'"
+        in job["if"]
+    )
+    assert (
+        "!inputs.publish_wotstat_assets || needs.publish-wotstat-assets.result == 'success'"
         in job["if"]
     )
     assert job["permissions"] == {"contents": "write"}

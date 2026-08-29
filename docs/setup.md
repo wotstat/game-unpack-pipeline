@@ -31,7 +31,7 @@ direct public IP в Selectel. `Check game releases`, напротив, по ум
 vCPU и `32 × N` ГБ RAM. Оркестратор не отменяет предыдущий ручной run, поэтому лимит реального
 параллелизма определяется квотами Selectel и балансом аккаунта.
 
-Локальный диск обязателен для текущей архитектуры: snapshot читают три runner на одной VM, а после
+Локальный диск обязателен для текущей архитектуры: snapshot читают четыре runner на одной VM, а после
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
 Так как Selectel не поддерживает выделенные ядра в `ru-9a`, production location зафиксирована
@@ -64,7 +64,7 @@ Flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соотв�
 Workflows создают минимально scoped короткоживущие installation tokens:
 
 - provision, queue-timeout cleanup, основной cleanup и reconciler — `Administration: write`
-  только для `game-unpack-pipeline`, где зарегистрированы все три JIT runner;
+  только для `game-unpack-pipeline`, где зарегистрированы все четыре JIT runner;
 - reusable publisher job `wot-src` — `Contents: write` только для `wot-src`;
 - reusable publisher job `wot-gui-assets` — `Contents: write` только для `wot-gui-assets`.
 
@@ -96,8 +96,34 @@ data-ветки.
 | --- | --- |
 | `GH_APP_PRIVATE_KEY` | Полный PEM private key GitHub App |
 
-Self-hosted downloader и reusable publisher jobs не используют Environment `selectel`. Publisher jobs
+Self-hosted downloader и reusable consumer jobs не используют Environment `selectel`. Publisher jobs
 получают только явно переданный `GH_APP_PRIVATE_KEY` и не обращаются к `SELECTEL_OS_PASSWORD`.
+
+Создать второй Environment с точным именем `wotstat-assets-uploader`. В **Deployment branches and tags**
+разрешить только branch `main`. Не включать required reviewers, если checker должен автоматически
+запускать uploader; если автоматический запуск не нужен, reviewer можно использовать как ручной gate.
+
+Добавить в `wotstat-assets-uploader` чувствительные параметры как Environment secrets:
+
+| Secret |
+| --- |
+| `CLICKHOUSE_PASSWORD` |
+| `AWS_ACCESS_KEY_ID` |
+| `AWS_SECRET_ACCESS_KEY` |
+
+Остальные параметры добавить как Environment variables:
+
+| Variable |
+| --- |
+| `CLICKHOUSE_HOST` |
+| `CLICKHOUSE_USER` |
+| `AWS_REGION` |
+| `AWS_ENDPOINT_URL` |
+| `AWS_BUCKET` |
+
+Весь набор остаётся внутри отдельного Environment и доступен только job uploader. `DATA_DIR` не
+сохраняется в Environment — основной workflow передаёт абсолютный путь к конкретному sealed snapshot
+для каждого run.
 
 ## 4. Repository Variables
 
@@ -159,7 +185,7 @@ Summary: сохранённый и найденный release name, резуль
 Ошибки probe, чтения status, поиска активного run и dispatch отображаются в строке своего target.
 
 При `dispatch_pipelines: true` отличающиеся targets запускаются параллельно через основной workflow
-на default branch с фиксированными `client_type: sd`, `languages: ALL` и обоими publisher. Ошибка
+на default branch с фиксированными `client_type: sd`, `languages: ALL` и всеми тремя consumer. Ошибка
 одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
 красным.
 
@@ -181,42 +207,46 @@ workspace и не скачивая клиент.
 | `languages` | `EN` |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
-Такой run собирает полный sealed snapshot и публикует production-ветку `wot-eu` в обоих
-data-репозиториях. Первый запуск может занимать много времени и скачивает полный клиент.
+| `publish_wotstat_assets` | `true` |
 
-Publisher можно включать независимо для каждого run. Например, чтобы обновить только `wot-src`,
-оставить `publish_wot_src: true` и установить `publish_wot_gui_assets: false`. Оба переключателя
-включены по умолчанию; если отключить оба, workflow соберёт snapshot без публикации.
+Такой run собирает полный sealed snapshot, публикует production-ветку `wot-eu` в обоих
+data-репозиториях и запускает временную загрузку в ClickHouse/S3. Первый запуск может занимать много
+времени и скачивает полный клиент.
+
+Consumer можно включать независимо для каждого run. Например, чтобы обновить только `wot-src`,
+оставить `publish_wot_src: true`, а два других переключателя выключить. Все три переключателя
+включены по умолчанию; если отключить все, workflow соберёт snapshot без публикации или upload.
 
 ## 8. Ожидаемая последовательность jobs
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
-2. Provision резервирует все три runner в `game-unpack-pipeline`: downloader и по одному runner для
-   jobs `wot-src`/`wot-gui-assets`, затем создаёт VM.
+2. Provision резервирует все четыре runner в `game-unpack-pipeline`: downloader и по одному runner
+   для jobs `wot-src`, `wot-gui-assets` и `wotstat-assets-uploader`, затем создаёт VM.
 3. Cloud-init скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и запускает
-   три systemd service под разными Unix-пользователями.
-4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех трёх runner.
+   четыре systemd service под разными Unix-пользователями.
+4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех четырёх runner.
 5. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
    стадии от `resolve` до `snapshot` видны отдельными Actions steps; metrics и небольшие
    diagnostic files загружаются как artifact.
 6. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
    `x.x.x.x #xxx` из корневого `version.xml`, snapshot ID, абсолютный path и SHA-256 canonical
    descriptor.
-7. Включённые `Publish wot-src` и `Publish wot-gui-assets` параллельно вызывают reusable workflow
-   соответствующего data-репозитория через прямой `uses: ...@<commit-sha>`. Jobs входят в основной
-   run, checkout’ят собственный publisher-код через `job.workflow_repository` и
-   `job.workflow_sha` и получают одинаковый snapshot contract. Отключённая job получает статус
-   `skipped` и не считается ошибкой cleanup.
-8. Каждый включённый publisher независимо проверяет snapshot и либо создаёт version commit, либо
-   успешно завершает повторную публикацию как `unchanged`.
+7. Включённые `Publish wot-src`, `Publish wot-gui-assets` и `Upload wotstat assets` параллельно
+   вызывают reusable workflow соответствующего репозитория через прямой
+   `uses: ...@<commit-sha>`. Jobs входят в основной run, checkout’ят собственный consumer-код через
+   `job.workflow_repository` и `job.workflow_sha` и получают одинаковую snapshot identity.
+   Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
+8. Каждый включённый consumer проверяет sealed handoff. Data publisher создаёт version commit или
+   возвращает `unchanged`; uploader выполняет все loaders и возвращает `uploaded`. Ошибка любого
+   loader делает всю uploader job неуспешной.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
 10. После успешного cleanup `Record release status` записывает WGUS/LSTUS version name в
     `status/<target>.json` на default branch. Параллельные status-job сериализуются и не отменяют
     друг друга. Любой полностью успешный ручной run обновляет региональный status независимо от
     client type, languages и отключённых publisher.
 11. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
-    `x.x.x.x #xxx`, target, client type, языками и publisher state; `published` ведёт ссылкой на
+    `x.x.x.x #xxx`, target, client type, языками и состоянием всех consumer; `published` ведёт ссылкой на
     точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 12. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
@@ -225,8 +255,9 @@ Publisher можно включать независимо для каждого
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
     приходит отдельный recovery alert.
 
-Queue watchdog ждёт назначения download job на downloader runner 10 минут. Каждая self-hosted publisher
-job ограничена 60 минутами; её состояние и шаги видны непосредственно в основном run.
+Queue watchdog ждёт назначения download job на downloader runner 10 минут. Self-hosted publisher
+job ограничены 60 минутами, uploader — 120 минутами; их состояния и шаги видны непосредственно в
+основном run.
 
 ## 9. Отмена и повторная очистка
 

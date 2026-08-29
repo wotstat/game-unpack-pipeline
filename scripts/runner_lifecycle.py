@@ -600,10 +600,11 @@ def render_cloud_config(
     runner_version: str,
     runner_jit_configs: Mapping[str, str],
 ) -> str:
-    expected_roles = {"downloader", "wot-gui-assets", "wot-src"}
+    expected_roles = {"downloader", "wot-gui-assets", "wot-src", "wotstat-assets"}
     if set(runner_jit_configs) != expected_roles:
         raise LifecycleError(
-            "cloud config requires downloader, wot-src and wot-gui-assets JIT configurations"
+            "cloud config requires downloader, wot-src, wot-gui-assets and "
+            "wotstat-assets JIT configurations"
         )
     assignments = {
         "RUNNER_DOWNLOAD_URL": runner_download_url,
@@ -612,6 +613,7 @@ def render_cloud_config(
         "DOWNLOADER_RUNNER_JIT_CONFIG": runner_jit_configs["downloader"],
         "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wot-gui-assets"],
         "WOT_SRC_RUNNER_JIT_CONFIG": runner_jit_configs["wot-src"],
+        "WOTSTAT_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wotstat-assets"],
     }
     preamble = "\n".join(
         f"{'readonly ' if not name.endswith('_JIT_CONFIG') else ''}{name}={shlex.quote(value)}"
@@ -1047,6 +1049,7 @@ def provision(arguments: argparse.Namespace) -> None:
     downloader_runner = identity.runner("downloader")
     wot_gui_assets_runner = identity.runner("wot-gui-assets")
     wot_src_runner = identity.runner("wot-src")
+    wotstat_assets_runner = identity.runner("wotstat-assets")
     add_mask(config.password)
 
     for name, value in {
@@ -1057,6 +1060,8 @@ def provision(arguments: argparse.Namespace) -> None:
         "wot_gui_assets_runner_label": wot_gui_assets_runner.label,
         "wot_src_runner_name": wot_src_runner.name,
         "wot_src_runner_label": wot_src_runner.label,
+        "wotstat_assets_runner_name": wotstat_assets_runner.name,
+        "wotstat_assets_runner_label": wotstat_assets_runner.label,
         "runner_scope_label": identity.scope_label,
         "server_name": identity.server_name,
         "security_group_name": identity.security_group_name,
@@ -1104,6 +1109,13 @@ def provision(arguments: argparse.Namespace) -> None:
         write_output("wot_src_runner_id", wot_src_runner_id)
         print(f"wot-src JIT runner reserved: {wot_src_runner_id}")
 
+        wotstat_assets_runner_id, wotstat_assets_jit_config = create_jit_runner(
+            wotstat_assets_runner, app_token
+        )
+        jit_configs[wotstat_assets_runner.role] = wotstat_assets_jit_config
+        write_output("wotstat_assets_runner_id", wotstat_assets_runner_id)
+        print(f"wotstat-assets JIT runner reserved: {wotstat_assets_runner_id}")
+
         template_path = Path(__file__).with_name("bootstrap-actions-runner.sh")
         template = template_path.read_text(encoding="utf-8")
         cloud_config = render_cloud_config(
@@ -1146,6 +1158,12 @@ def provision(arguments: argparse.Namespace) -> None:
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
         )
+        wait_for_runner_online(
+            wotstat_assets_runner,
+            wotstat_assets_runner_id,
+            app_token,
+            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+        )
         append_summary(f"- Runner version: `{runner_version}`")
         append_summary(f"- Selectel server: `{server_id}`")
     except Exception:
@@ -1172,6 +1190,7 @@ def cleanup(arguments: argparse.Namespace) -> None:
     downloader_runner = identity.runner("downloader")
     wot_gui_assets_runner = identity.runner("wot-gui-assets")
     wot_src_runner = identity.runner("wot-src")
+    wotstat_assets_runner = identity.runner("wotstat-assets")
     add_mask(config.password)
 
     if arguments.diagnostics:
@@ -1209,6 +1228,15 @@ def cleanup(arguments: argparse.Namespace) -> None:
                 wot_gui_assets_runner,
                 app_token,
                 arguments.wot_gui_assets_runner_id,
+                deleted_resources=deleted_resources,
+            ),
+        ),
+        (
+            "GitHub wotstat-assets runner registration",
+            lambda: delete_github_runners(
+                wotstat_assets_runner,
+                app_token,
+                arguments.wotstat_assets_runner_id,
                 deleted_resources=deleted_resources,
             ),
         ),
@@ -1322,6 +1350,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--downloader-runner-id", default="")
     cleanup_parser.add_argument("--wot-gui-assets-runner-id", default="")
     cleanup_parser.add_argument("--wot-src-runner-id", default="")
+    cleanup_parser.add_argument("--wotstat-assets-runner-id", default="")
     cleanup_parser.add_argument("--server-id", default="")
     cleanup_parser.add_argument("--port-id", default="")
     cleanup_parser.add_argument("--security-group-id", default="")

@@ -33,6 +33,9 @@ class TelegramReportTests(unittest.TestCase):
                 "WOT_GUI_ASSETS_RESULT": "success",
                 "WOT_GUI_ASSETS_PUBLICATION_STATE": "unchanged",
                 "WOT_GUI_ASSETS_COMMIT_SHA": "b" * 40,
+                "WOTSTAT_ASSETS_ENABLED": "true",
+                "WOTSTAT_ASSETS_RESULT": "success",
+                "WOTSTAT_ASSETS_UPLOAD_STATE": "uploaded",
                 "PIPELINE_RUN_URL": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/1",
             }
         )
@@ -46,6 +49,7 @@ class TelegramReportTests(unittest.TestCase):
                     '<a href="https://github.com/wotstat/wot-src/commit/'
                     f'{"a" * 40}">updated</a>',
                     "🖼 <code>wot-gui-assets</code> — unchanged",
+                    "🗄 <code>wotstat-assets-uploader</code> — uploaded",
                     "",
                     '<a href="https://github.com/wotstat/game-unpack-pipeline/actions/runs/1">'
                     "Open pipeline run →</a>",
@@ -63,6 +67,7 @@ class TelegramReportTests(unittest.TestCase):
                 "LANGUAGES": "ru, be",
                 "WOT_SRC_ENABLED": "false",
                 "WOT_GUI_ASSETS_ENABLED": "false",
+                "WOTSTAT_ASSETS_ENABLED": "false",
                 "PIPELINE_RUN_URL": "https://github.com/example/run",
             }
         )
@@ -73,6 +78,7 @@ class TelegramReportTests(unittest.TestCase):
         )
         self.assertIn("📦 <code>wot-src</code> — disabled", message)
         self.assertIn("🖼 <code>wot-gui-assets</code> — disabled", message)
+        self.assertIn("🗄 <code>wotstat-assets-uploader</code> — disabled", message)
 
     def test_failure_report_keeps_operational_job_states(self) -> None:
         message = render_message(
@@ -91,6 +97,8 @@ class TelegramReportTests(unittest.TestCase):
                 "WOT_SRC_RESULT": "skipped",
                 "WOT_GUI_ASSETS_ENABLED": "true",
                 "WOT_GUI_ASSETS_RESULT": "skipped",
+                "WOTSTAT_ASSETS_ENABLED": "true",
+                "WOTSTAT_ASSETS_RESULT": "skipped",
                 "PIPELINE_RUN_URL": "https://github.com/example/run?a=1&b=2",
             }
         )
@@ -99,6 +107,7 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("Downloader — <code>failure</code>", message)
         self.assertIn("Cleanup — <code>success</code> (deleted: <code>6</code>)", message)
         self.assertIn("📦 <code>wot-src</code> — not started", message)
+        self.assertIn("🗄 <code>wotstat-assets-uploader</code> — not started", message)
         self.assertIn("run?a=1&amp;b=2", message)
 
     def test_report_places_end_to_end_duration_next_to_run_link(self) -> None:
@@ -115,6 +124,9 @@ class TelegramReportTests(unittest.TestCase):
                 "WOT_GUI_ASSETS_ENABLED": "true",
                 "WOT_GUI_ASSETS_RESULT": "success",
                 "WOT_GUI_ASSETS_PUBLICATION_STATE": "unchanged",
+                "WOTSTAT_ASSETS_ENABLED": "true",
+                "WOTSTAT_ASSETS_RESULT": "success",
+                "WOTSTAT_ASSETS_UPLOAD_STATE": "uploaded",
                 "PIPELINE_STARTED_AT": "2026-08-24T20:00:00Z",
                 "PIPELINE_FINISHED_AT": "2026-08-24T22:47:18Z",
                 "PIPELINE_RUN_URL": "https://github.com/example/run",

@@ -213,7 +213,8 @@ jobs:
             --field client_type=sd \
             --field languages=ALL \
             --field publish_wot_src=true \
-            --field publish_wot_gui_assets=true
+            --field publish_wot_gui_assets=true \
+            --field publish_wotstat_assets=true
           echo "${TARGET}: current=${RELEASE_NAME}, action=dispatched"
 
       - name: Record check result
