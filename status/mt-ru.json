@@ -1,3 +1,15 @@
 {
-  "release_name": "1.44.0.8017"
+  "release_name": "1.44.0.8017",
+  "readable_version": "1.44.0.0 #2262",
+  "last_run": {
+    "result": "success",
+    "release_name": "1.44.0.8017",
+    "readable_version": "1.44.0.0 #2262",
+    "started_at": "2026-08-29T14:53:06Z",
+    "completed_at": "2026-08-29T15:48:59Z",
+    "duration_seconds": 3353,
+    "run_id": 33258764585,
+    "run_attempt": 1,
+    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/33258764585"
+  }
 }

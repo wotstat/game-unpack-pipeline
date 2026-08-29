@@ -74,7 +74,7 @@ def test_download_job_exposes_only_the_sealed_snapshot_tree_to_publishers() -> N
     assert "chmod -R" not in share["run"]
 
 
-def test_successful_pipeline_records_release_status_in_default_branch() -> None:
+def test_every_completed_pipeline_records_status_in_default_branch() -> None:
     job = _workflow()["jobs"]["record-status"]
 
     assert set(job["needs"]) == {
@@ -86,27 +86,21 @@ def test_successful_pipeline_records_release_status_in_default_branch() -> None:
         "publish-wotstat-assets",
         "cleanup",
     }
-    assert "needs.download.result == 'success'" in job["if"]
-    assert "needs.cleanup.result == 'success'" in job["if"]
-    assert "!inputs.publish_wot_src || needs.publish-wot-src.result == 'success'" in job["if"]
-    assert (
-        "!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success'"
-        in job["if"]
-    )
-    assert (
-        "!inputs.publish_wotstat_assets || needs.publish-wotstat-assets.result == 'success'"
-        in job["if"]
-    )
-    assert job["permissions"] == {"contents": "write"}
+    assert job["if"] == "always()"
+    assert job["permissions"] == {"actions": "read", "contents": "write"}
     assert job["concurrency"] == {
         "group": "release-status-${{ github.repository }}",
         "cancel-in-progress": False,
     }
     checkout = job["steps"][0]
     assert checkout["with"]["ref"] == "${{ github.event.repository.default_branch }}"
-    assert "scripts/release_status.py write" in job["steps"][1]["run"]
-    assert 'git add -- "status/${TARGET}.json"' in job["steps"][2]["run"]
-    assert 'git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"' in job["steps"][2]["run"]
+    update = next(step for step in job["steps"] if step["name"] == "Update pipeline status")
+    commit = next(step for step in job["steps"] if step["name"] == "Commit pipeline status")
+    assert "scripts/release_status.py record" in update["run"]
+    assert '--readable-version "${READABLE_VERSION}"' in update["run"]
+    assert '--run-url "${RUN_URL}"' in update["run"]
+    assert 'git add -- "status/${TARGET}.json"' in commit["run"]
+    assert 'git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"' in commit["run"]
 
 
 def test_status_recording_and_telegram_notification_are_parallel_final_jobs() -> None:
@@ -116,6 +110,19 @@ def test_status_recording_and_telegram_notification_are_parallel_final_jobs() ->
     assert "notify" not in jobs["record-status"]["needs"]
     assert "cleanup" in jobs["notify"]["needs"]
     assert "cleanup" in jobs["record-status"]["needs"]
+
+
+def test_status_page_deploy_runs_after_status_commit() -> None:
+    job = _workflow()["jobs"]["deploy-status-page"]
+
+    assert job["needs"] == "record-status"
+    assert "needs.record-status.result == 'success'" in job["if"]
+    assert job["uses"] == "./.github/workflows/deploy-status-page.yml"
+    assert job["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "pages": "write",
+    }
 
 
 def test_bot_dispatched_pipeline_explicitly_dispatches_reconciler_after_cleanup() -> None:

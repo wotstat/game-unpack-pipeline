@@ -526,15 +526,8 @@ jobs:
             "${diagnostics[@]}"
 
   record-status:
-    name: Record release status (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: >-
-      always() &&
-      needs.download.result == 'success' &&
-      needs.queue-watchdog.result == 'success' &&
-      needs.cleanup.result == 'success' &&
-      (!inputs.publish_wot_src || needs.publish-wot-src.result == 'success') &&
-      (!inputs.publish_wot_gui_assets || needs.publish-wot-gui-assets.result == 'success') &&
-      (!inputs.publish_wotstat_assets || needs.publish-wotstat-assets.result == 'success')
+    name: Record pipeline status (manual-${{ github.run_id }}-${{ github.run_attempt }})
+    if: always()
     needs:
       - provision
       - download
@@ -549,6 +542,7 @@ jobs:
       group: release-status-${{ github.repository }}
       cancel-in-progress: false
     permissions:
+      actions: read
       contents: write
     steps:
       - name: Check out latest default branch
@@ -556,32 +550,73 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Update release status
+      - name: Read pipeline start time
+        id: timing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          started_at="$(gh api \
+            'repos/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            --jq '.run_started_at')"
+          if [[ -z "${started_at}" ]]; then
+            echo "GitHub returned an empty run_started_at" >&2
+            exit 1
+          fi
+          echo "started_at=${started_at}" >>"${GITHUB_OUTPUT}"
+
+      - name: Update pipeline status
         id: status
         env:
+          PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
           RELEASE_NAME: ${{ needs.download.outputs.version_name }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STARTED_AT: ${{ steps.timing.outputs.started_at }}
           TARGET: ${{ inputs.target }}
         run: |
           set -Eeuo pipefail
-          result="$(python3 scripts/release_status.py write \
+          completed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          result="$(python3 scripts/release_status.py record \
             --target "${TARGET}" \
-            --release-name "${RELEASE_NAME}")"
+            --result "${PIPELINE_RESULT}" \
+            --release-name "${RELEASE_NAME}" \
+            --readable-version "${READABLE_VERSION}" \
+            --started-at "${STARTED_AT}" \
+            --completed-at "${completed_at}" \
+            --run-id "${RUN_ID}" \
+            --run-attempt "${RUN_ATTEMPT}" \
+            --run-url "${RUN_URL}")"
           echo "result=${result}" >>"${GITHUB_OUTPUT}"
-          echo "${TARGET}: ${result} release status ${RELEASE_NAME}"
+          echo "${TARGET}: ${result} ${PIPELINE_RESULT} pipeline status"
 
-      - name: Commit release status
+      - name: Commit pipeline status
         if: steps.status.outputs.result == 'changed'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          RELEASE_NAME: ${{ needs.download.outputs.version_name }}
+          PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
           TARGET: ${{ inputs.target }}
         run: |
           set -Eeuo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "status/${TARGET}.json"
-          git commit -m "Record ${TARGET} release ${RELEASE_NAME}"
+          version="${READABLE_VERSION:-version unavailable}"
+          git commit -m "Record ${TARGET} ${PIPELINE_RESULT}: ${version}"
           git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"
+
+  deploy-status-page:
+    name: Deploy public status page
+    if: always() && needs.record-status.result == 'success'
+    needs: record-status
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    uses: ./.github/workflows/deploy-status-page.yml
 
   dispatch-reconciler:
     name: Dispatch reconciler (manual-${{ github.run_id }}-${{ github.run_attempt }})

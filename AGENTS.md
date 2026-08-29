@@ -5,10 +5,11 @@
 `game-unpack-pipeline` — публичный pipeline ручного production-скачивания, распаковки и публикации
 снимков клиентов World of Tanks и «Мира танков». Репозиторий владеет основной полезной нагрузкой
 downloader, GitHub Actions entrypoint, жизненным циклом временной VM и четырёх repository-level JIT
-runner, вызовом reusable snapshot consumer, cleanup/reconciliation и Telegram-отчётами.
+runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Telegram-отчётами и публичной
+статус-страницей GitHub Pages.
 
-Ручной checker новых версий и минимальные repository status-файлы реализованы. Cron и внешняя
-публичная история статусов отсутствуют.
+Ручной checker новых версий и repository status-файлы реализованы. Короткая публичная история
+строится из Git-истории этих файлов; cron и внешний status store отсутствуют.
 
 ## Реализованный поток
 
@@ -21,7 +22,8 @@ manual workflow_dispatch
   → параллельные reusable workflows из main двух data-репозиториев и wotstat-assets-uploader
   → выбранные production data-ветки target
   → cleanup с always()
-  → параллельно запись release name в status и итоговый Telegram-отчёт
+  → параллельно запись результата run в status и итоговый Telegram-отчёт
+  → после status commit сборка и deployment GitHub Pages
   → workflow_run reconciler в ru-7 и ru-9
   → recovery alert только при deleted_count > 0
 ```
@@ -39,8 +41,9 @@ target, client type, languages и три независимых переключ
 
 - `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,
   client/VFS/readable pipeline, transforms, stubs, seal и verify `GameSnapshot`.
-- `.github/workflows`, `.github/scripts`, `scripts`: production entrypoint, stage execution и
-  telemetry, Selectel lifecycle, JIT runner bootstrap, publisher calls, cleanup/reconciliation.
+- `.github/workflows`, `.github/scripts`, `scripts`, `status-page`: production entrypoint, stage
+  execution и telemetry, Selectel lifecycle, JIT runner bootstrap, publisher calls,
+  cleanup/reconciliation и генерация GitHub Pages.
 - [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`: reusable
   publication workflow, независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и
   Gameface.
@@ -65,10 +68,16 @@ workflow или отдельный репозиторий и не перенос
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
-- `status/<target>.json` содержит ровно поле `release_name` со строкой либо bootstrap `null`.
-  Любой полностью успешный основной run записывает WGUS/LSTUS version name после cleanup независимо
-  от его client type, languages и выбранных consumer. Status-job сериализованы общей non-cancelling
-  concurrency-группой и выполняются параллельно Telegram.
+- `status/<target>.json` содержит последнюю успешную пару `release_name`/`readable_version` либо
+  bootstrap `null`, а также `last_run` с result, обеими версиями, timestamps, duration, Actions Run
+  ID/attempt и URL. После cleanup status-job с `always()` коммитит каждый завершённый run; ошибка не
+  продвигает успешную пару. Checker сравнивает только `release_name`. Status-job сериализованы общей
+  non-cancelling concurrency-группой и выполняются параллельно Telegram.
+- `.github/workflows/deploy-status-page.yml` checkout'ит default branch с полной историей, строит
+  `_site` из текущих status и предыдущих версий тех же файлов и публикует GitHub Pages artifact.
+  Основной workflow вызывает его прямо после status commit, включая token-originated runs;
+  `push` и `workflow_dispatch` используются для изменений страницы и ручной пересборки. История не
+  дублируется в накопительном JSON или отдельных run-файлах.
 - Download job реализован прямо в основном workflow и последовательно выполняет все стадии от
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
@@ -115,9 +124,9 @@ workflow или отдельный репозиторий и не перенос
   длительность run рядом со ссылкой. Reconciler отправляет recovery alert только при машинно
   подтверждённом `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
-  `cancel-in-progress: false`. Uploader не сериализует runs: production targets пишут во временные
-  S3 namespaces `wot`/`mt`, а `wot-common-test` и `mt-public-test` изолированы в
-  `wot-test`/`mt-test`.
+  `cancel-in-progress: false`; status и Pages deployment также сериализованы без отмены. Uploader не
+  сериализует runs: production targets пишут во временные S3 namespaces `wot`/`mt`, а
+  `wot-common-test` и `mt-public-test` изолированы в `wot-test`/`mt-test`.
 
 ## Секреты и реальные операции
 
@@ -143,9 +152,8 @@ workflow или отдельный репозиторий и не перенос
 ## Что не входит в систему
 
 - cron/schedule для checker новых WGUS/LSTUS releases;
-- отдельная release identity, история попыток и retry policy сверх минимального `release_name`
-  status и подавления дубликата активного run;
-- внешний status store, полная история запусков или GitHub Pages;
+- отдельная release identity и retry policy сверх status и подавления дубликата активного run;
+- внешний status store или история запусков вне Git-истории региональных status-файлов;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
 
 Не проектировать эти части без нового запроса.

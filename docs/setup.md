@@ -1,8 +1,8 @@
 # Настройка и эксплуатация pipeline
 
-Эта инструкция описывает текущий ручной production workflow и ручной checker новых версий. В ней
-нет реальных credentials: пароли и private keys нужно вводить непосредственно в GitHub Settings,
-не отправляя их в issues, commits, чаты или логи.
+Эта инструкция описывает текущий ручной production workflow, ручной checker новых версий и
+публичную статус-страницу GitHub Pages. В ней нет реальных credentials: пароли и private keys нужно
+вводить непосредственно в GitHub Settings, не отправляя их в issues, commits, чаты или логи.
 
 `Process game release` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
 direct public IP в Selectel. `Check game releases`, напротив, по умолчанию только сравнивает версии
@@ -174,7 +174,26 @@ Selectel credentials из Environment `selectel`. Основной workflow вс
 `deleted_count` больше нуля. Используемый `appleboy/telegram-action` закреплён на полном commit SHA
 версии `v1.1.1`.
 
-## 6. Ручная проверка новых версий
+## 6. GitHub Pages
+
+Один раз открыть `Settings → Pages` и в **Build and deployment → Source** выбрать
+**GitHub Actions**. Workflow не пытается сам включать Pages через административный token.
+
+После merge страницу можно впервые опубликовать через
+`Actions → Deploy status page → Run workflow` на `main`. Дальше основной pipeline вызывает этот
+workflow непосредственно после status commit; отдельный `push` trigger также пересобирает страницу
+после обычных изменений `status-page`, генератора или workflow. Environment `github-pages` и URL
+deployment использует стандартный Pages flow.
+
+Страница собирается только из публичных `status/<target>.json` и их Git-истории. Для этого build job
+делает checkout с `fetch-depth: 0`, генерирует `_site`, загружает Pages artifact и передаёт его
+deployment job с минимальными `pages: write` и `id-token: write`. Секреты Selectel, Telegram,
+ClickHouse и S3 в Pages workflow недоступны.
+
+Стандартный URL проекта после первого deployment:
+`https://wotstat.github.io/game-unpack-pipeline/`.
+
+## 7. Ручная проверка новых версий
 
 Открыть `Actions → Check game releases → Run workflow` на `main`. Workflow пока не имеет schedule.
 Он предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
@@ -194,12 +213,13 @@ Summary: сохранённый и найденный release name, резуль
 одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
 красным.
 
-Status-файлы находятся в `status/<target>.json` и содержат только `release_name`. Bootstrap `null`
-является валидным несовпадением; отсутствующий или повреждённый файл блокирует target. Lightweight
-probe выполняет только запрос metadata и один patches chain для default language, не создавая
-workspace и не скачивая клиент.
+Status-файлы находятся в `status/<target>.json`. Checker читает из расширенного документа только
+верхнеуровневый `release_name`: bootstrap `null` является валидным несовпадением, а отсутствующий или
+повреждённый файл блокирует target. `readable_version` и `last_run` нужны странице и не участвуют в
+сравнении. Lightweight probe выполняет только запрос metadata и один patches chain для default
+language, не создавая workspace и не скачивая клиент.
 
-## 7. Ручная обработка игрового релиза
+## 8. Ручная обработка игрового релиза
 
 Открыть `Actions → Process game release`, выбрать branch `main` и заполнить inputs.
 
@@ -222,7 +242,7 @@ Consumer можно включать независимо для каждого 
 оставить `publish_wot_src: true`, а два других переключателя выключить. Все три переключателя
 включены по умолчанию; если отключить все, workflow соберёт snapshot без публикации или upload.
 
-## 8. Ожидаемая последовательность jobs
+## 9. Ожидаемая последовательность jobs
 
 1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
    egress-only security group с direct-public port.
@@ -246,15 +266,19 @@ Consumer можно включать независимо для каждого 
    возвращает `unchanged`; uploader выполняет все loaders и возвращает `uploaded`. Ошибка любого
    loader делает всю uploader job неуспешной.
 9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. После успешного cleanup `Record release status` записывает WGUS/LSTUS version name в
-    `status/<target>.json` на default branch. Параллельные status-job сериализуются и не отменяют
-    друг друга. Любой полностью успешный ручной run обновляет региональный status независимо от
-    client type, languages и отключённых publisher.
-11. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
+10. После cleanup `Record pipeline status` с `always()` перезаписывает `last_run` в
+    `status/<target>.json` и коммитит результат, время, длительность и ссылку на Actions run в
+    default branch. При полном успехе он также обновляет `release_name` и `readable_version`
+    `x.x.x.x #xxx`; при ошибке последняя успешная версия остаётся прежней, поэтому checker сможет
+    повторить релиз. Параллельные status-job сериализуются и не отменяют друг друга.
+11. `Deploy public status page` после status commit читает текущие файлы и их полную Git-историю,
+    собирает `_site` и публикует Pages artifact. История не хранится отдельным массивом или набором
+    файлов: каждый status commit становится одной записью временной шкалы.
+12. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
     `x.x.x.x #xxx`, target, client type, языками и состоянием всех consumer; `published` ведёт ссылкой на
     точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
-12. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
+13. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
     явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
@@ -264,7 +288,7 @@ Queue watchdog ждёт назначения download job на downloader runner
 job ограничены 60 минутами, uploader — 120 минутами; их состояния и шаги видны непосредственно в
 основном run.
 
-## 9. Отмена и повторная очистка
+## 10. Отмена и повторная очистка
 
 Обычная кнопка **Cancel workflow** не должна оставлять инфраструктуру: основной cleanup использует
 `always()`, а после завершения run с branch `main` запускается отдельный `workflow_run` reconciler.
@@ -282,7 +306,7 @@ repository/run/attempt ownership-маркерами. Уже отсутствую
 ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
 перечнем незавершённых действий.
 
-## 10. Диагностика без утечки секретов
+## 11. Диагностика без утечки секретов
 
 При ошибке cleanup запрашивает serial console и выводит только очищенный хвост. Из него удаляются
 JIT-конфигурации, известные tokens/passwords и распространённые GitHub token formats. Полный console
@@ -296,5 +320,6 @@ summary, diagnostic artifact downloader и уже очищенный console tai
 
 - [GitHub: generate a JIT configuration for a repository runner](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository)
 - [GitHub: `actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
+- [GitHub: custom workflows for GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 - [Selectel: Public Network API](https://docs.selectel.ru/api/cloud-public-network/)
 - [OpenStack CLI: `server create`](https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/server.html#server-create)

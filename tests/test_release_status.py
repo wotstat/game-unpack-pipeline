@@ -11,7 +11,7 @@ from scripts.release_status import (
     ReleaseStatusError,
     load_status,
     main,
-    write_status,
+    record_run,
 )
 
 
@@ -22,26 +22,106 @@ def write_document(status_dir: Path, target: str, payload: object) -> Path:
     return path
 
 
-def test_status_round_trip_changes_only_release_name(tmp_path: Path) -> None:
-    write_document(tmp_path, "wot-eu", {"release_name": None})
+def empty_status() -> dict[str, object]:
+    return {"release_name": None, "readable_version": None, "last_run": None}
 
-    assert load_status(tmp_path, "wot-eu").release_name is None
-    assert write_status(tmp_path, "wot-eu", "2.3.1.5400") is True
-    assert load_status(tmp_path, "wot-eu").release_name == "2.3.1.5400"
-    assert json.loads((tmp_path / "wot-eu.json").read_text()) == {"release_name": "2.3.1.5400"}
-    assert write_status(tmp_path, "wot-eu", "2.3.1.5400") is False
+
+def successful_status() -> dict[str, object]:
+    return {
+        "release_name": "2.3.1.5400",
+        "readable_version": "2.3.1.3 #925",
+        "last_run": {
+            "result": "success",
+            "release_name": "2.3.1.5400",
+            "readable_version": "2.3.1.3 #925",
+            "started_at": "2026-08-29T10:00:00Z",
+            "completed_at": "2026-08-29T10:45:00Z",
+            "duration_seconds": 2700,
+            "run_id": 100,
+            "run_attempt": 1,
+            "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/100",
+        },
+    }
+
+
+def test_successful_run_updates_current_version_and_last_run(tmp_path: Path) -> None:
+    write_document(tmp_path, "wot-eu", empty_status())
+
+    changed = record_run(
+        tmp_path,
+        target="wot-eu",
+        result="success",
+        release_name="2.3.1.5400",
+        readable_version="2.3.1.3 #925",
+        started_at="2026-08-29T13:00:00+03:00",
+        completed_at="2026-08-29T10:45:00Z",
+        run_id=100,
+        run_attempt=1,
+        run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/100",
+    )
+
+    assert changed is True
+    assert json.loads((tmp_path / "wot-eu.json").read_text()) == successful_status()
+    assert load_status(tmp_path, "wot-eu").readable_version == "2.3.1.3 #925"
+    assert (
+        record_run(
+            tmp_path,
+            target="wot-eu",
+            result="success",
+            release_name="2.3.1.5400",
+            readable_version="2.3.1.3 #925",
+            started_at="2026-08-29T10:00:00Z",
+            completed_at="2026-08-29T10:45:00Z",
+            run_id=100,
+            run_attempt=1,
+            run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/100",
+        )
+        is False
+    )
+
+
+def test_failed_run_preserves_last_successful_version(tmp_path: Path) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+
+    assert record_run(
+        tmp_path,
+        target="wot-eu",
+        result="failure",
+        release_name="2.3.2.5500",
+        readable_version="2.3.2.0 #930",
+        started_at="2026-08-30T09:00:00Z",
+        completed_at="2026-08-30T09:12:03Z",
+        run_id=101,
+        run_attempt=2,
+        run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/101",
+    )
+
+    status = load_status(tmp_path, "wot-eu")
+    assert status.release_name == "2.3.1.5400"
+    assert status.readable_version == "2.3.1.3 #925"
+    assert status.last_run is not None
+    assert status.last_run.result == "failure"
+    assert status.last_run.readable_version == "2.3.2.0 #930"
+    assert status.last_run.duration_seconds == 723
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {},
-        {"release_name": None, "extra": True},
-        {"release_name": ""},
-        {"release_name": " 2.3.1.5400"},
-        {"release_name": "2.3.1\nforged=true"},
-        {"release_name": "x" * 257},
-        {"release_name": 123},
+        {"release_name": None, "readable_version": None, "last_run": None, "extra": True},
+        {"release_name": "2.3.1.5400", "readable_version": None, "last_run": None},
+        {"release_name": None, "readable_version": "2.3.1.3 #925", "last_run": None},
+        {"release_name": "", "readable_version": "2.3.1.3 #925", "last_run": None},
+        {"release_name": "2.3.1.5400", "readable_version": "v.2.3.1.3 #925", "last_run": None},
+        {"release_name": " 2.3.1.5400", "readable_version": "2.3.1.3 #925", "last_run": None},
+        {
+            "release_name": "2.3.1\nforged=true",
+            "readable_version": "2.3.1.3 #925",
+            "last_run": None,
+        },
+        {"release_name": "x" * 257, "readable_version": "2.3.1.3 #925", "last_run": None},
+        {"release_name": 123, "readable_version": "2.3.1.3 #925", "last_run": None},
         [],
     ],
 )
@@ -49,6 +129,18 @@ def test_status_reader_rejects_invalid_documents(tmp_path: Path, payload: object
     write_document(tmp_path, "wot-eu", payload)
 
     with pytest.raises(ReleaseStatusError):
+        load_status(tmp_path, "wot-eu")
+
+
+def test_status_reader_rejects_mismatched_run_url(tmp_path: Path) -> None:
+    payload = successful_status()
+    assert isinstance(payload["last_run"], dict)
+    payload["last_run"]["run_url"] = (
+        "https://github.com/wotstat/game-unpack-pipeline/actions/runs/999"
+    )
+    write_document(tmp_path, "wot-eu", payload)
+
+    with pytest.raises(ReleaseStatusError, match="run_url"):
         load_status(tmp_path, "wot-eu")
 
 
@@ -66,7 +158,7 @@ def test_status_cli_reports_validation_failure_without_recreating_file(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_repository_contains_one_minimal_status_per_target() -> None:
+def test_repository_contains_one_status_per_target() -> None:
     repository_root = Path(__file__).parents[1]
     status_dir = repository_root / "status"
 

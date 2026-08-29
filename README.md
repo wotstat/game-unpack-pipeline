@@ -3,7 +3,8 @@
 Публичный pipeline ручного скачивания, распаковки и публикации снимков клиентов World of Tanks и
 «Мира танков». Репозиторий содержит всю основную полезную нагрузку: протоколы WGUS/LSTUS,
 download/verify, распаковку VFS, readable transforms, sealed `GameSnapshot`, временную Selectel VM
-и вызов publisher workflows.
+и вызов publisher workflows. Текущее состояние и короткая история завершённых запусков публикуются
+как статическая страница GitHub Pages.
 
 ## Поток
 
@@ -15,7 +16,8 @@ workflow_dispatch
   → выбранные reusable workflows из main: wot-src, wot-gui-assets и wotstat-assets-uploader
     обрабатывают snapshot параллельно
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
-  → release name записывается в status параллельно с Telegram-отчётом
+  → результат run записывается в status параллельно с Telegram-отчётом
+  → из status и его Git-истории собирается и публикуется GitHub Pages
   → workflow_run reconciler повторно проверяет ru-7 и ru-9
 ```
 
@@ -139,11 +141,30 @@ default branch с `sd`, `ALL` и всеми тремя consumer. После за
 показывает таблицу с сохранённой и найденной версиями, результатом сравнения и действием для каждого
 выбранного target; сбои отдельных targets остаются видны отдельными строками.
 
-Каждый status-файл содержит только `release_name`; `null` означает, что успешная версия ещё не
-зафиксирована. Отсутствующий файл, неверный JSON, лишнее поле или значение другого типа блокирует
-dispatch для target. После успешных download, всех включённых publisher и cleanup основной workflow
-обновляет status в default branch. Конфигурация ручного run при этом намеренно не входит в status:
-оператор сам отвечает за завершение частичных ручных публикаций.
+Каждый status-файл хранит последнюю успешно опубликованную `release_name`, соответствующую
+`readable_version` в Telegram-формате `x.x.x.x #xxx` и описание `last_run`: результат, обе версии,
+время начала и завершения, длительность, Actions Run ID, attempt и URL. Bootstrap-значения равны
+`null`. Checker по-прежнему сравнивает только `release_name`, поэтому неудачный run не подавляет
+повторную обработку найденного релиза.
+
+После cleanup основной workflow с `always()` перезаписывает `last_run` и коммитит один региональный
+файл даже при `failure` или `cancelled`. Только полностью успешный run одновременно продвигает
+верхнеуровневые `release_name` и `readable_version`. Параллельные status-job сериализованы без
+отмены; конфигурация ручного run намеренно не входит в status.
+
+## Публичная статус-страница
+
+[`deploy-status-page.yml`](.github/workflows/deploy-status-page.yml) checkout'ит полную Git-историю,
+проверяет текущие документы, извлекает прошлые `last_run` из предыдущих версий тех же файлов и
+генерирует статический сайт через [`render_status_page.py`](scripts/render_status_page.py). На
+странице показаны текущая Telegram-version по каждому региону, состояние последнего запуска и
+короткая общая история со временем, длительностью и ссылкой на Actions run.
+
+Основной pipeline вызывает reusable Pages workflow только после успешного status commit. Это
+работает и для runs, созданных checker через repository `GITHUB_TOKEN`, для которых новый
+`workflow_run` или `push` workflow автоматически не возник бы. Отдельные `push` и
+`workflow_dispatch` triggers позволяют пересобрать страницу после изменения её кода или вручную.
+Собранный `_site` передаётся GitHub Pages только как Actions artifact и не коммитится.
 
 ## Reusable snapshot consumer workflows
 
@@ -198,10 +219,11 @@ ID. Затем GitHub Git Database API создаёт один final version com
   эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
   token-originated цепочке.
 
-Cron/schedule, внешний status store, полная история запусков и GitHub Pages не входят в текущую
-систему. Загрузка в S3 и ClickHouse пока использует временные namespaces uploader. Production S3
-assets пишутся в `wot` и `mt`, а public-test targets изолированы в `wot-test` и
-`mt-test`; uploader runs не сериализуются.
+Cron/schedule, внешний status store и retry policy не входят в текущую систему. Git-история
+региональных status-файлов является единственным источником истории страницы; отдельная база или
+накопительный log-файл не создаются. Загрузка в S3 и ClickHouse пока использует временные namespaces
+uploader. Production S3 assets пишутся в `wot` и `mt`, а public-test targets изолированы в
+`wot-test`/`mt-test`; uploader runs не сериализуются.
 
 ## Настройка и проверка
 
@@ -213,12 +235,15 @@ assets пишутся в `wot` и `mt`, а public-test targets изолиров�
 .github/actions/setup-openstack/
 .github/scripts/
 .github/workflows/check-game-releases.yml
+.github/workflows/deploy-status-page.yml
 .github/workflows/process-game-release.yml
 .github/workflows/reconcile-release-resources.yml
 contracts/v1/
 scripts/bootstrap-actions-runner.sh
 scripts/release_status.py
+scripts/render_status_page.py
 scripts/runner_lifecycle.py
+status-page/
 src/game_downloader/
 tests/
 docs/setup.md
