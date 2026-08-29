@@ -97,9 +97,9 @@ TARGET_INFO = (
     TargetInfo("wot-na", "Северная Америка", "World of Tanks"),
     TargetInfo("wot-asia", "Азия", "World of Tanks"),
     TargetInfo("wot-cn", "Китай", "World of Tanks"),
-    TargetInfo("wot-common-test", "Общий тест", "World of Tanks"),
+    TargetInfo("wot-common-test", "Общий тест WoT", "World of Tanks"),
     TargetInfo("mt-ru", "Россия", "Мир танков"),
-    TargetInfo("mt-public-test", "Общий тест", "Мир танков"),
+    TargetInfo("mt-public-test", "Общий тест МТ", "Мир танков"),
 )
 TARGET_BY_ID = {target.id: target for target in TARGET_INFO}
 
