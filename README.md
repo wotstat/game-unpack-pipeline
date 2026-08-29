@@ -199,7 +199,9 @@ ID. Затем GitHub Git Database API создаёт один final version com
   token-originated цепочке.
 
 Cron/schedule, внешний status store, полная история запусков и GitHub Pages не входят в текущую
-систему. Загрузка в S3 и ClickHouse пока использует временные namespaces uploader.
+систему. Загрузка в S3 и ClickHouse пока использует временные namespaces uploader. Production S3
+assets пишутся в `wot` и `mt`, а public-test targets изолированы в `wot-test` и
+`mt-test`; uploader runs не сериализуются.
 
 ## Настройка и проверка
 

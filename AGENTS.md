@@ -115,8 +115,9 @@ workflow или отдельный репозиторий и не перенос
   длительность run рядом со ссылкой. Reconciler отправляет recovery alert только при машинно
   подтверждённом `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
-  `cancel-in-progress: false`; uploader сериализует записи по vendor (`wot`/`mt`), потому что
-  временный S3 `latest` namespace общий для targets одного vendor.
+  `cancel-in-progress: false`. Uploader не сериализует runs: production targets пишут во временные
+  S3 namespaces `wot`/`mt`, а `wot-common-test` и `mt-public-test` изолированы в
+  `wot-test`/`mt-test`.
 
 ## Секреты и реальные операции
 
