@@ -74,8 +74,10 @@ workflow или отдельный репозиторий и не перенос
   продвигает успешную пару. Checker сравнивает только `release_name`. Status-job сериализованы общей
   non-cancelling concurrency-группой и выполняются параллельно Telegram.
 - `.github/workflows/deploy-status-page.yml` checkout'ит default branch с полной историей, строит
-  `_site` из текущих status и предыдущих версий тех же файлов и публикует GitHub Pages artifact.
-  Основной workflow вызывает его прямо после status commit, включая token-originated runs;
+  `_site` из текущих status и предыдущих версий тех же файлов, создаёт Shields endpoint для каждого
+  target и публикует GitHub Pages artifact. Бейдж показывает последнюю успешную `readable_version`,
+  а цвет — результат последнего run. Основной workflow вызывает Pages прямо после status commit,
+  включая token-originated runs;
   `push` и `workflow_dispatch` используются для изменений страницы и ручной пересборки. История не
   дублируется в накопительном JSON или отдельных run-файлах.
 - Download job реализован прямо в основном workflow и последовательно выполняет все стадии от

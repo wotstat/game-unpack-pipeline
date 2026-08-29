@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from scripts.release_status import PipelineRun, ReleaseStatus
-from scripts.render_status_page import HistoryEntry, build_site, render_page
+from scripts.render_status_page import HistoryEntry, build_site, render_badge, render_page
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 
@@ -28,6 +30,30 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     assert 'rel="canonical" href="https://wotstat.github.io/game-unpack-pipeline/"' in page
     assert (tmp_path / "styles.css").is_file()
     assert (tmp_path / ".nojekyll").is_file()
+    assert (tmp_path / "badges").is_dir()
+    assert {path.name for path in (tmp_path / "badges").iterdir()} == {
+        "mt-public-test.json",
+        "mt-ru.json",
+        "wot-asia.json",
+        "wot-cn.json",
+        "wot-common-test.json",
+        "wot-eu.json",
+        "wot-na.json",
+    }
+    assert json.loads((tmp_path / "badges/wot-eu.json").read_text()) == {
+        "schemaVersion": 1,
+        "label": "wot-eu",
+        "message": "2.3.1.3 #926",
+        "color": "brightgreen",
+        "cacheSeconds": 300,
+    }
+    assert json.loads((tmp_path / "badges/wot-na.json").read_text()) == {
+        "schemaVersion": 1,
+        "label": "wot-na",
+        "message": "no data",
+        "color": "lightgrey",
+        "cacheSeconds": 300,
+    }
 
 
 def test_page_keeps_successful_version_visible_after_failed_run() -> None:
@@ -85,6 +111,16 @@ def test_page_keeps_successful_version_visible_after_failed_run() -> None:
     assert "Публикация версии 1.45.0.0 #2300 не завершена" in page
     assert "12 мин 00 с" in page  # noqa: RUF001
     assert "actions/runs/200" in page
+    assert 'id="mt-ru"' in page
+    assert json.loads(render_badge("mt-ru", statuses["mt-ru"])) == {
+        "schemaVersion": 1,
+        "label": "mt-ru",
+        "message": "1.44.0.0 #2262",
+        "color": "red",
+        "cacheSeconds": 300,
+    }
+    cancelled_status = replace(statuses["mt-ru"], last_run=replace(failure, result="cancelled"))
+    assert json.loads(render_badge("mt-ru", cancelled_status))["color"] == "yellow"
 
 
 def test_history_distinguishes_wot_and_mt_test_targets() -> None:

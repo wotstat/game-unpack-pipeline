@@ -61,6 +61,13 @@ SHORT_MONTHS = (
 )
 
 CurrentState = Literal["success", "failure", "cancelled", "pending"]
+BADGE_COLORS: dict[CurrentState, str] = {
+    "success": "brightgreen",
+    "failure": "red",
+    "cancelled": "yellow",
+    "pending": "lightgrey",
+}
+BADGE_CACHE_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -254,6 +261,24 @@ def _current_state(status: ReleaseStatus) -> CurrentState:
     return "success" if status.release_name is not None else "pending"
 
 
+def render_badge(target: str, status: ReleaseStatus) -> str:
+    state = _current_state(status)
+    return (
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "label": target,
+                "message": status.readable_version or "no data",
+                "color": BADGE_COLORS[state],
+                "cacheSeconds": BADGE_CACHE_SECONDS,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
 def _format_date(value: datetime) -> str:
     local = value.astimezone(MOSCOW)
     return f"{local.day} {MONTHS[local.month - 1]} {local.year}, {local:%H:%M}"
@@ -348,7 +373,7 @@ def _render_product(
         updated_label = _format_short_date(updated) if updated else "ещё не запускался"
         state_label = _state_label(state)
         rows.append(
-            f"""<li class="target-row target-row--{state}">
+            f"""<li id="{target.id}" class="target-row target-row--{state}">
               <div class="target-name">
                 <strong>{target_name}</strong><code>{target.id}</code>
               </div>
@@ -495,6 +520,8 @@ def build_site(
     statuses = {target: load_status(status_dir, target) for target in TARGETS}
     history = collect_history(repository_root, statuses, limit=history_limit)
     output_dir.mkdir(parents=True, exist_ok=True)
+    badges_dir = output_dir / "badges"
+    badges_dir.mkdir(exist_ok=True)
     (output_dir / "index.html").write_text(
         render_page(
             statuses,
@@ -504,6 +531,11 @@ def build_site(
         ),
         encoding="utf-8",
     )
+    for target, status in statuses.items():
+        (badges_dir / f"{target}.json").write_text(
+            render_badge(target, status),
+            encoding="utf-8",
+        )
     shutil.copyfile(repository_root / "status-page/styles.css", output_dir / "styles.css")
     (output_dir / ".nojekyll").write_text("", encoding="utf-8")
 
