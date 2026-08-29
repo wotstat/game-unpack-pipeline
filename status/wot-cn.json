@@ -2,14 +2,14 @@
   "release_name": null,
   "readable_version": null,
   "last_run": {
-    "result": "failure",
+    "result": "cancelled",
     "release_name": null,
     "readable_version": null,
-    "started_at": "2026-08-29T23:27:30Z",
-    "completed_at": "2026-08-29T23:38:12Z",
-    "duration_seconds": 642,
+    "started_at": "2026-08-29T23:49:44Z",
+    "completed_at": "2026-08-29T23:59:55Z",
+    "duration_seconds": 611,
     "run_id": 33281021233,
-    "run_attempt": 1,
+    "run_attempt": 2,
     "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/33281021233"
   }
 }
