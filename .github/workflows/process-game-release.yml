@@ -443,9 +443,9 @@ jobs:
       expected_snapshot_id: ${{ needs.download.outputs.snapshot_id }}
       expected_descriptor_sha256: ${{ needs.download.outputs.descriptor_sha256 }}
       target: ${{ inputs.target }}
-      configuration_environment: wotstat-assets-uploader
     permissions:
       contents: read
+    secrets: inherit
 
   cleanup:
     name: Cleanup (manual-${{ github.run_id }}-${{ github.run_attempt }})

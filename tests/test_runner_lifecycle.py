@@ -453,12 +453,12 @@ class WorkflowContractTests(unittest.TestCase):
             workflow.count("secrets:\n      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"),
             2,
         )
-        self.assertNotIn("secrets: inherit", workflow)
+        self.assertEqual(workflow.count("secrets: inherit"), 1)
         self.assertFalse((ROOT / ".github/workflows/publish-snapshot.yml").exists())
         self.assertIn("publish-wot-gui-assets:", workflow)
         self.assertIn("publish-wot-src:", workflow)
         self.assertIn("publish-wotstat-assets:", workflow)
-        self.assertIn("configuration_environment: wotstat-assets-uploader", workflow)
+        self.assertNotIn("configuration_environment", workflow)
         self.assertNotIn("wotstat-assets-tmp", workflow)
         self.assertIn("notify:", workflow)
         self.assertIn("needs.cleanup.outputs.deleted_count", workflow)

@@ -121,6 +121,11 @@ Self-hosted downloader и reusable consumer jobs не используют Envir
 | `AWS_ENDPOINT_URL` |
 | `AWS_BUCKET` |
 
+Имя Environment зафиксировано в reusable workflow uploader. Caller не передаёт его как input, но
+использует `secrets: inherit`, поскольку GitHub иначе не открывает environment secrets cross-repository
+called job. Это включает project-owned workflow uploader в trusted boundary repository secrets
+caller, включая техническую доступность `GH_APP_PRIVATE_KEY`, хотя uploader его не использует.
+
 Весь набор остаётся внутри отдельного Environment и доступен только job uploader. `DATA_DIR` не
 сохраняется в Environment — основной workflow передаёт абсолютный путь к конкретному sealed snapshot
 для каждого run.

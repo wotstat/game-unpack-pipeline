@@ -161,7 +161,9 @@ checkout’ит собственный репозиторий через `job.wo
 получает выделенный JIT runner, локальный
 snapshot path, target, snapshot ID и descriptor digest. Data-репозитории выводят branch и правила
 проекции из своей конфигурации; uploader получает ClickHouse/S3 settings только из отдельного
-Environment `wotstat-assets-uploader` caller-репозитория.
+Environment `wotstat-assets-uploader` caller-репозитория. Имя Environment зафиксировано внутри
+reusable workflow, а caller использует `secrets: inherit`, чтобы called job получил его environment
+secrets.
 
 Отсутствующая data-ветка создаётся первой публикацией сразу на version commit. Существующая ветка
 обязана содержать `.publication.json`; markerless ref считается чужим состоянием и приводит к hard
@@ -182,7 +184,9 @@ ID. Затем GitHub Git Database API создаёт один final version com
   передаётся reusable publisher workflows. `SELECTEL_OS_PASSWORD` хранится только в Environment
   `selectel`; Telegram credentials — только в Environment `telegram`.
 - ClickHouse и S3 secrets/variables uploader хранятся только в Environment
-  `wotstat-assets-uploader` и доступны лишь его reusable job.
+  `wotstat-assets-uploader` и используются лишь его reusable job. Для доступа к environment secrets
+  caller передаёт `secrets: inherit`; поэтому project-owned uploader workflow входит в trusted
+  boundary всех caller secrets, хотя обращается только к своим трём credentials.
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler

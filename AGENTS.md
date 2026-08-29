@@ -82,9 +82,11 @@ workflow или отдельный репозиторий и не перенос
   cross-repository dispatch/polling или локальный универсальный publisher workflow.
 - Called workflow checkout’ит собственный код через `job.workflow_repository` и
   `job.workflow_sha`, а не default checkout caller-репозитория.
-- `wotstat-assets-uploader` получает settings через Environment `wotstat-assets-uploader` в
-  caller-репозитории. Его reusable workflow не принимает credentials через `workflow_call`,
-  использует `DATA_DIR` только из snapshot path и обязан завершаться ошибкой при сбое любого loader.
+- `wotstat-assets-uploader` получает settings через фиксированный Environment
+  `wotstat-assets-uploader` в caller-репозитории. Его reusable workflow не принимает имя
+  Environment или named credentials через `workflow_call`; caller использует `secrets: inherit`,
+  чтобы environment secrets были доступны called job. Workflow использует `DATA_DIR` только из
+  snapshot path и обязан завершаться ошибкой при сбое любого loader.
 - Отсутствующая data-ветка создаётся первой публикацией. Существующий ref без
   `.publication.json` — hard failure; bootstrap compatibility не поддерживается.
 - Изменённые Git blobs суммарно больше 1 ГБ publisher загружает bounded staging pushes, создавая
@@ -121,6 +123,8 @@ workflow или отдельный репозиторий и не перенос
 - Код, workflows, несекретная конфигурация и публикуемые данные остаются публичными.
 - `GH_APP_PRIVATE_KEY` хранится как repository-level Actions secret только в
   `game-unpack-pipeline` и явно передаётся обоим reusable publisher workflows.
+  Вызов uploader использует `secrets: inherit`, поэтому его project-owned reusable workflow также
+  входит в trusted boundary caller secrets, хотя `GH_APP_PRIVATE_KEY` не использует.
   `SELECTEL_OS_PASSWORD` хранится только в Environment `selectel`.
   `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` — только в Environment `telegram`.
 - `CLICKHOUSE_PASSWORD`, `AWS_ACCESS_KEY_ID` и `AWS_SECRET_ACCESS_KEY` uploader хранятся как
