@@ -739,6 +739,14 @@ def _format_stage_statistics(stage: StageSummary) -> str:
                 f"{ranged} striped across "
                 f"{_integer_stat(stage, 'parallel_range_segments')} HTTP ranges"
             )
+        fallbacks = _integer_stat(stage, "parallel_range_fallbacks")
+        if fallbacks:
+            fragments.append(
+                f"{fallbacks} parallel Range fallbacks on "
+                f"{_integer_stat(stage, 'parallel_range_fallback_artifacts')} artifacts "
+                f"({_format_bytes(_integer_stat(stage, 'parallel_range_discarded_bytes'))} "
+                "discarded)"
+            )
         return ", ".join(fragments)
     if stage.stage is Stage.VERIFY:
         return (

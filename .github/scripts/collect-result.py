@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from game_downloader._json import canonical_json_bytes
-from game_downloader.models import SnapshotResult, Stage, StageResult
+from game_downloader.models import DownloadResult, SnapshotResult, Stage, StageResult
 from game_downloader.pipeline import Pipeline
 from game_downloader.workspace import Workspace
 
@@ -89,8 +89,51 @@ def _number(value: object) -> float:
     return 0.0
 
 
+def _integer(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _object(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _parallel_range_fallback_report(
+    download_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    fallbacks: list[dict[str, Any]] = []
+    raw_artifacts = download_payload.get("artifacts", []) if download_payload else []
+    artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
+    for raw_item in artifacts:
+        item = _object(raw_item)
+        if item.get("reused") is True:
+            continue
+        artifact = _object(item.get("artifact"))
+        transport = _object(item.get("transport"))
+        raw_fallbacks = transport.get("parallel_range_fallbacks", [])
+        if not isinstance(raw_fallbacks, list):
+            continue
+        for raw_fallback in raw_fallbacks:
+            fallback = _object(raw_fallback)
+            fallbacks.append(
+                {
+                    "artifact_id": artifact.get("artifact_id"),
+                    "artifact_path": artifact.get("path"),
+                    "reason": fallback.get("reason"),
+                    "source_host": fallback.get("source_host"),
+                    "response_status": fallback.get("response_status"),
+                    "range_index": fallback.get("range_index"),
+                    "attempts": fallback.get("attempts"),
+                    "discarded_bytes": fallback.get("discarded_bytes"),
+                }
+            )
+    return {
+        "schema_version": 1,
+        "download_result_available": download_payload is not None,
+        "fallback_artifacts": len({item["artifact_id"] for item in fallbacks}),
+        "fallback_count": len(fallbacks),
+        "discarded_bytes": sum(_integer(item["discarded_bytes"]) for item in fallbacks),
+        "fallbacks": fallbacks,
+    }
 
 
 def _load_performance(report_dir: Path) -> tuple[dict[str, Any], ...]:
@@ -167,6 +210,19 @@ def main() -> None:
     report = Pipeline(workspace).status(run_id)
     (report_dir / "run-report.json").write_bytes(
         canonical_json_bytes(report.model_dump(mode="json"))
+    )
+
+    download_payload: dict[str, Any] | None = None
+    download_stage = next(item for item in report.stages if item.stage is Stage.DOWNLOAD)
+    if download_stage.state.value == "succeeded":
+        raw_result = workspace.read_bytes(
+            workspace.stage_path(run_id, Stage.DOWNLOAD) / "result.json"
+        )
+        stage_result = StageResult.model_validate_json(raw_result)
+        download = DownloadResult.model_validate(stage_result.payload)
+        download_payload = download.model_dump(mode="json")
+    (report_dir / "parallel-range-fallbacks.json").write_bytes(
+        canonical_json_bytes(_parallel_range_fallback_report(download_payload))
     )
 
     snapshot: SnapshotResult | None = None

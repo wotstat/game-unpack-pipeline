@@ -100,6 +100,9 @@ def _download_statistics(
     download_attempts = 0
     parallel_range_artifacts = 0
     parallel_range_segments = 0
+    parallel_range_fallback_artifacts = 0
+    parallel_range_fallbacks = 0
+    parallel_range_discarded_bytes = 0
     methods: Counter[str] = Counter()
     for item in artifacts:
         blob_size = _integer(item.get("blob_size"))
@@ -116,6 +119,14 @@ def _download_statistics(
         if segments > 1:
             parallel_range_artifacts += 1
             parallel_range_segments += segments
+        raw_fallbacks = _items(transport.get("parallel_range_fallbacks")) or []
+        fallbacks = _objects(raw_fallbacks)
+        if fallbacks:
+            parallel_range_fallback_artifacts += 1
+            parallel_range_fallbacks += len(fallbacks)
+            discarded = sum(_integer(item.get("discarded_bytes")) for item in fallbacks)
+            parallel_range_discarded_bytes += discarded
+            network_bytes_estimate += discarded
         method = _string(transport.get("method"))
         if method is not None:
             methods[method] += 1
@@ -130,6 +141,9 @@ def _download_statistics(
         "download_attempts": download_attempts,
         "parallel_range_artifacts": parallel_range_artifacts,
         "parallel_range_segments": parallel_range_segments,
+        "parallel_range_fallback_artifacts": parallel_range_fallback_artifacts,
+        "parallel_range_fallbacks": parallel_range_fallbacks,
+        "parallel_range_discarded_bytes": parallel_range_discarded_bytes,
         "web_seed_artifacts": methods["web-seed"],
         "torrent_artifacts": methods["torrent"],
     }

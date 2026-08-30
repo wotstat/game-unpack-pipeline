@@ -253,7 +253,10 @@ Consumer можно включать независимо для каждого 
 4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех четырёх runner.
 5. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
    стадии от `resolve` до `snapshot` видны отдельными Actions steps; metrics и небольшие
-   diagnostic files загружаются как artifact.
+   diagnostic files загружаются как artifact. Если отдельный большой Artifact не поддерживает
+   согласованный parallel Range, downloader удаляет только его range-state и повторяет загрузку
+   обычным HTTP stream. Остальные Artifact продолжают использовать parallel Range; причина,
+   конечный host и отброшенные байты записываются в `parallel-range-fallbacks.json`.
 6. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
    `x.x.x.x #xxx` из корневого `version.xml`, snapshot ID, абсолютный path и SHA-256 canonical
    descriptor.

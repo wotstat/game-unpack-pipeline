@@ -41,7 +41,6 @@ from game_downloader.models import (
     SplitSegment,
     TorrentDescriptorRecord,
 )
-from game_downloader.pipeline import StageExecutionError
 from game_downloader.torrent import bytes_path_from_text, parse_torrent
 from game_downloader.workspace import Workspace
 
@@ -74,6 +73,11 @@ class _FixtureServer(ThreadingHTTPServer):
     etag: str | None
     replacement_data: dict[str, bytes]
     invalid_content_range: bool
+    ignore_range_requests: bool
+    range_etag: str | None
+    advertise_ranges: bool
+    range_data: dict[str, bytes]
+    ignore_range_paths: set[str]
 
 
 class _RangeHandler(BaseHTTPRequestHandler):
@@ -83,18 +87,26 @@ class _RangeHandler(BaseHTTPRequestHandler):
         data = self.server.data[self.path]
         self.send_response(200)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Accept-Ranges", "bytes")
+        if self.server.advertise_ranges:
+            self.send_header("Accept-Ranges", "bytes")
         if self.server.etag is not None:
             self.send_header("ETag", self.server.etag)
         self.end_headers()
 
     def do_GET(self) -> None:
-        data = self.server.data[self.path]
         raw_range = self.headers.get("Range")
+        data = (
+            self.server.range_data.get(self.path, self.server.data[self.path])
+            if raw_range is not None
+            else self.server.data[self.path]
+        )
         self.server.requests.append((self.path, raw_range))
         start = 0
         end = len(data) - 1
-        if raw_range is not None:
+        ignore_range = (
+            self.server.ignore_range_requests or self.path in self.server.ignore_range_paths
+        )
+        if raw_range is not None and not ignore_range:
             assert raw_range.startswith("bytes=")
             raw_start, raw_end = raw_range.removeprefix("bytes=").split("-", maxsplit=1)
             start = int(raw_start)
@@ -108,8 +120,9 @@ class _RangeHandler(BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Accept-Ranges", "bytes")
-        if self.server.etag is not None:
-            self.send_header("ETag", self.server.etag)
+        response_etag = self.server.range_etag if raw_range is not None else self.server.etag
+        if response_etag is not None:
+            self.send_header("ETag", response_etag)
         self.end_headers()
         if self.path == self.server.disconnect_path and not self.server.did_disconnect:
             self.server.did_disconnect = True
@@ -134,6 +147,11 @@ def _http_fixture(
     etag: str | None = '"fixture-v1"',
     replacement_data: dict[str, bytes] | None = None,
     invalid_content_range: bool = False,
+    ignore_range_requests: bool = False,
+    range_etag: str | None = None,
+    advertise_ranges: bool = True,
+    range_data: dict[str, bytes] | None = None,
+    ignore_range_paths: set[str] | None = None,
 ) -> Iterator[_FixtureServer]:
     server = _FixtureServer(("127.0.0.1", 0), _RangeHandler)
     server.data = data
@@ -143,6 +161,11 @@ def _http_fixture(
     server.etag = etag
     server.replacement_data = replacement_data or {}
     server.invalid_content_range = invalid_content_range
+    server.ignore_range_requests = ignore_range_requests
+    server.range_etag = etag if range_etag is None else range_etag
+    server.advertise_ranges = advertise_ranges
+    server.range_data = range_data or {}
+    server.ignore_range_paths = ignore_range_paths or set()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -407,7 +430,220 @@ def test_download_stripes_large_artifact_across_validated_ranges(
     assert not tuple(workspace.partial_root.rglob("range-state.json"))
 
 
-def test_parallel_range_download_resumes_validated_segments_after_disconnect(
+def test_parallel_range_falls_back_when_server_ignores_bounded_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    messages: list[str] = []
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(
+        data,
+        disconnect_path=None,
+        ignore_range_requests=True,
+    ) as server:
+        plan = _plan(workspace, server)
+        monkeypatch.setattr(
+            "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                chunk_bytes=64 * 1024,
+                parallel_range_minimum_bytes=256 * 1024,
+                parallel_range_target_bytes=128 * 1024,
+                parallel_range_max_segments=4,
+            ),
+            messages.append,
+        ).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
+    assert client.transport.parallel_segments == 1
+    assert [item.model_dump(mode="json") for item in client.transport.parallel_range_fallbacks] == [
+        {
+            "reason": "range-response-not-partial",
+            "source_host": "127.0.0.1",
+            "response_status": 200,
+            "range_index": 0,
+            "attempts": 1,
+            "discarded_bytes": 0,
+        }
+    ]
+    client_requests = [header for path, header in server.requests if path == "/client.bin"]
+    assert any(header is not None for header in client_requests)
+    assert client_requests[-1] is None
+    assert any(
+        client.artifact.artifact_id in message
+        and "127.0.0.1" in message
+        and "range-response-not-partial" in message
+        and "single-stream HTTP" in message
+        for message in messages
+    )
+    assert not tuple(workspace.partial_root.rglob("range-state.json"))
+
+
+def test_parallel_range_fallback_does_not_disable_other_artifacts_on_same_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload-" * 40_000,
+        "/locale.bin": b"locale-payload",
+    }
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(
+        data,
+        disconnect_path=None,
+        ignore_range_paths={"/client.bin"},
+    ) as server:
+        plan = _plan(workspace, server)
+        monkeypatch.setattr(
+            "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                parallel_range_minimum_bytes=256 * 1024,
+                parallel_range_target_bytes=128 * 1024,
+                parallel_range_max_segments=4,
+            )
+        ).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    sd_content = next(item for item in result.artifacts if item.artifact.path.utf8 == "sd.bin")
+    assert client.transport.parallel_segments == 1
+    assert len(client.transport.parallel_range_fallbacks) == 1
+    assert sd_content.transport.parallel_segments == 4
+    assert sd_content.transport.parallel_range_fallbacks == ()
+
+
+def test_parallel_range_falls_back_when_validator_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(
+        data,
+        disconnect_path=None,
+        range_etag='"fixture-v2"',
+    ) as server:
+        plan = _plan(workspace, server)
+        monkeypatch.setattr(
+            "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                chunk_bytes=64 * 1024,
+                parallel_range_minimum_bytes=256 * 1024,
+                parallel_range_target_bytes=128 * 1024,
+                parallel_range_max_segments=4,
+            )
+        ).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
+    assert [item.reason.value for item in client.transport.parallel_range_fallbacks] == [
+        "validator-changed"
+    ]
+    assert client.transport.parallel_range_fallbacks[0].source_host == "127.0.0.1"
+    client_requests = [header for path, header in server.requests if path == "/client.bin"]
+    assert any(header is not None for header in client_requests)
+    assert client_requests[-1] is None
+    assert not tuple(workspace.partial_root.rglob("range-state.json"))
+
+
+def test_parallel_range_records_when_probe_does_not_advertise_ranges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(
+        data,
+        disconnect_path=None,
+        advertise_ranges=False,
+    ) as server:
+        plan = _plan(workspace, server)
+        monkeypatch.setattr(
+            "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                parallel_range_minimum_bytes=256 * 1024,
+                parallel_range_target_bytes=128 * 1024,
+                parallel_range_max_segments=4,
+            )
+        ).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert [item.reason.value for item in client.transport.parallel_range_fallbacks] == [
+        "range-not-advertised"
+    ]
+    assert [header for path, header in server.requests if path == "/client.bin"] == [None]
+    assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
+
+
+def test_parallel_range_hash_mismatch_retries_with_single_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    corrupt_ranges = {"/client.bin": b"broken-payload-" * 40_000}
+    assert len(corrupt_ranges["/client.bin"]) == len(data["/client.bin"])
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(
+        data,
+        disconnect_path=None,
+        range_data=corrupt_ranges,
+    ) as server:
+        plan = _plan(workspace, server)
+        monkeypatch.setattr(
+            "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                parallel_range_minimum_bytes=256 * 1024,
+                parallel_range_target_bytes=128 * 1024,
+                parallel_range_max_segments=4,
+            )
+        ).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert [item.reason.value for item in client.transport.parallel_range_fallbacks] == [
+        "payload-hash-mismatch"
+    ]
+    assert client.transport.parallel_range_fallbacks[0].discarded_bytes == len(data["/client.bin"])
+    assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
+
+
+def test_parallel_range_falls_back_after_range_retries_are_exhausted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -423,7 +659,7 @@ def test_parallel_range_download_resumes_validated_segments_after_disconnect(
         monkeypatch.setattr(
             "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
         )
-        first_policy = DownloadPolicy(
+        policy = DownloadPolicy(
             max_workers=1,
             attempts_per_url=1,
             chunk_bytes=64 * 1024,
@@ -431,22 +667,19 @@ def test_parallel_range_download_resumes_validated_segments_after_disconnect(
             parallel_range_target_bytes=128 * 1024,
             parallel_range_max_segments=4,
         )
-        with pytest.raises(StageExecutionError):
-            ArtifactDownloader(first_policy).download(plan, workspace)
-        assert tuple(workspace.partial_root.rglob("range-state.json"))
-
-        result = ArtifactDownloader(
-            first_policy.model_copy(update={"attempts_per_url": 3})
-        ).download(plan, workspace)
+        result = ArtifactDownloader(policy).download(plan, workspace)
 
     client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
-    assert client.transport.parallel_segments == 4
-    assert client.transport.resumed_from > 0
+    assert client.transport.parallel_segments == 1
+    assert [item.reason.value for item in client.transport.parallel_range_fallbacks] == [
+        "range-request-failed"
+    ]
+    assert client.transport.parallel_range_fallbacks[0].discarded_bytes > 0
     assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
     assert not tuple(workspace.partial_root.rglob("range-state.json"))
 
 
-def test_parallel_range_download_rejects_incorrect_content_range(
+def test_parallel_range_falls_back_from_incorrect_content_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -468,8 +701,16 @@ def test_parallel_range_download_rejects_incorrect_content_range(
             parallel_range_target_bytes=128 * 1024,
             parallel_range_max_segments=4,
         )
-        with pytest.raises(ArtifactCorruptError, match="invalid bounded Content-Range"):
-            ArtifactDownloader(policy).download(plan, workspace)
+        result = ArtifactDownloader(policy).download(plan, workspace)
+
+    client = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert workspace.blobs.path_for(client.blob_sha256).read_bytes() == data["/client.bin"]
+    assert [item.reason.value for item in client.transport.parallel_range_fallbacks] == [
+        "invalid-content-range"
+    ]
+    client_requests = [header for path, header in server.requests if path == "/client.bin"]
+    assert any(header is not None for header in client_requests)
+    assert client_requests[-1] is None
 
 
 def test_download_restarts_partial_without_a_source_validator(

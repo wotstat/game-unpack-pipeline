@@ -32,6 +32,8 @@ from game_downloader.models import (
     DownloadResult,
     DownloadTrace,
     FrozenModel,
+    ParallelRangeFallback,
+    ParallelRangeFallbackReason,
     SourceHash,
     SplitAssembly,
     SplitSegment,
@@ -65,7 +67,30 @@ class DownloadTooSlowError(StageExecutionError):
 
 
 class _ParallelRangeUnavailable(Exception):
-    pass
+    def __init__(self, fallback: ParallelRangeFallback) -> None:
+        self.fallback = fallback
+        super().__init__(fallback.reason.value)
+
+
+def _parallel_range_unavailable(
+    reason: ParallelRangeFallbackReason,
+    url: str,
+    *,
+    response: httpx.Response | None = None,
+    response_status: int | None = None,
+    range_index: int | None = None,
+    attempts: int = 1,
+) -> _ParallelRangeUnavailable:
+    effective_url = str(response.url) if response is not None else url
+    return _ParallelRangeUnavailable(
+        ParallelRangeFallback(
+            reason=reason,
+            source_host=(urlsplit(effective_url).hostname or urlsplit(url).hostname or "unknown"),
+            response_status=(response.status_code if response is not None else response_status),
+            range_index=range_index,
+            attempts=attempts,
+        )
+    )
 
 
 class DownloadPolicy(FrozenModel):
@@ -792,6 +817,7 @@ class ArtifactDownloader:
         initial_size = payload_path.stat().st_size if payload_path.exists() else 0
         last_error = "no web seed was attempted"
         saw_corrupt_payload = False
+        parallel_fallbacks: list[ParallelRangeFallback] = []
         if (
             payload_path.exists()
             and initial_size == artifact.size
@@ -832,7 +858,6 @@ class ArtifactDownloader:
             )
             and (not payload_path.exists() or range_state_path.exists())
         ):
-            parallel_attempted = False
             for url in artifact.source_urls:
                 self._validate_web_seed_url(url)
                 try:
@@ -846,31 +871,48 @@ class ArtifactDownloader:
                         range_executor,
                     )
                 except _ParallelRangeUnavailable as exc:
-                    parallel_attempted = True
                     last_error = str(exc)
+                    parallel_fallbacks.append(exc.fallback)
+                    self._clear_parallel_range_state(payload_path.parent)
+                    payload_path.unlink(missing_ok=True)
+                    state_path.unlink(missing_ok=True)
+                    initial_size = 0
+                    if progress is not None:
+                        progress.update(artifact.artifact_id, 0)
+                    self._progress_observer(
+                        f"Artifact {artifact.artifact_id}: parallel Range unavailable from "
+                        f"{exc.fallback.source_host} ({exc.fallback.reason.value}); "
+                        "single-stream HTTP fallback remains enabled"
+                    )
                     continue
                 if ranged is None:
                     continue
-                parallel_attempted = True
                 range_trace, range_integrity = ranged
                 if artifact.source_hash is not None and not range_integrity.source_hash_verified:
-                    saw_corrupt_payload = True
                     last_error = "parallel web seed payload failed its declared source hash"
+                    fallback = ParallelRangeFallback(
+                        reason=ParallelRangeFallbackReason.PAYLOAD_HASH_MISMATCH,
+                        source_host=(urlsplit(range_trace.final_url or url).hostname or "unknown"),
+                        attempts=range_trace.attempts,
+                        discarded_bytes=artifact.size,
+                    )
+                    parallel_fallbacks.append(fallback)
                     payload_path.unlink(missing_ok=True)
+                    state_path.unlink(missing_ok=True)
+                    initial_size = 0
                     if progress is not None:
                         progress.update(artifact.artifact_id, 0)
-                    continue
-                return range_trace, range_integrity
-            if parallel_attempted:
-                if saw_corrupt_payload:
-                    raise ArtifactCorruptError(
-                        "all complete parallel sources were corrupt for Artifact "
-                        f"{artifact.artifact_id}: {last_error}"
+                    self._progress_observer(
+                        f"Artifact {artifact.artifact_id}: parallel Range unavailable from "
+                        f"{fallback.source_host} ({fallback.reason.value}); "
+                        "single-stream HTTP fallback remains enabled"
                     )
-                raise StageExecutionError(
-                    "source_unavailable",
-                    f"Artifact {artifact.artifact_id} parallel ranges were unavailable: "
-                    f"{last_error}",
+                    continue
+                return (
+                    range_trace.model_copy(
+                        update={"parallel_range_fallbacks": tuple(parallel_fallbacks)}
+                    ),
+                    range_integrity,
                 )
         for url in artifact.source_urls:
             self._validate_web_seed_url(url)
@@ -902,7 +944,13 @@ class ArtifactDownloader:
                         progress.update(artifact.artifact_id, 0)
                     continue
                 return (
-                    trace.model_copy(update={"attempts": attempts, "resumed_from": initial_size}),
+                    trace.model_copy(
+                        update={
+                            "attempts": attempts,
+                            "resumed_from": initial_size,
+                            "parallel_range_fallbacks": tuple(parallel_fallbacks),
+                        }
+                    ),
                     integrity,
                 )
         if saw_corrupt_payload:
@@ -935,24 +983,47 @@ class ArtifactDownloader:
         try:
             probe = client.head(url)
         except (httpx.HTTPError, OSError):
-            return None
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.PROBE_FAILED,
+                url,
+            ) from None
         if probe.status_code != 200:
-            return None
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.PROBE_STATUS,
+                url,
+                response=probe,
+            )
         final_url = str(probe.url)
         if urlsplit(final_url).scheme != "https":
             raise ArtifactCorruptError("web seed redirected a range probe away from HTTPS")
         try:
             declared_size = int(probe.headers.get("content-length", ""))
         except ValueError:
-            return None
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.PROBE_LENGTH_UNAVAILABLE,
+                url,
+                response=probe,
+            ) from None
         if declared_size != artifact.size:
-            raise ArtifactCorruptError("web seed range probe returned an unexpected size")
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.PROBE_SIZE_MISMATCH,
+                url,
+                response=probe,
+            )
         if "bytes" not in probe.headers.get("accept-ranges", "").lower():
-            return None
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.RANGE_NOT_ADVERTISED,
+                url,
+                response=probe,
+            )
         etag = probe.headers.get("etag")
         last_modified = probe.headers.get("last-modified")
         if etag is None and last_modified is None:
-            return None
+            raise _parallel_range_unavailable(
+                ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE,
+                url,
+                response=probe,
+            )
         ranges = _split_byte_ranges(
             artifact.size,
             target_bytes=self._policy.parallel_range_target_bytes,
@@ -1031,6 +1102,15 @@ class ArtifactDownloader:
             ]
             try:
                 range_attempts = [future.result() for future in futures]
+            except _ParallelRangeUnavailable as exc:
+                for future in futures:
+                    future.cancel()
+                wait(futures)
+                range_progress.persist()
+                discarded_bytes = sum(range_progress.current(item.index) for item in ranges)
+                raise _ParallelRangeUnavailable(
+                    exc.fallback.model_copy(update={"discarded_bytes": discarded_bytes})
+                ) from exc
             except BaseException:
                 for future in futures:
                     future.cancel()
@@ -1064,7 +1144,7 @@ class ArtifactDownloader:
         progress: _ParallelArtifactProgress,
     ) -> int:
         attempts = 0
-        last_error = "range was not attempted"
+        last_response_status: int | None = None
         try:
             while attempts < self._policy.attempts_per_url:
                 attempts += 1
@@ -1077,15 +1157,19 @@ class ArtifactDownloader:
                 }
                 try:
                     with client.stream("GET", url, headers=headers) as response:
+                        last_response_status = response.status_code
                         if (
                             response.status_code in {404, 408, 425, 429}
                             or response.status_code >= 500
                         ):
-                            last_error = f"HTTP {response.status_code}"
                             continue
                         if response.status_code != 206:
-                            raise ArtifactCorruptError(
-                                "web seed ignored a validated bounded Range request"
+                            raise _parallel_range_unavailable(
+                                ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL,
+                                url,
+                                response=response,
+                                range_index=byte_range.index,
+                                attempts=attempts,
                             )
                         raw_range = response.headers.get("content-range", "")
                         matched = _CONTENT_RANGE.fullmatch(raw_range)
@@ -1096,8 +1180,12 @@ class ArtifactDownloader:
                             or int(matched.group("end")) != byte_range.end
                             or int(matched.group("total")) != artifact.size
                         ):
-                            raise ArtifactCorruptError(
-                                "web seed returned an invalid bounded Content-Range"
+                            raise _parallel_range_unavailable(
+                                ParallelRangeFallbackReason.INVALID_CONTENT_RANGE,
+                                url,
+                                response=response,
+                                range_index=byte_range.index,
+                                attempts=attempts,
                             )
                         if state.etag is not None:
                             validator_changed = response.headers.get("etag") != state.etag
@@ -1106,8 +1194,12 @@ class ArtifactDownloader:
                                 response.headers.get("last-modified") != state.last_modified
                             )
                         if validator_changed:
-                            raise ArtifactCorruptError(
-                                "web seed validator changed during parallel range download"
+                            raise _parallel_range_unavailable(
+                                ParallelRangeFallbackReason.VALIDATOR_CHANGED,
+                                url,
+                                response=response,
+                                range_index=byte_range.index,
+                                attempts=attempts,
                             )
                         source_host = urlsplit(str(response.url)).hostname
                         written = current_size
@@ -1116,8 +1208,12 @@ class ArtifactDownloader:
                                 chunk = received[offset : offset + self._policy.chunk_bytes]
                                 written += len(chunk)
                                 if written > byte_range.size:
-                                    raise ArtifactCorruptError(
-                                        "web seed sent more range bytes than declared"
+                                    raise _parallel_range_unavailable(
+                                        ParallelRangeFallbackReason.RANGE_LENGTH_MISMATCH,
+                                        url,
+                                        response=response,
+                                        range_index=byte_range.index,
+                                        attempts=attempts,
                                     )
                                 absolute_offset = byte_range.start + written - len(chunk)
                                 remaining = memoryview(chunk)
@@ -1133,21 +1229,19 @@ class ArtifactDownloader:
                                     len(chunk),
                                     source_host=source_host,
                                 )
-                except (httpx.HTTPError, OSError) as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
+                except (httpx.HTTPError, OSError):
                     continue
                 current_size = progress.current(byte_range.index)
                 if current_size == byte_range.size:
                     return attempts
-                last_error = (
-                    f"response ended at {current_size} of {byte_range.size} bytes for range "
-                    f"{byte_range.index}"
-                )
         finally:
             progress.persist()
-        raise _ParallelRangeUnavailable(
-            f"Artifact {artifact.artifact_id} range {byte_range.index} failed after "
-            f"{attempts} attempts: {last_error}"
+        raise _parallel_range_unavailable(
+            ParallelRangeFallbackReason.RANGE_REQUEST_FAILED,
+            url,
+            response_status=last_response_status,
+            range_index=byte_range.index,
+            attempts=attempts,
         )
 
     @staticmethod
@@ -1632,7 +1726,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v7",
+        implementation_version="resumable-download-v8",
         execute=execute,
         validate=validate,
         audit=audit,

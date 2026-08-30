@@ -71,6 +71,21 @@ class DownloadMethod(StrEnum):
     TORRENT = "torrent"
 
 
+class ParallelRangeFallbackReason(StrEnum):
+    RANGE_RESPONSE_NOT_PARTIAL = "range-response-not-partial"
+    RANGE_REQUEST_FAILED = "range-request-failed"
+    INVALID_CONTENT_RANGE = "invalid-content-range"
+    VALIDATOR_CHANGED = "validator-changed"
+    RANGE_LENGTH_MISMATCH = "range-length-mismatch"
+    PROBE_FAILED = "probe-failed"
+    PROBE_STATUS = "probe-status"
+    PROBE_LENGTH_UNAVAILABLE = "probe-length-unavailable"
+    PROBE_SIZE_MISMATCH = "probe-size-mismatch"
+    RANGE_NOT_ADVERTISED = "range-not-advertised"
+    VALIDATOR_UNAVAILABLE = "validator-unavailable"
+    PAYLOAD_HASH_MISMATCH = "payload-hash-mismatch"
+
+
 class ContainerKind(StrEnum):
     OPAQUE = "opaque"
     ZIP = "zip"
@@ -521,6 +536,18 @@ class AcquisitionPlan(FrozenModel):
         return self
 
 
+class ParallelRangeFallback(FrozenModel):
+    reason: ParallelRangeFallbackReason
+    source_host: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=253, pattern=r"^[^\s/]+$"),
+    ]
+    response_status: Annotated[int, Field(ge=100, le=599)] | None = None
+    range_index: Annotated[int, Field(ge=0, le=31)] | None = None
+    attempts: Annotated[int, Field(ge=1)] = 1
+    discarded_bytes: Annotated[int, Field(ge=0)] = 0
+
+
 class DownloadTrace(FrozenModel):
     method: DownloadMethod
     requested_url: Annotated[str, StringConstraints(min_length=1)] | None = None
@@ -531,6 +558,7 @@ class DownloadTrace(FrozenModel):
     resumed_from: Annotated[int, Field(ge=0)] = 0
     attempts: Annotated[int, Field(ge=1)] = 1
     parallel_segments: Annotated[int, Field(ge=1, le=32)] = 1
+    parallel_range_fallbacks: tuple[ParallelRangeFallback, ...] = ()
 
     @model_validator(mode="after")
     def web_seed_has_urls(self) -> DownloadTrace:

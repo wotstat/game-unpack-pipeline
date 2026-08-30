@@ -11,6 +11,8 @@ from game_downloader.models import (
     DownloadMethod,
     DownloadResult,
     DownloadTrace,
+    ParallelRangeFallback,
+    ParallelRangeFallbackReason,
     PartName,
     Stage,
 )
@@ -30,6 +32,7 @@ def _downloaded_artifact(
     resumed_from: int = 0,
     attempts: int = 1,
     parallel_segments: int = 1,
+    parallel_range_fallbacks: tuple[ParallelRangeFallback, ...] = (),
 ) -> DownloadedArtifact:
     blob_sha256 = hashlib.sha256(f"blob:{name}".encode()).hexdigest()
     artifact = AcquisitionArtifact(
@@ -57,6 +60,7 @@ def _downloaded_artifact(
             resumed_from=resumed_from,
             attempts=attempts,
             parallel_segments=parallel_segments,
+            parallel_range_fallbacks=parallel_range_fallbacks,
         ),
     )
 
@@ -69,6 +73,15 @@ def test_download_statistics_separate_network_cache_and_resume_bytes() -> None:
         resumed_from=20,
         attempts=2,
         parallel_segments=4,
+        parallel_range_fallbacks=(
+            ParallelRangeFallback(
+                reason=ParallelRangeFallbackReason.VALIDATOR_CHANGED,
+                source_host="cdn.invalid",
+                response_status=206,
+                range_index=2,
+                discarded_bytes=30,
+            ),
+        ),
     )
     reused = _downloaded_artifact("reused.bin", size=200, reused=True)
     result = DownloadResult(
@@ -88,16 +101,19 @@ def test_download_statistics_separate_network_cache_and_resume_bytes() -> None:
         "artifacts": 2,
         "payload_bytes": 300,
         "fetched_artifacts": 1,
-        "network_bytes_estimate": 80,
+        "network_bytes_estimate": 110,
         "reused_artifacts": 1,
         "reused_bytes": 200,
         "resumed_bytes": 20,
         "download_attempts": 2,
         "parallel_range_artifacts": 1,
         "parallel_range_segments": 4,
+        "parallel_range_fallback_artifacts": 1,
+        "parallel_range_fallbacks": 1,
+        "parallel_range_discarded_bytes": 30,
         "web_seed_artifacts": 1,
         "torrent_artifacts": 0,
-        "network_bytes_per_second": 8.0,
+        "network_bytes_per_second": 11.0,
     }
 
 
