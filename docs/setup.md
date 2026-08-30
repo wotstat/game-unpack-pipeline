@@ -199,13 +199,11 @@ ClickHouse и S3 в Pages workflow недоступны.
 Стандартный URL проекта после первого deployment:
 `https://wotstat.github.io/game-unpack-pipeline/`.
 
-## 7. Scheduled smoke и ручная проверка новых версий
+## 7. Автоматическая и ручная проверка новых версий
 
-На текущем диагностическом этапе `Cron check game releases` запускается каждые пять минут по
-расписанию `*/5 * * * *` и выполняет только `Hello world`. У него нет ручного trigger, inputs и
-permissions; он не проверяет releases и не запускает основной pipeline. После подтверждённого
-scheduled run в него планируется перенести автоматическую проверку всех семи targets с обязательным
-dispatch, но этот этап пока не реализован.
+Workflow автоматически запускается каждый час по расписанию `23 * * * *`: в `00:23`,
+`01:23`, ... UTC. Scheduled run проверяет все семь targets и dispatch'ит основной pipeline для
+найденных новых версий.
 
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
