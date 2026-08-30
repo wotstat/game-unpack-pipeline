@@ -481,14 +481,23 @@ def render_page(
     {canonical}
     <title>WOTSTAT – Unpack status</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="theme.js" defer></script>
   </head>
   <body>
+    <button class="theme-toggle" type="button">
+      <span class="theme-icon" aria-hidden="true"></span>
+      <span class="theme-label">Тёмная</span>
+    </button>
+    <div class="theme-transition-scope">
     <header class="repo-header">
       <a class="repo-name" href="{escaped_repository_url}"
         aria-label="Репозиторий wotstat/game-unpack-pipeline">
         {_github_icon()}<span>wotstat/<strong>game-unpack-pipeline</strong></span>
       </a>
-      <span class="public-label">публичный статус</span>
+      <div class="header-actions">
+        <span class="public-label">публичный статус</span>
+        <span class="theme-toggle-slot" aria-hidden="true"></span>
+      </div>
     </header>
     <main class="status-layout">
       <div class="current-status">
@@ -510,6 +519,7 @@ def render_page(
       </aside>
     </main>
     <footer>Состояние формируется из файлов репозитория · история — из их Git-коммитов</footer>
+    </div>
   </body>
 </html>
 """
@@ -544,6 +554,7 @@ def build_site(
             encoding="utf-8",
         )
     shutil.copyfile(repository_root / "status-page/styles.css", output_dir / "styles.css")
+    shutil.copyfile(repository_root / "status-page/theme.js", output_dir / "theme.js")
     (output_dir / ".nojekyll").write_text("", encoding="utf-8")
 
 

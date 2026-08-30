@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from scripts.release_status import PipelineRun, ReleaseStatus
+from scripts.release_status import TARGETS, PipelineRun, ReleaseStatus, load_status
 from scripts.render_status_page import HistoryEntry, build_site, render_badge, render_page
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
@@ -26,9 +26,13 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     assert "Общий тест WoT" in page
     assert "Общий тест МТ" in page  # noqa: RUF001
     assert "#33258764585" in page
-    assert "Статус неполный" in page
+    assert 'class="overall overall--' in page
+    assert 'class="theme-toggle"' in page
+    assert 'class="theme-transition-scope"' in page
+    assert 'src="theme.js"' in page
     assert 'rel="canonical" href="https://wotstat.github.io/game-unpack-pipeline/"' in page
     assert (tmp_path / "styles.css").is_file()
+    assert (tmp_path / "theme.js").is_file()
     assert (tmp_path / ".nojekyll").is_file()
     assert (tmp_path / "badges").is_dir()
     assert {path.name for path in (tmp_path / "badges").iterdir()} == {
@@ -40,20 +44,9 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
         "wot-eu.json",
         "wot-na.json",
     }
-    assert json.loads((tmp_path / "badges/wot-eu.json").read_text()) == {
-        "schemaVersion": 1,
-        "label": "wot-eu",
-        "message": "2.3.1.3 #926",
-        "color": "brightgreen",
-        "cacheSeconds": 300,
-    }
-    assert json.loads((tmp_path / "badges/wot-na.json").read_text()) == {
-        "schemaVersion": 1,
-        "label": "wot-na",
-        "message": "no data",
-        "color": "lightgrey",
-        "cacheSeconds": 300,
-    }
+    for target in TARGETS:
+        expected = json.loads(render_badge(target, load_status(REPOSITORY_ROOT / "status", target)))
+        assert json.loads((tmp_path / f"badges/{target}.json").read_text()) == expected
 
 
 def test_page_keeps_successful_version_visible_after_failed_run() -> None:

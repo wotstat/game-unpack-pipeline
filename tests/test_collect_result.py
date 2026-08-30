@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import runpy
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -44,7 +44,7 @@ class _ResolveTransport:
             )
         )
 
-    def get(self, host: str, path: str, params: dict[str, str]) -> TransportResponse:
+    def get(self, host: str, path: str, params: Mapping[str, str]) -> TransportResponse:
         del params
         return TransportResponse(
             status_code=200,
