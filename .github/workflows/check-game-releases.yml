@@ -1,14 +1,11 @@
 name: Check game releases
 run-name: >-
   Release check ·
-  ${{ github.event_name == 'schedule' && 'scheduled dispatch'
-      || inputs.dispatch_pipelines && 'manual dispatch'
+  ${{ inputs.dispatch_pipelines && 'manual dispatch'
       || 'dry-run' }}
   · @${{ github.actor }}
 
 on:
-  schedule:
-    - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
       check_wot_eu:
@@ -70,15 +67,13 @@ jobs:
       - name: Build target matrix
         id: targets
         env:
-          CHECK_MT_PUBLIC_TEST: >-
-            ${{ github.event_name == 'schedule' || inputs.check_mt_public_test }}
-          CHECK_MT_RU: ${{ github.event_name == 'schedule' || inputs.check_mt_ru }}
-          CHECK_WOT_ASIA: ${{ github.event_name == 'schedule' || inputs.check_wot_asia }}
-          CHECK_WOT_CN: ${{ github.event_name == 'schedule' || inputs.check_wot_cn }}
-          CHECK_WOT_COMMON_TEST: >-
-            ${{ github.event_name == 'schedule' || inputs.check_wot_common_test }}
-          CHECK_WOT_EU: ${{ github.event_name == 'schedule' || inputs.check_wot_eu }}
-          CHECK_WOT_NA: ${{ github.event_name == 'schedule' || inputs.check_wot_na }}
+          CHECK_MT_PUBLIC_TEST: ${{ inputs.check_mt_public_test }}
+          CHECK_MT_RU: ${{ inputs.check_mt_ru }}
+          CHECK_WOT_ASIA: ${{ inputs.check_wot_asia }}
+          CHECK_WOT_CN: ${{ inputs.check_wot_cn }}
+          CHECK_WOT_COMMON_TEST: ${{ inputs.check_wot_common_test }}
+          CHECK_WOT_EU: ${{ inputs.check_wot_eu }}
+          CHECK_WOT_NA: ${{ inputs.check_wot_na }}
         run: |
           set -Eeuo pipefail
           selected=()
@@ -184,7 +179,7 @@ jobs:
         if: >-
           steps.compare.outputs.mismatch == 'true' &&
           steps.compare.outputs.retry_blocked != 'true' &&
-          (github.event_name == 'schedule' || inputs.dispatch_pipelines)
+          inputs.dispatch_pipelines
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
@@ -218,7 +213,7 @@ jobs:
         if: >-
           steps.compare.outputs.mismatch == 'true' &&
           steps.compare.outputs.retry_blocked != 'true' &&
-          (github.event_name == 'schedule' || inputs.dispatch_pipelines) &&
+          inputs.dispatch_pipelines &&
           steps.active.outputs.found == 'false'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -247,8 +242,7 @@ jobs:
           COMPARE_OUTCOME: ${{ steps.compare.outcome }}
           CURRENT_RELEASE_NAME: ${{ steps.compare.outputs.release_name }}
           DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
-          DISPATCH_PIPELINES: >-
-            ${{ github.event_name == 'schedule' || inputs.dispatch_pipelines }}
+          DISPATCH_PIPELINES: ${{ inputs.dispatch_pipelines }}
           MISMATCH: ${{ steps.compare.outputs.mismatch }}
           RETRY_BLOCKED: ${{ steps.compare.outputs.retry_blocked }}
           STORED_RELEASE_NAME: ${{ steps.compare.outputs.stored_release_name }}
@@ -348,8 +342,7 @@ jobs:
 
       - name: Render release check report
         env:
-          DISPATCH_PIPELINES: >-
-            ${{ github.event_name == 'schedule' || inputs.dispatch_pipelines }}
+          DISPATCH_PIPELINES: ${{ inputs.dispatch_pipelines }}
           PLAN_RESULT: ${{ needs.plan.result }}
           RESULTS_DIR: ${{ runner.temp }}/release-check-results
           TARGETS: ${{ needs.plan.outputs.targets || '[]' }}

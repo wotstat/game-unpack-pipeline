@@ -7,19 +7,23 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/check-game-releases.yml"
+CRON_WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/cron-check-game-releases.yml"
 
 
 def workflow() -> dict[Any, Any]:
     return cast(dict[Any, Any], yaml.safe_load(WORKFLOW_PATH.read_text()))
 
 
-def test_release_checker_runs_hourly_and_keeps_safe_manual_defaults() -> None:
+def cron_workflow() -> dict[Any, Any]:
+    return cast(dict[Any, Any], yaml.safe_load(CRON_WORKFLOW_PATH.read_text()))
+
+
+def test_release_checker_is_manual_only_and_keeps_safe_defaults() -> None:
     document = workflow()
     trigger = document[True]
     inputs = trigger["workflow_dispatch"]["inputs"]
 
-    assert set(trigger) == {"schedule", "workflow_dispatch"}
-    assert trigger["schedule"] == [{"cron": "23 * * * *"}]
+    assert set(trigger) == {"workflow_dispatch"}
     assert set(inputs) == {
         "check_wot_eu",
         "check_wot_na",
@@ -33,6 +37,21 @@ def test_release_checker_runs_hourly_and_keeps_safe_manual_defaults() -> None:
     assert inputs["check_wot_eu"]["default"] is True
     assert all(item["default"] is False for name, item in inputs.items() if name != "check_wot_eu")
     assert all(item["type"] == "boolean" for item in inputs.values())
+
+
+def test_cron_release_checker_is_a_schedule_only_smoke_workflow() -> None:
+    document = cron_workflow()
+    trigger = document[True]
+
+    assert trigger == {"schedule": [{"cron": "*/5 * * * *"}]}
+    assert document["permissions"] == {}
+    assert set(document["jobs"]) == {"hello-world"}
+    assert document["jobs"]["hello-world"] == {
+        "name": "Hello world",
+        "runs-on": "ubuntu-latest",
+        "timeout-minutes": 5,
+        "steps": [{"name": "Hello world", "run": 'echo "Hello world"'}],
+    }
 
 
 def test_release_checker_builds_a_parallel_fail_slow_matrix() -> None:
@@ -54,7 +73,8 @@ def test_release_checker_builds_a_parallel_fail_slow_matrix() -> None:
         assert f"selected+=({target})" in matrix_script
     assert "targets='[]'" in matrix_script
     assert "--compact-output" in matrix_script
-    assert all("github.event_name == 'schedule'" in value for value in matrix_env.values())
+    assert all("inputs." in value for value in matrix_env.values())
+    assert all("github.event_name" not in value for value in matrix_env.values())
     assert check["strategy"]["fail-fast"] is False
     assert check["strategy"]["matrix"]["target"] == ("${{ fromJSON(needs.plan.outputs.targets) }}")
     assert check["permissions"] == {"actions": "write", "contents": "read"}
@@ -73,13 +93,13 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert "manual-retry-required" in compare["run"]
     assert "action=would-dispatch" in compare["run"]
     assert "inputs.dispatch_pipelines" in active["if"]
-    assert "github.event_name == 'schedule'" in active["if"]
+    assert "github.event_name" not in active["if"]
     assert "steps.compare.outputs.retry_blocked != 'true'" in active["if"]
     assert '.status != "completed"' in active["run"]
     assert "actions/workflows/process-game-release.yml/runs" in active["run"]
     assert 'prefix="Release · ${TARGET} · "' in active["run"]
     assert "steps.active.outputs.found == 'false'" in dispatch["if"]
-    assert "github.event_name == 'schedule'" in dispatch["if"]
+    assert "github.event_name" not in dispatch["if"]
     assert "steps.compare.outputs.retry_blocked != 'true'" in dispatch["if"]
     assert "gh workflow run process-game-release.yml" in dispatch["run"]
     assert '--ref "${DEFAULT_BRANCH}"' in dispatch["run"]

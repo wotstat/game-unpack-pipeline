@@ -9,10 +9,12 @@ download/verify, распаковку VFS, readable transforms, sealed `GameSnap
 ## Поток
 
 ```text
-schedule каждые два часа на :23 UTC
-  → lightweight-проверка всех targets
-  → для новых версий workflow_dispatch основного pipeline
-workflow_dispatch
+schedule каждые пять минут
+  → изолированный Hello world для проверки GitHub scheduler
+ручной Check game releases
+  → lightweight-проверка выбранных targets
+  → при включённом dispatch запуск основного pipeline для новых версий
+Process game release workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
   → локальный systemd kill switch удаляет VM после четырёх часов
   → четыре изолированных repository-level JIT runner на этой VM
@@ -133,15 +135,17 @@ HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7
 
 ## Проверка новых версий
 
-[`check-game-releases.yml`](../.github/workflows/check-game-releases.yml) — отдельный checker с
-автоматическим расписанием `23 * * * *` и ручным `workflow_dispatch`. Он не скачивает клиент:
-для каждого выбранного target lightweight probe запрашивает WGUS/LSTUS metadata и один patches
-chain для объявленной default language, затем сравнивает `release_name` с [`status`](../status).
+[`check-game-releases.yml`](../.github/workflows/check-game-releases.yml) — отдельный ручной checker.
+Он не скачивает клиент: для каждого выбранного target lightweight probe запрашивает WGUS/LSTUS
+metadata и один patches chain для объявленной default language, затем сравнивает `release_name` с
+[`status`](../status). Форма сохраняет семь независимых whitelist-чекбоксов: по умолчанию включён
+только `wot-eu`, а `dispatch_pipelines` выключен, поэтому запуск остаётся безопасным dry-run.
 
-Scheduled run каждый час проверяет все семь targets и автоматически dispatch'ит основной
-pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов: по
-умолчанию включён только `wot-eu`, а `dispatch_pipelines` выключен, поэтому он остаётся безопасным
-dry-run.
+[`cron-check-game-releases.yml`](../.github/workflows/cron-check-game-releases.yml) временно отделён
+от checker и запускает только `Hello world` каждые пять минут. У него нет ручного trigger, inputs и
+write permissions. Этот smoke-тест проверяет сам факт создания scheduled run; автоматическая
+проверка всех targets и dispatch основного pipeline будут перенесены в него только после успешного
+наблюдения и пока не реализованы.
 
 При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же
 target. Если последняя завершённая попытка той же `release_name` уже имеет результат `failure` или
@@ -255,12 +259,13 @@ ID. Затем GitHub Git Database API создаёт один final version com
   эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
   token-originated цепочке.
 
-Checker запускается по cron каждые два часа без отдельной telemetry задержек schedule. Автоматическая
-повторная попытка той же неуспешной `release_name` подавляется; отдельного backoff или retry scheduler
-нет. Внешний status store отсутствует: Git-история региональных status-файлов является единственным
-источником истории страницы, отдельная база или накопительный log-файл не создаются. Загрузка в S3
-и ClickHouse пока использует временные namespaces uploader. Production S3 assets пишутся в `wot` и
-`mt`, а public-test targets изолированы в `wot-test`/`mt-test`; uploader runs не сериализуются.
+Scheduled smoke запускается каждые пять минут без отдельной telemetry задержек schedule. Ручной
+checker подавляет автоматическую повторную попытку той же неуспешной `release_name`; отдельного
+backoff или retry scheduler нет. Внешний status store отсутствует: Git-история региональных
+status-файлов является единственным источником истории страницы, отдельная база или накопительный
+log-файл не создаются. Загрузка в S3 и ClickHouse пока использует временные namespaces uploader.
+Production S3 assets пишутся в `wot` и `mt`, а public-test targets изолированы в `wot-test`/
+`mt-test`; uploader runs не сериализуются.
 
 ## Настройка и проверка
 
@@ -272,6 +277,7 @@ Checker запускается по cron каждые два часа без о�
 .github/actions/setup-openstack/
 .github/scripts/
 .github/workflows/check-game-releases.yml
+.github/workflows/cron-check-game-releases.yml
 .github/workflows/deploy-status-page.yml
 .github/workflows/process-game-release.yml
 .github/workflows/reconcile-release-resources.yml
