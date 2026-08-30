@@ -1,7 +1,35 @@
 (() => {
-  const params = new URLSearchParams(window.location.search);
+  const storageKey = "wotstat-status-theme";
   const transitionDuration = 620;
-  let theme = params.get("theme") === "light" ? "light" : "dark";
+
+  function loadTheme() {
+    try {
+      const storedTheme = window.localStorage.getItem(storageKey);
+      if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
+    } catch {
+      // Storage may be unavailable in restricted browsing modes.
+    }
+    return new URL(window.location.href).searchParams.get("theme") === "light"
+      ? "light"
+      : "dark";
+  }
+
+  function removeLegacyThemeParameter() {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("theme")) return;
+    url.searchParams.delete("theme");
+    window.history.replaceState(window.history.state, "", url);
+  }
+
+  function saveTheme(savedTheme) {
+    try {
+      window.localStorage.setItem(storageKey, savedTheme);
+    } catch {
+      // Theme switching still works when persistence is unavailable.
+    }
+  }
+
+  let theme = loadTheme();
   let requestedTheme = theme;
 
   const root = document.documentElement;
@@ -17,12 +45,6 @@
     ? "element-native"
     : "css-fallback";
 
-  function updateUrl() {
-    const url = new URL(window.location.href);
-    url.searchParams.set("theme", theme);
-    window.history.replaceState({}, "", url);
-  }
-
   function applyThemeButton(buttonTheme) {
     themeButton.dataset.theme = buttonTheme;
     themeLabel.textContent = buttonTheme === "dark" ? "Тёмная" : "Светлая";
@@ -37,7 +59,7 @@
     root.style.colorScheme = theme;
     applyThemeButton(theme);
     themeColor.content = theme === "dark" ? "#0b0d10" : "#ffffff";
-    updateUrl();
+    saveTheme(theme);
   }
 
   async function runFallback(nextTheme, originX, originY, radius, sequence) {
@@ -147,6 +169,7 @@
     }
   }
 
+  removeLegacyThemeParameter();
   themeButton.addEventListener("click", toggleTheme);
   applyTheme();
 })();
