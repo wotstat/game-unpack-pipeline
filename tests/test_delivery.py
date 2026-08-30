@@ -47,12 +47,38 @@ from game_downloader.workspace import Workspace
 FIXTURES = Path(__file__).parent / "fixtures/torrent"
 
 
-def test_download_policy_detects_near_stalls_over_two_minutes() -> None:
+def test_download_policy_detects_near_stalls_over_five_minutes() -> None:
     policy = DownloadPolicy()
 
-    assert MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND == 5 * 1024 * 1024
-    assert policy.minimum_throughput_bytes_per_second == 5 * 1024 * 1024
-    assert policy.minimum_throughput_window_seconds == 120.0
+    assert MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND == 1024 * 1024
+    assert policy.minimum_throughput_bytes_per_second == 1024 * 1024
+    assert policy.minimum_throughput_window_seconds == 300.0
+
+
+def test_default_progress_tolerates_five_mib_tail_for_five_minutes() -> None:
+    now = [0.0]
+    policy = DownloadPolicy()
+    progress = _DownloadProgress(
+        {"artifact": 2 * 1024 * 1024 * 1024},
+        {},
+        lambda _message: None,
+        interval_seconds=60,
+        percent_step=10,
+        minimum_throughput_bytes_per_second=(policy.minimum_throughput_bytes_per_second),
+        minimum_throughput_window_seconds=policy.minimum_throughput_window_seconds,
+        clock=lambda: now[0],
+    )
+    bytes_per_second = int(4.986 * 1024 * 1024)
+
+    for minute in range(1, 6):
+        now[0] = minute * 60
+        transferred = bytes_per_second * 60
+        progress.update(
+            "artifact",
+            minute * transferred,
+            transferred,
+            source_host="cdn.example.test",
+        )
 
 
 def _digest(value: str) -> str:

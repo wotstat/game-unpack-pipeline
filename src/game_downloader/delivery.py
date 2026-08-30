@@ -53,7 +53,7 @@ from game_downloader.workspace import (
 _CONTENT_RANGE = re.compile(r"^bytes (?P<start>[0-9]+)-(?P<end>[0-9]+)/(?P<total>[0-9]+)$")
 _ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 _SEVEN_ZIP_MAGIC = b"7z\xbc\xaf'\x1c"
-MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND = 5 * 1024 * 1024
+MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND = 1024 * 1024
 
 
 class InsufficientDiskError(StageExecutionError):
@@ -108,7 +108,7 @@ class DownloadPolicy(FrozenModel):
         default=MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND,
         ge=0,
     )
-    minimum_throughput_window_seconds: float = Field(default=120.0, ge=10.0, le=900.0)
+    minimum_throughput_window_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
     parallel_range_minimum_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     parallel_range_target_bytes: int = Field(default=128 * 1024 * 1024, ge=64 * 1024)
     parallel_range_max_segments: int = Field(default=16, ge=2, le=32)
@@ -1726,7 +1726,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v8",
+        implementation_version="resumable-download-v9",
         execute=execute,
         validate=validate,
         audit=audit,

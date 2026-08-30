@@ -257,6 +257,8 @@ Consumer можно включать независимо для каждого 
    согласованный parallel Range, downloader удаляет только его range-state и повторяет загрузку
    обычным HTTP stream. Остальные Artifact продолжают использовать parallel Range; причина,
    конечный host и отброшенные байты записываются в `parallel-range-fallbacks.json`.
+   Aggregate near-stall watchdog прерывает download только если скорость остаётся ниже `1 MiB/s`
+   в течение пяти минут; отдельный HTTP read без данных по-прежнему ограничен 60 секундами.
 6. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
    `x.x.x.x #xxx` из корневого `version.xml`, snapshot ID, абсолютный path и SHA-256 canonical
    descriptor.
