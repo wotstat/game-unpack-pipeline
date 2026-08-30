@@ -110,6 +110,24 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("🗄 <code>wotstat-assets-uploader</code> — not started", message)
         self.assertIn("run?a=1&amp;b=2", message)
 
+    def test_failure_report_uses_detected_release_when_readable_version_is_unavailable(
+        self,
+    ) -> None:
+        message = render_message(
+            {
+                "PIPELINE_RESULT": "failure",
+                "TARGET": "wot-common-test",
+                "READABLE_VERSION": "",
+                "RELEASE_NAME": "2.4.0.5415",
+                "CLIENT_TYPE": "sd",
+                "LANGUAGES": "ALL",
+                "PIPELINE_RUN_URL": "https://github.com/example/run",
+            }
+        )
+
+        self.assertIn("<b>❌ WoT Common Test · 2.4.0.5415</b>", message)
+        self.assertNotIn("version unavailable", message)
+
     def test_report_places_end_to_end_duration_next_to_run_link(self) -> None:
         message = render_message(
             {

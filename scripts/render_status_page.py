@@ -59,6 +59,20 @@ SHORT_MONTHS = (
     "ноя",
     "дек",
 )
+BADGE_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
 
 CurrentState = Literal["success", "failure", "cancelled", "pending"]
 BADGE_COLORS: dict[CurrentState, str] = {
@@ -97,6 +111,13 @@ class HistoryEntry:
     run_attempt: int | None
     run_url: str | None
     legacy: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseCheck:
+    completed_at: datetime
+    conclusion: str
+    run_url: str
 
 
 TARGET_INFO = (
@@ -279,6 +300,35 @@ def render_badge(target: str, status: ReleaseStatus) -> str:
     )
 
 
+def render_release_check_badge(release_check: ReleaseCheck | None) -> str:
+    if release_check is None:
+        message = "no data"
+        color = "lightgrey"
+    else:
+        local = release_check.completed_at.astimezone(MOSCOW)
+        message = f"{local.day} {BADGE_MONTHS[local.month - 1]} {local:%H:%M} MSK"
+        if release_check.conclusion == "success":
+            color = "brightgreen"
+        elif release_check.conclusion == "cancelled":
+            color = "yellow"
+        else:
+            color = "red"
+    return (
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "label": "release check",
+                "message": message,
+                "color": color,
+                "cacheSeconds": BADGE_CACHE_SECONDS,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
 def _format_date(value: datetime) -> str:
     local = value.astimezone(MOSCOW)
     return f"{local.day} {MONTHS[local.month - 1]} {local.year}, {local:%H:%M}"
@@ -309,6 +359,19 @@ def _target_last_updated(
     if status.last_run is not None:
         return _parse_timestamp(status.last_run.completed_at)
     return next((entry.completed_at for entry in history if entry.target == target), None)
+
+
+def _target_last_activity(
+    target: str,
+    status: ReleaseStatus,
+    history: tuple[HistoryEntry, ...],
+) -> tuple[datetime, str | None] | None:
+    if status.last_run is not None:
+        return _parse_timestamp(status.last_run.completed_at), status.last_run.run_url
+    entry = next((entry for entry in history if entry.target == target), None)
+    if entry is None:
+        return None
+    return entry.completed_at, entry.run_url
 
 
 def _state_label(state: CurrentState) -> str:
@@ -448,22 +511,37 @@ def render_page(
     *,
     repository_url: str,
     site_url: str,
+    release_check: ReleaseCheck | None = None,
 ) -> str:
     states = tuple(_current_state(statuses[target.id]) for target in TARGET_INFO)
     title, description, overall_state = _overall_copy(states)
-    updates = [
-        updated
+    activities = [
+        activity
         for target in TARGET_INFO
-        if (updated := _target_last_updated(target.id, statuses[target.id], history)) is not None
+        if (activity := _target_last_activity(target.id, statuses[target.id], history)) is not None
     ]
-    last_updated = max(updates) if updates else None
+    last_activity = max(activities, key=lambda item: item[0]) if activities else None
     canonical = (
         f'<link rel="canonical" href="{html.escape(site_url.rstrip("/") + "/", quote=True)}" />'
         if site_url
         else ""
     )
     history_url = f"{repository_url.rstrip('/')}/commits/main/status"
-    updated_label = _format_date(last_updated) + " МСК" if last_updated else "ещё не было"
+    if last_activity is None:
+        updated_label = "ещё не было"
+    else:
+        updated_at, updated_run_url = last_activity
+        updated_text = _format_date(updated_at) + " МСК"
+        updated_label = (
+            f'<a href="{html.escape(updated_run_url, quote=True)}">{updated_text}</a>'
+            if updated_run_url
+            else updated_text
+        )
+    if release_check is None:
+        check_label = "ещё не было"
+    else:
+        check_text = _format_date(release_check.completed_at) + " МСК"
+        check_label = f'<a href="{html.escape(release_check.run_url, quote=True)}">{check_text}</a>'
     escaped_repository_url = html.escape(repository_url, quote=True)
     escaped_history_url = html.escape(history_url, quote=True)
     return f"""<!doctype html>
@@ -505,7 +583,10 @@ def render_page(
           <p class="eyebrow">Состояние публикаций</p>
           <h1>{html.escape(title[:-1])}<span>.</span></h1>
           <p>{html.escape(description)}</p>
-          <div><span>Последнее обновление</span><strong>{updated_label}</strong></div>
+          <div class="overall-meta">
+            <div><span>Последнее обновление</span><strong>{updated_label}</strong></div>
+            <div><span>Последняя проверка</span><strong>{check_label}</strong></div>
+          </div>
         </section>
         {_render_product("World of Tanks", statuses, history)}
         {_render_product("Мир танков", statuses, history)}
@@ -518,7 +599,7 @@ def render_page(
         <a class="history-link" href="{escaped_history_url}">Вся история →</a>
       </aside>
     </main>
-    <footer>Состояние формируется из файлов репозитория · история — из их Git-коммитов</footer>
+    <footer>Публикации и история — из Git · последняя проверка — из GitHub Actions</footer>
     </div>
   </body>
 </html>
@@ -532,6 +613,7 @@ def build_site(
     history_limit: int,
     repository_url: str,
     site_url: str,
+    release_check: ReleaseCheck | None = None,
 ) -> None:
     status_dir = repository_root / "status"
     statuses = {target: load_status(status_dir, target) for target in TARGETS}
@@ -545,6 +627,7 @@ def build_site(
             history,
             repository_url=repository_url,
             site_url=site_url,
+            release_check=release_check,
         ),
         encoding="utf-8",
     )
@@ -553,6 +636,10 @@ def build_site(
             render_badge(target, status),
             encoding="utf-8",
         )
+    (badges_dir / "release-check.json").write_text(
+        render_release_check_badge(release_check),
+        encoding="utf-8",
+    )
     shutil.copyfile(repository_root / "status-page/styles.css", output_dir / "styles.css")
     shutil.copyfile(repository_root / "status-page/theme.js", output_dir / "theme.js")
     (output_dir / ".nojekyll").write_text("", encoding="utf-8")
@@ -565,6 +652,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--history-limit", type=int, default=12)
     parser.add_argument("--repository-url", default=DEFAULT_REPOSITORY_URL)
     parser.add_argument("--site-url", default="")
+    parser.add_argument("--release-check-completed-at", default="")
+    parser.add_argument("--release-check-conclusion", default="")
+    parser.add_argument("--release-check-run-url", default="")
     return parser
 
 
@@ -572,12 +662,31 @@ def main() -> None:
     arguments = _parser().parse_args()
     if arguments.history_limit < 1 or arguments.history_limit > 100:
         raise SystemExit("--history-limit must be between 1 and 100")
+    release_check_values = (
+        arguments.release_check_completed_at,
+        arguments.release_check_conclusion,
+        arguments.release_check_run_url,
+    )
+    if any(release_check_values) and not all(release_check_values):
+        raise SystemExit("release check metadata must be provided together")
+    release_check = None
+    if all(release_check_values):
+        try:
+            completed_at = _parse_timestamp(arguments.release_check_completed_at)
+        except ValueError as error:
+            raise SystemExit(f"invalid release check completion time: {error}") from error
+        release_check = ReleaseCheck(
+            completed_at=completed_at,
+            conclusion=arguments.release_check_conclusion,
+            run_url=arguments.release_check_run_url,
+        )
     build_site(
         arguments.repository_root.resolve(),
         arguments.output_dir.resolve(),
         history_limit=arguments.history_limit,
         repository_url=arguments.repository_url,
         site_url=arguments.site_url,
+        release_check=release_check,
     )
 
 

@@ -10,7 +10,7 @@ from game_downloader.models import STAGE_ORDER
 REPOSITORY_ROOT = Path(__file__).parents[1]
 
 
-def _workflow() -> dict[str, Any]:
+def _workflow() -> dict[Any, Any]:
     return cast(
         dict[str, Any],
         yaml.safe_load(
@@ -47,6 +47,17 @@ def test_downloader_is_internal_to_the_primary_workflow() -> None:
         "${{ needs.provision.outputs.downloader_runner_label }}",
     ]
     assert "game-snapshot-builder" not in workflow_path.read_text()
+
+
+def test_detected_release_name_is_an_optional_internal_dispatch_hint() -> None:
+    detected = _workflow()[True]["workflow_dispatch"]["inputs"]["detected_release_name"]
+
+    assert detected == {
+        "description": "Optional release detected by Check game releases",
+        "required": False,
+        "default": "",
+        "type": "string",
+    }
 
 
 def test_download_job_exports_sealed_snapshot_identity() -> None:
@@ -97,6 +108,9 @@ def test_every_completed_pipeline_records_status_in_default_branch() -> None:
     update = next(step for step in job["steps"] if step["name"] == "Update pipeline status")
     commit = next(step for step in job["steps"] if step["name"] == "Commit pipeline status")
     assert "scripts/release_status.py record" in update["run"]
+    assert update["env"]["RELEASE_NAME"] == (
+        "${{ needs.download.outputs.version_name || inputs.detected_release_name }}"
+    )
     assert '--readable-version "${READABLE_VERSION}"' in update["run"]
     assert '--run-url "${RUN_URL}"' in update["run"]
     assert 'git add -- "status/${TARGET}.json"' in commit["run"]
@@ -119,6 +133,7 @@ def test_status_page_deploy_runs_after_status_commit() -> None:
     assert "needs.record-status.result == 'success'" in job["if"]
     assert job["uses"] == "./.github/workflows/deploy-status-page.yml"
     assert job["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "id-token": "write",
         "pages": "write",

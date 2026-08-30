@@ -64,17 +64,23 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     dispatch = next(step for step in steps if step["name"] == "Dispatch game release pipeline")
 
     assert "game-downloader probe-release" in compare["run"]
-    assert "scripts/release_status.py read" in compare["run"]
+    assert "scripts/release_status.py compare" in compare["run"]
+    assert "--current-release-name" in compare["run"]
+    assert ".retry_blocked" in compare["run"]
+    assert "manual-retry-required" in compare["run"]
     assert "action=would-dispatch" in compare["run"]
     assert "inputs.dispatch_pipelines" in active["if"]
+    assert "steps.compare.outputs.retry_blocked != 'true'" in active["if"]
     assert '.status != "completed"' in active["run"]
     assert "actions/workflows/process-game-release.yml/runs" in active["run"]
     assert 'prefix="Release · ${TARGET} · "' in active["run"]
     assert "steps.active.outputs.found == 'false'" in dispatch["if"]
+    assert "steps.compare.outputs.retry_blocked != 'true'" in dispatch["if"]
     assert "gh workflow run process-game-release.yml" in dispatch["run"]
     assert '--ref "${DEFAULT_BRANCH}"' in dispatch["run"]
     assert "--field client_type=sd" in dispatch["run"]
     assert "--field languages=ALL" in dispatch["run"]
+    assert '--field detected_release_name="${RELEASE_NAME}"' in dispatch["run"]
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]
     assert "--field publish_wotstat_assets=true" in dispatch["run"]
@@ -107,3 +113,29 @@ def test_release_checker_collects_matrix_results_into_one_report() -> None:
     assert download["uses"] == "actions/download-artifact@v8.0.1"
     assert download["with"]["merge-multiple"] is True
     assert "render_release_check_report.py" in render["run"]
+
+
+def test_release_checker_deploys_status_page_with_ephemeral_check_metadata() -> None:
+    jobs = workflow()["jobs"]
+    report = jobs["report"]
+    deploy = jobs["deploy-status-page"]
+    metadata = next(
+        step for step in report["steps"] if step["name"] == "Capture release check metadata"
+    )
+
+    assert "completed_at" in report["outputs"]
+    assert "date -u" in metadata["run"]
+    assert "actions/runs/${GITHUB_RUN_ID}" in metadata["run"]
+    assert deploy["needs"] == "report"
+    assert deploy["uses"] == "./.github/workflows/deploy-status-page.yml"
+    assert deploy["with"] == {
+        "release_check_completed_at": "${{ needs.report.outputs.completed_at }}",
+        "release_check_conclusion": "${{ needs.report.outputs.conclusion }}",
+        "release_check_run_url": "${{ needs.report.outputs.run_url }}",
+    }
+    assert deploy["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "id-token": "write",
+        "pages": "write",
+    }

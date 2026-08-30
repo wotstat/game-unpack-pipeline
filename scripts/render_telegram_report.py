@@ -99,6 +99,7 @@ def _publication_line(
 def render_message(environment: Mapping[str, str]) -> str:
     pipeline_result = environment.get("PIPELINE_RESULT", "failure")
     readable_version = environment.get("READABLE_VERSION", "").strip()
+    release_name = environment.get("RELEASE_NAME", "").strip()
     if pipeline_result == "success" and not readable_version:
         pipeline_result = "warning"
 
@@ -109,7 +110,7 @@ def render_message(environment: Mapping[str, str]) -> str:
     }.get(pipeline_result, "❌")
     target = environment.get("TARGET", "unknown")
     target_label = TARGET_LABELS.get(target, target)
-    version_label = readable_version or "version unavailable"
+    version_label = readable_version or release_name or "version unavailable"
     client_type = environment.get("CLIENT_TYPE", "unknown").strip().upper()
     languages = _languages(environment.get("LANGUAGES", "")) or "unknown"
 

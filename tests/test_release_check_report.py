@@ -106,3 +106,22 @@ def test_report_handles_failed_plan_and_empty_selection(tmp_path: Path) -> None:
         targets=[],
         dispatch_pipelines=False,
     )
+
+
+def test_report_marks_failed_release_as_requiring_manual_retry(tmp_path: Path) -> None:
+    _write_result(
+        tmp_path,
+        target="wot-eu",
+        stored_release_name="2.3.1.5412",
+        current_release_name="2.4.0.5500",
+        state="update_available",
+        action="manual_retry_required",
+    )
+
+    report = render_report(
+        results_dir=tmp_path,
+        targets=["wot-eu"],
+        dispatch_pipelines=True,
+    )
+
+    assert "🛑 Manual retry required" in report

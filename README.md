@@ -8,6 +8,8 @@
 [![mt-ru status](https://img.shields.io/endpoint?url=https%3A%2F%2Fwotstat.github.io%2Fgame-unpack-pipeline%2Fbadges%2Fmt-ru.json)](https://wotstat.github.io/game-unpack-pipeline/#mt-ru)
 [![mt-public-test status](https://img.shields.io/endpoint?url=https%3A%2F%2Fwotstat.github.io%2Fgame-unpack-pipeline%2Fbadges%2Fmt-public-test.json)](https://wotstat.github.io/game-unpack-pipeline/#mt-public-test)
 
+[![release check](https://img.shields.io/endpoint?url=https%3A%2F%2Fwotstat.github.io%2Fgame-unpack-pipeline%2Fbadges%2Frelease-check.json)](https://wotstat.github.io/game-unpack-pipeline/)
+
 Этот проект отслеживает новые версии клиентов World of Tanks и «Мира танков». Когда
 проверка обнаруживает обновление, pipeline скачивает клиент, распаковывает его и публикует
 полученные данные в открытых репозиториях.

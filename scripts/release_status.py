@@ -78,6 +78,22 @@ class ReleaseStatus:
         }
 
 
+@dataclass(frozen=True)
+class ReleaseComparison:
+    stored_release_name: str | None
+    current_release_name: str
+    mismatch: bool
+    retry_blocked: bool
+
+    def as_json(self) -> dict[str, str | bool | None]:
+        return {
+            "stored_release_name": self.stored_release_name,
+            "current_release_name": self.current_release_name,
+            "mismatch": self.mismatch,
+            "retry_blocked": self.retry_blocked,
+        }
+
+
 def _valid_release_name(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -254,6 +270,30 @@ def _write_status(status_dir: Path, target: str, status: ReleaseStatus) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def compare_release(
+    status_dir: Path,
+    *,
+    target: str,
+    current_release_name: str,
+) -> ReleaseComparison:
+    if not _valid_release_name(current_release_name):
+        raise ReleaseStatusError("current_release_name has an invalid value")
+    current = load_status(status_dir, target)
+    mismatch = current.release_name != current_release_name
+    retry_blocked = bool(
+        mismatch
+        and current.last_run is not None
+        and current.last_run.result != "success"
+        and current.last_run.release_name == current_release_name
+    )
+    return ReleaseComparison(
+        stored_release_name=current.release_name,
+        current_release_name=current_release_name,
+        mismatch=mismatch,
+        retry_blocked=retry_blocked,
+    )
+
+
 def record_run(
     status_dir: Path,
     *,
@@ -317,6 +357,12 @@ def _parser() -> argparse.ArgumentParser:
     read = subparsers.add_parser("read", help="Validate and print one status document")
     read.add_argument("--target", choices=TARGETS, required=True)
 
+    compare = subparsers.add_parser(
+        "compare", help="Compare a detected release with publication and attempt status"
+    )
+    compare.add_argument("--target", choices=TARGETS, required=True)
+    compare.add_argument("--current-release-name", required=True)
+
     record = subparsers.add_parser("record", help="Record one completed pipeline run")
     record.add_argument("--target", choices=TARGETS, required=True)
     record.add_argument("--result", choices=PIPELINE_RESULTS, required=True)
@@ -336,6 +382,13 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "read":
             status = load_status(arguments.status_dir, arguments.target)
             print(json.dumps(status.as_json(), ensure_ascii=False, separators=(",", ":")))
+        elif arguments.command == "compare":
+            comparison = compare_release(
+                arguments.status_dir,
+                target=arguments.target,
+                current_release_name=arguments.current_release_name,
+            )
+            print(json.dumps(comparison.as_json(), ensure_ascii=False, separators=(",", ":")))
         else:
             changed = record_run(
                 arguments.status_dir,

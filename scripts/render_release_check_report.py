@@ -24,6 +24,7 @@ ACTION_LABELS = {
     "none": "—",
     "dry_run": "🧪 Dry run",
     "already_running": "⏳ Already running",
+    "manual_retry_required": "🛑 Manual retry required",
     "dispatched": "🚀 Dispatched",
     "check_failed": "—",
     "active_check_failed": "❌ Active-run check failed",

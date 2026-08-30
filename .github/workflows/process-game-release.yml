@@ -30,6 +30,11 @@ on:
         required: true
         default: ALL
         type: string
+      detected_release_name:
+        description: Optional release detected by Check game releases
+        required: false
+        default: ""
+        type: string
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
@@ -570,7 +575,7 @@ jobs:
         env:
           PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
           READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
-          RELEASE_NAME: ${{ needs.download.outputs.version_name }}
+          RELEASE_NAME: ${{ needs.download.outputs.version_name || inputs.detected_release_name }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -598,13 +603,14 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
           READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
+          RELEASE_NAME: ${{ needs.download.outputs.version_name || inputs.detected_release_name }}
           TARGET: ${{ inputs.target }}
         run: |
           set -Eeuo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "status/${TARGET}.json"
-          version="${READABLE_VERSION:-version unavailable}"
+          version="${READABLE_VERSION:-${RELEASE_NAME:-version unavailable}}"
           git commit -m "Record ${TARGET} ${PIPELINE_RESULT}: ${version}"
           git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"
 
@@ -613,6 +619,7 @@ jobs:
     if: always() && needs.record-status.result == 'success'
     needs: record-status
     permissions:
+      actions: read
       contents: read
       id-token: write
       pages: write
@@ -685,6 +692,7 @@ jobs:
           PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
           TARGET: ${{ inputs.target }}
           READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
+          RELEASE_NAME: ${{ needs.download.outputs.version_name || inputs.detected_release_name }}
           CLIENT_TYPE: ${{ inputs.client_type }}
           LANGUAGES: ${{ inputs.languages }}
           PROVISION_RESULT: ${{ needs.provision.result }}

@@ -149,23 +149,33 @@ jobs:
           current="$(jq -er '.release_name | select(type == "string" and length > 0)' \
             <<<"${current_json}")"
           echo "release_name=${current}" >>"${GITHUB_OUTPUT}"
-          stored_json="$(python3 scripts/release_status.py read --target "${TARGET}")"
-          stored="$(jq -r 'if .release_name == null then "null" else .release_name end' \
-            <<<"${stored_json}")"
+          comparison_json="$(python3 scripts/release_status.py compare \
+            --target "${TARGET}" \
+            --current-release-name "${current}")"
+          stored="$(jq -r \
+            'if .stored_release_name == null then "null" else .stored_release_name end' \
+            <<<"${comparison_json}")"
           echo "stored_release_name=${stored}" >>"${GITHUB_OUTPUT}"
-          echo "stored_release_name_is_null=$(jq -r '.release_name == null' \
-            <<<"${stored_json}")" >>"${GITHUB_OUTPUT}"
-          if [[ "${stored}" == "${current}" ]]; then
-            echo "mismatch=false" >>"${GITHUB_OUTPUT}"
+          echo "stored_release_name_is_null=$(jq -r '.stored_release_name == null' \
+            <<<"${comparison_json}")" >>"${GITHUB_OUTPUT}"
+          mismatch="$(jq -r '.mismatch' <<<"${comparison_json}")"
+          retry_blocked="$(jq -r '.retry_blocked' <<<"${comparison_json}")"
+          echo "mismatch=${mismatch}" >>"${GITHUB_OUTPUT}"
+          echo "retry_blocked=${retry_blocked}" >>"${GITHUB_OUTPUT}"
+          if [[ "${mismatch}" == false ]]; then
             echo "${TARGET}: stored=${stored}, current=${current}, action=none"
+          elif [[ "${retry_blocked}" == true ]]; then
+            echo "${TARGET}: stored=${stored}, current=${current}, action=manual-retry-required"
           else
-            echo "mismatch=true" >>"${GITHUB_OUTPUT}"
             echo "${TARGET}: stored=${stored}, current=${current}, action=would-dispatch"
           fi
 
       - name: Check for an active pipeline
         id: active
-        if: steps.compare.outputs.mismatch == 'true' && inputs.dispatch_pipelines
+        if: >-
+          steps.compare.outputs.mismatch == 'true' &&
+          steps.compare.outputs.retry_blocked != 'true' &&
+          inputs.dispatch_pipelines
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
@@ -198,6 +208,7 @@ jobs:
         id: dispatch
         if: >-
           steps.compare.outputs.mismatch == 'true' &&
+          steps.compare.outputs.retry_blocked != 'true' &&
           inputs.dispatch_pipelines &&
           steps.active.outputs.found == 'false'
         env:
@@ -212,6 +223,7 @@ jobs:
             --field target="${TARGET}" \
             --field client_type=sd \
             --field languages=ALL \
+            --field detected_release_name="${RELEASE_NAME}" \
             --field publish_wot_src=true \
             --field publish_wot_gui_assets=true \
             --field publish_wotstat_assets=true
@@ -228,6 +240,7 @@ jobs:
           DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
           DISPATCH_PIPELINES: ${{ inputs.dispatch_pipelines }}
           MISMATCH: ${{ steps.compare.outputs.mismatch }}
+          RETRY_BLOCKED: ${{ steps.compare.outputs.retry_blocked }}
           STORED_RELEASE_NAME: ${{ steps.compare.outputs.stored_release_name }}
           STORED_RELEASE_NAME_IS_NULL: ${{ steps.compare.outputs.stored_release_name_is_null }}
           TARGET: ${{ matrix.target }}
@@ -244,6 +257,9 @@ jobs:
             if [[ "${MISMATCH}" == false ]]; then
               state=up_to_date
               action=none
+            elif [[ "${RETRY_BLOCKED}" == true ]]; then
+              state=update_available
+              action=manual_retry_required
             elif [[ "${MISMATCH}" == true && "${DISPATCH_PIPELINES}" != true ]]; then
               state=update_available
               action=dry_run
@@ -300,6 +316,11 @@ jobs:
       - check
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      completed_at: ${{ steps.metadata.outputs.completed_at }}
+      conclusion: ${{ steps.metadata.outputs.conclusion }}
+      has_targets: ${{ steps.metadata.outputs.has_targets }}
+      run_url: ${{ steps.metadata.outputs.run_url }}
     steps:
       - name: Check out latest default branch
         uses: actions/checkout@v7.0.1
@@ -322,3 +343,43 @@ jobs:
           RESULTS_DIR: ${{ runner.temp }}/release-check-results
           TARGETS: ${{ needs.plan.outputs.targets || '[]' }}
         run: python3 scripts/render_release_check_report.py
+
+      - name: Capture release check metadata
+        id: metadata
+        if: always()
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          TARGETS: ${{ needs.plan.outputs.targets || '[]' }}
+        run: |
+          set -Eeuo pipefail
+          conclusion=success
+          if [[ "${PLAN_RESULT}" != success \
+            || ( "${CHECK_RESULT}" != success && "${CHECK_RESULT}" != skipped ) ]]; then
+            conclusion=failure
+          fi
+          has_targets="$(jq -r 'length > 0' <<<"${TARGETS}")"
+          {
+            echo "completed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "conclusion=${conclusion}"
+            echo "has_targets=${has_targets}"
+            echo "run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >>"${GITHUB_OUTPUT}"
+
+  deploy-status-page:
+    name: Deploy public status page
+    if: >-
+      always() &&
+      needs.report.result == 'success' &&
+      needs.report.outputs.has_targets == 'true'
+    needs: report
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+    uses: ./.github/workflows/deploy-status-page.yml
+    with:
+      release_check_completed_at: ${{ needs.report.outputs.completed_at }}
+      release_check_conclusion: ${{ needs.report.outputs.conclusion }}
+      release_check_run_url: ${{ needs.report.outputs.run_url }}

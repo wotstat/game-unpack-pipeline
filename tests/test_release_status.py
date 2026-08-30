@@ -9,6 +9,7 @@ from game_downloader.wgus import TargetRegistry
 from scripts.release_status import (
     TARGETS,
     ReleaseStatusError,
+    compare_release,
     load_status,
     main,
     record_run,
@@ -103,6 +104,49 @@ def test_failed_run_preserves_last_successful_version(tmp_path: Path) -> None:
     assert status.last_run.result == "failure"
     assert status.last_run.readable_version == "2.3.2.0 #930"
     assert status.last_run.duration_seconds == 723
+
+
+@pytest.mark.parametrize("result", ["failure", "cancelled"])
+def test_release_comparison_blocks_automatic_retry_of_failed_release(
+    tmp_path: Path,
+    result: str,
+) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    record_run(
+        tmp_path,
+        target="wot-eu",
+        result=result,
+        release_name="2.3.2.5500",
+        readable_version=None,
+        started_at="2026-08-30T09:00:00Z",
+        completed_at="2026-08-30T09:12:03Z",
+        run_id=101,
+        run_attempt=1,
+        run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/101",
+    )
+
+    failed = compare_release(
+        tmp_path,
+        target="wot-eu",
+        current_release_name="2.3.2.5500",
+    )
+    newer = compare_release(
+        tmp_path,
+        target="wot-eu",
+        current_release_name="2.3.3.5600",
+    )
+    published = compare_release(
+        tmp_path,
+        target="wot-eu",
+        current_release_name="2.3.1.5400",
+    )
+
+    assert failed.mismatch is True
+    assert failed.retry_blocked is True
+    assert newer.mismatch is True
+    assert newer.retry_blocked is False
+    assert published.mismatch is False
+    assert published.retry_blocked is False
 
 
 @pytest.mark.parametrize(

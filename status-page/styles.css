@@ -310,15 +310,24 @@ html[data-theme-transition="running"] footer {
   line-height: 1.5;
 }
 
-.overall > div {
+.overall-meta {
   display: flex;
-  gap: 14px;
+  gap: 28px;
   color: var(--muted);
   font-size: 12px;
 }
 
-.overall > div strong {
+.overall-meta > div {
+  display: flex;
+  gap: 8px;
+}
+
+.overall-meta strong {
   color: var(--ink);
+}
+
+.overall-meta a:hover {
+  color: var(--link);
 }
 
 .product-group {
@@ -635,7 +644,7 @@ footer {
     padding-top: 46px;
   }
 
-  .overall > div {
+  .overall-meta {
     flex-direction: column;
     gap: 4px;
   }

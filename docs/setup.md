@@ -202,7 +202,9 @@ ClickHouse и S3 в Pages workflow недоступны.
 
 - `action=none` — release name совпадает со status;
 - `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;
-- `action=already-running` — для target уже есть ожидающий или работающий pipeline.
+- `action=already-running` — для target уже есть ожидающий или работающий pipeline;
+- `action=manual-retry-required` — эта же release name уже завершилась неуспешно и повторяется
+  только прямым ручным запуском основного workflow.
 
 Итоговый job `Release check report` собирает результаты всех выбранных targets в одну таблицу Job
 Summary: сохранённый и найденный release name, результат сравнения и фактическое действие checker.
@@ -211,13 +213,14 @@ Summary: сохранённый и найденный release name, резуль
 При `dispatch_pipelines: true` отличающиеся targets запускаются параллельно через основной workflow
 на default branch с фиксированными `client_type: sd`, `languages: ALL` и всеми тремя consumer. Ошибка
 одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
-красным.
+красным. После отчёта checker напрямую пересобирает Pages artifact с кликабельным временем проверки;
+status-коммит для этого не создаётся.
 
-Status-файлы находятся в `status/<target>.json`. Checker читает из расширенного документа только
-верхнеуровневый `release_name`: bootstrap `null` является валидным несовпадением, а отсутствующий или
-повреждённый файл блокирует target. `readable_version` и `last_run` нужны странице и не участвуют в
-сравнении. Lightweight probe выполняет только запрос metadata и один patches chain для default
-language, не создавая workspace и не скачивая клиент.
+Status-файлы находятся в `status/<target>.json`. Checker сравнивает найденную версию с
+верхнеуровневой успешной `release_name`, а `last_run.release_name` использует только для подавления
+повтора `failure` или `cancelled`. Bootstrap `null` является валидным несовпадением, а отсутствующий
+или повреждённый файл блокирует target. Lightweight probe выполняет только запрос metadata и один
+patches chain для default language, не создавая workspace и не скачивая клиент.
 
 ## 8. Ручная обработка игрового релиза
 
@@ -230,6 +233,7 @@ language, не создавая workspace и не скачивая клиент.
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
+| `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
 | `publish_wotstat_assets` | `true` |
@@ -274,16 +278,20 @@ Consumer можно включать независимо для каждого 
 10. После cleanup `Record pipeline status` с `always()` перезаписывает `last_run` в
     `status/<target>.json` и коммитит результат, время, длительность и ссылку на Actions run в
     default branch. При полном успехе он также обновляет `release_name` и `readable_version`
-    `x.x.x.x #xxx`; при ошибке последняя успешная версия остаётся прежней, поэтому checker сможет
-    повторить релиз. Если `resolve` успел завершиться, его `release_name` остаётся в `last_run` даже
-    при сбое загрузки; точная `readable_version` появляется только после чтения `version.xml` из
-    готового snapshot. Параллельные status-job сериализуются и не отменяют друг друга.
-11. `Deploy public status page` после status commit читает текущие файлы и их полную Git-историю,
-    собирает `_site` и публикует Pages artifact. История не хранится отдельным массивом или набором
-    файлов: каждый status commit становится одной записью временной шкалы.
+    `x.x.x.x #xxx`; при ошибке последняя успешная версия остаётся прежней, а та же неуспешная версия
+    автоматически больше не запускается. Если run создан checker, переданная им
+    `detected_release_name` сохраняется даже при ошибке до `resolve`; точная `readable_version`
+    появляется только после чтения `version.xml` из готового snapshot. Параллельные status-job
+    сериализуются и не отменяют друг друга.
+11. `Deploy public status page` после status commit читает текущие файлы, их полную Git-историю и
+    метаданные последнего завершённого checker run, затем собирает `_site` и публикует Pages artifact.
+    Время проверки не коммитится; checker сам вызывает тот же Pages workflow после своего отчёта.
+    История pipeline не хранится отдельным массивом или набором файлов: каждый status commit становится
+    одной записью временной шкалы.
 12. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
-    `x.x.x.x #xxx`, target, client type, языками и состоянием всех consumer; `published` ведёт ссылкой на
-    точный commit, а `ALL` сохраняется в заголовке буквально. Полная длительность run от
+    `x.x.x.x #xxx` или переданной release name при ранней ошибке, target, client type, языками и
+    состоянием всех consumer; `published` ведёт ссылкой на точный commit, а `ALL` сохраняется в
+    заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 13. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run

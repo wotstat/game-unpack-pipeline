@@ -2,6 +2,22 @@ name: Deploy status page
 
 on:
   workflow_call:
+    inputs:
+      release_check_completed_at:
+        description: Completion time supplied by the calling release checker
+        required: false
+        default: ""
+        type: string
+      release_check_conclusion:
+        description: Conclusion supplied by the calling release checker
+        required: false
+        default: ""
+        type: string
+      release_check_run_url:
+        description: Run URL supplied by the calling release checker
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
   push:
     branches:
@@ -23,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       pages: write
     steps:
@@ -36,6 +53,62 @@ jobs:
         id: pages
         uses: actions/configure-pages@v6.0.0
 
+      - name: Resolve latest release check
+        id: release-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVIDED_COMPLETED_AT: ${{ inputs.release_check_completed_at }}
+          PROVIDED_CONCLUSION: ${{ inputs.release_check_conclusion }}
+          PROVIDED_RUN_URL: ${{ inputs.release_check_run_url }}
+        run: |
+          set -Eeuo pipefail
+          completed_at="${PROVIDED_COMPLETED_AT}"
+          conclusion="${PROVIDED_CONCLUSION}"
+          run_url="${PROVIDED_RUN_URL}"
+          provided=0
+          [[ -n "${completed_at}" ]] && ((provided += 1))
+          [[ -n "${conclusion}" ]] && ((provided += 1))
+          [[ -n "${run_url}" ]] && ((provided += 1))
+          if ((provided != 0 && provided != 3)); then
+            echo "Incomplete release check metadata from caller" >&2
+            exit 1
+          fi
+
+          if ((provided == 0)); then
+            runs="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/check-game-releases.yml/runs" \
+              -f event=workflow_dispatch \
+              -f status=completed \
+              -f per_page=1)"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"${runs}")"
+            if [[ -n "${run_id}" ]]; then
+              run_url="$(jq -r '.workflow_runs[0].html_url // empty' <<<"${runs}")"
+              jobs="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
+                -f filter=latest \
+                -f per_page=100)"
+              conclusion="$(jq -r '
+                [.jobs[] | select(.name == "Select targets" or (.name | startswith("Check ")))]
+                | if length == 0
+                  or any(.[]; .conclusion != "success" and .conclusion != "skipped")
+                  then "failure"
+                  else "success"
+                  end' <<<"${jobs}")"
+              completed_at="$(jq -r '
+                [.jobs[] | select(.name == "Release check report") | .completed_at]
+                | map(select(. != null)) | last // empty' <<<"${jobs}")"
+              if [[ -z "${completed_at}" ]]; then
+                completed_at="$(jq -r '.workflow_runs[0].updated_at // empty' <<<"${runs}")"
+              fi
+            fi
+          fi
+
+          {
+            echo "completed_at=${completed_at}"
+            echo "conclusion=${conclusion}"
+            echo "run_url=${run_url}"
+          } >>"${GITHUB_OUTPUT}"
+
       - name: Render status page
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
@@ -43,6 +116,9 @@ jobs:
           python3 scripts/render_status_page.py
           --output-dir _site
           --site-url "${SITE_URL}"
+          --release-check-completed-at "${{ steps.release-check.outputs.completed_at }}"
+          --release-check-conclusion "${{ steps.release-check.outputs.conclusion }}"
+          --release-check-run-url "${{ steps.release-check.outputs.run_url }}"
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5.0.0
