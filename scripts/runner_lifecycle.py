@@ -23,11 +23,14 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
+EMERGENCY_SELF_DESTRUCT_AFTER = timedelta(hours=4)
+EMERGENCY_CREDENTIAL_RETRY_GRACE = timedelta(hours=1)
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 UUID_RE = re.compile(
     r"^(?:[0-9a-fA-F]{32}|"
@@ -88,6 +91,10 @@ class ResourceIdentity:
         return f"{self.base_name}-sg"
 
     @property
+    def emergency_credential_name(self) -> str:
+        return f"{self.base_name}-self-destruct"
+
+    @property
     def scope_label(self) -> str:
         return f"gup-run-{self.run_id}-{self.run_attempt}"
 
@@ -97,6 +104,10 @@ class ResourceIdentity:
             f"{PIPELINE_MARKER};repository={self.repository};run_id={self.run_id};"
             f"run_attempt={self.run_attempt};instance_key={self.instance_key}"
         )
+
+    @property
+    def emergency_credential_description(self) -> str:
+        return f"{self.descriptor};purpose=emergency-self-destruct"
 
     def runner(self, role: str) -> RunnerIdentity:
         name = f"{self.base_name}-{role}"
@@ -249,6 +260,7 @@ def run_command(
     environment: Mapping[str, str] | None = None,
     check: bool = True,
     timeout: int = 180,
+    sensitive_values: Iterable[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
@@ -263,7 +275,7 @@ def run_command(
         raise LifecycleError(f"Could not run {command[0]}: {error}") from error
 
     if check and result.returncode != 0:
-        details = sanitized(result.stderr.strip() or result.stdout.strip())
+        details = sanitized(result.stderr.strip() or result.stdout.strip(), sensitive_values)
         raise LifecycleError(
             f"Command {shlex.join(command[:4])} failed with {result.returncode}: {details}"
         )
@@ -276,12 +288,14 @@ def openstack(
     *,
     check: bool = True,
     timeout: int = 180,
+    sensitive_values: Iterable[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     return run_command(
         ["openstack", *arguments],
         environment=config.openstack_environment(),
         check=check,
         timeout=timeout,
+        sensitive_values=sensitive_values,
     )
 
 
@@ -592,9 +606,25 @@ def create_jit_runner(identity: RunnerIdentity, app_token: str) -> tuple[str, st
     return runner_id, jit_config
 
 
+def emergency_schedule(now: datetime | None = None) -> tuple[datetime, datetime]:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise LifecycleError("emergency schedule requires a timezone-aware timestamp")
+    deadline = (current.astimezone(UTC) + EMERGENCY_SELF_DESTRUCT_AFTER).replace(microsecond=0)
+    return deadline, deadline + EMERGENCY_CREDENTIAL_RETRY_GRACE
+
+
+def encoded_cloud_file(content: str) -> str:
+    return base64.b64encode(content.encode("utf-8")).decode("ascii")
+
+
 def render_cloud_config(
     template: str,
     *,
+    emergency_auth_url: str,
+    emergency_deadline: datetime,
+    emergency_region: str,
+    emergency_script: str,
     runner_download_url: str,
     runner_sha256: str,
     runner_version: str,
@@ -620,7 +650,41 @@ def render_cloud_config(
         for name, value in assignments.items()
     )
     bootstrap = f"#!/usr/bin/env bash\n{preamble}\n{template}"
-    encoded = base64.b64encode(bootstrap.encode("utf-8")).decode("ascii")
+    if emergency_deadline.tzinfo is None:
+        raise LifecycleError("emergency deadline must be timezone-aware")
+    deadline = emergency_deadline.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    emergency_config = json.dumps(
+        {"auth_url": emergency_auth_url, "region": emergency_region},
+        separators=(",", ":"),
+    )
+    emergency_service = """[Unit]
+Description=Emergency deletion of an expired game-unpack-pipeline VM
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/gup-emergency-self-destruct \\
+  --config /etc/gup-emergency-self-destruct.json
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=45s
+StandardOutput=journal+console
+StandardError=journal+console
+"""
+    emergency_timer = f"""[Unit]
+Description=Four-hour emergency lifetime for a game-unpack-pipeline VM
+
+[Timer]
+OnCalendar={deadline}
+AccuracySec=1s
+Persistent=true
+Unit=gup-emergency-self-destruct.service
+
+[Install]
+WantedBy=timers.target
+"""
     return f"""#cloud-config
 output:
   all: "| tee -a /var/log/cloud-init-output.log /dev/console"
@@ -629,7 +693,27 @@ write_files:
     owner: root:root
     permissions: '0700'
     encoding: b64
-    content: {encoded}
+    content: {encoded_cloud_file(bootstrap)}
+  - path: /usr/local/sbin/gup-emergency-self-destruct
+    owner: root:root
+    permissions: '0700'
+    encoding: b64
+    content: {encoded_cloud_file(emergency_script)}
+  - path: /etc/gup-emergency-self-destruct.json
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: {encoded_cloud_file(emergency_config)}
+  - path: /etc/systemd/system/gup-emergency-self-destruct.service
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: {encoded_cloud_file(emergency_service)}
+  - path: /etc/systemd/system/gup-emergency-self-destruct.timer
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: {encoded_cloud_file(emergency_timer)}
 runcmd:
   - [bash, /usr/local/sbin/bootstrap-actions-runner]
 """
@@ -677,6 +761,82 @@ def create_server(
     if not UUID_RE.fullmatch(server_id):
         raise LifecycleError("OpenStack returned an invalid server ID")
     return server_id
+
+
+def create_emergency_application_credential(
+    config: SelectelConfig,
+    identity: ResourceIdentity,
+    server_id: str,
+    expires_at: datetime,
+) -> tuple[str, str]:
+    if not UUID_RE.fullmatch(server_id):
+        raise LifecycleError("Cannot scope emergency credential to an invalid server ID")
+    if expires_at.tzinfo is None:
+        raise LifecycleError("Emergency credential expiration must be timezone-aware")
+    access_rules = json.dumps(
+        [
+            {
+                "method": "DELETE",
+                "path": f"/v2.1/servers/{server_id}",
+                "service": "compute",
+            }
+        ],
+        separators=(",", ":"),
+    )
+    payload = parse_json_output(
+        openstack(
+            config,
+            [
+                "application",
+                "credential",
+                "create",
+                "--restricted",
+                "--role",
+                "member",
+                "--expiration",
+                expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S"),
+                "--description",
+                identity.emergency_credential_description,
+                "--access-rules",
+                access_rules,
+                "-f",
+                "json",
+                identity.emergency_credential_name,
+            ],
+        ),
+        "emergency application-credential creation",
+    )
+    credential_id = str(object_value(payload, "id"))
+    credential_secret = str(object_value(payload, "secret"))
+    if not UUID_RE.fullmatch(credential_id) or not credential_secret:
+        raise LifecycleError("OpenStack returned an invalid emergency application credential")
+    if "\n" in credential_secret or "\r" in credential_secret or len(credential_secret) > 255:
+        raise LifecycleError("OpenStack returned an unusable emergency credential secret")
+    add_mask(credential_secret)
+    return credential_id, credential_secret
+
+
+def set_server_emergency_credentials(
+    config: SelectelConfig,
+    server_id: str,
+    credential_id: str,
+    credential_secret: str,
+) -> None:
+    if not UUID_RE.fullmatch(server_id) or not UUID_RE.fullmatch(credential_id):
+        raise LifecycleError("Cannot publish invalid emergency credential metadata")
+    openstack(
+        config,
+        [
+            "server",
+            "set",
+            "--property",
+            f"gup_emergency_credential_id={credential_id}",
+            "--property",
+            f"gup_emergency_credential_secret={credential_secret}",
+            server_id,
+        ],
+        sensitive_values=(credential_secret,),
+    )
 
 
 def wait_for_server_active(config: SelectelConfig, server_id: str, timeout_seconds: int) -> None:
@@ -755,7 +915,8 @@ def find_server_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[
         check=False,
     )
     if result.returncode != 0:
-        return []
+        details = sanitized(result.stderr.strip() or result.stdout.strip())
+        raise LifecycleError(f"Could not list Selectel servers: {details}")
     items = parse_json_output(result, "server lookup")
     matching_ids = {
         str(item.get("ID", item.get("Id", item.get("id", ""))))
@@ -880,6 +1041,59 @@ def delete_servers(
             time.sleep(5)
         else:
             raise LifecycleError(f"Server {candidate} still exists after deletion timeout")
+
+
+def find_emergency_application_credential_ids(
+    config: SelectelConfig, identity: ResourceIdentity
+) -> list[str]:
+    result = openstack(config, ["application", "credential", "list", "-f", "json"])
+    items = parse_json_output(result, "emergency application-credential lookup")
+    if not isinstance(items, list):
+        raise LifecycleError("Emergency application-credential lookup did not return a list")
+    return sorted(
+        {
+            str(item.get("ID", item.get("Id", item.get("id", ""))))
+            for item in items
+            if isinstance(item, dict)
+            and item.get("Name", item.get("name")) == identity.emergency_credential_name
+            and UUID_RE.fullmatch(str(item.get("ID", item.get("Id", item.get("id", "")))))
+        }
+    )
+
+
+def delete_emergency_application_credentials(
+    config: SelectelConfig,
+    identity: ResourceIdentity,
+    credential_id: str = "",
+    *,
+    deleted_resources: list[str] | None = None,
+) -> None:
+    candidates = set(find_emergency_application_credential_ids(config, identity))
+    if UUID_RE.fullmatch(credential_id):
+        candidates.add(credential_id)
+    for candidate in sorted(candidates):
+        show = openstack(
+            config,
+            ["application", "credential", "show", candidate, "-f", "json"],
+            check=False,
+        )
+        if show.returncode != 0:
+            print(f"Emergency application credential {candidate}: already absent")
+            continue
+        credential = parse_json_output(show, "emergency application-credential ownership lookup")
+        if not isinstance(credential, dict) or (
+            str(object_value(credential, "name")) != identity.emergency_credential_name
+            or str(object_value(credential, "description"))
+            != identity.emergency_credential_description
+        ):
+            raise LifecycleError(
+                f"Refusing to delete application credential {candidate}: "
+                "ownership markers do not match"
+            )
+        openstack(config, ["application", "credential", "delete", candidate])
+        print(f"Emergency application credential {candidate}: deleted")
+        if deleted_resources is not None:
+            deleted_resources.append(f"selectel-application-credential:{candidate}")
 
 
 def find_public_port_ids(
@@ -1065,6 +1279,7 @@ def provision(arguments: argparse.Namespace) -> None:
         "runner_scope_label": identity.scope_label,
         "server_name": identity.server_name,
         "security_group_name": identity.security_group_name,
+        "emergency_credential_name": identity.emergency_credential_name,
         "resource_descriptor": identity.descriptor,
     }.items():
         write_output(name, value)
@@ -1073,7 +1288,11 @@ def provision(arguments: argparse.Namespace) -> None:
     append_summary(f"- Resource key: `{identity.instance_key}`")
     preflight(config)
 
+    emergency_deadline, emergency_credential_expires_at = emergency_schedule()
+    emergency_deadline_output = emergency_deadline.isoformat().replace("+00:00", "Z")
+    write_output("emergency_self_destruct_at", emergency_deadline_output)
     server_id = ""
+    emergency_credential_secret = ""
     jit_configs: dict[str, str] = {}
     cloud_config_path = ""
     try:
@@ -1118,8 +1337,14 @@ def provision(arguments: argparse.Namespace) -> None:
 
         template_path = Path(__file__).with_name("bootstrap-actions-runner.sh")
         template = template_path.read_text(encoding="utf-8")
+        emergency_script_path = Path(__file__).with_name("emergency_self_destruct.py")
+        emergency_script = emergency_script_path.read_text(encoding="utf-8")
         cloud_config = render_cloud_config(
             template,
+            emergency_auth_url=config.auth_url,
+            emergency_deadline=emergency_deadline,
+            emergency_region=config.region_name,
+            emergency_script=emergency_script,
             runner_download_url=runner_url,
             runner_sha256=runner_sha256,
             runner_version=runner_version,
@@ -1139,6 +1364,22 @@ def provision(arguments: argparse.Namespace) -> None:
         server_id = create_server(config, identity, port_id, cloud_config_path)
         write_output("server_id", server_id)
         print(f"Server created: {server_id}")
+        emergency_credential_id, emergency_credential_secret = (
+            create_emergency_application_credential(
+                config,
+                identity,
+                server_id,
+                emergency_credential_expires_at,
+            )
+        )
+        write_output("emergency_credential_id", emergency_credential_id)
+        set_server_emergency_credentials(
+            config,
+            server_id,
+            emergency_credential_id,
+            emergency_credential_secret,
+        )
+        print(f"Four-hour emergency self-destruct armed: {emergency_deadline_output}")
         wait_for_server_active(config, server_id, timeout_seconds=300)
         wait_for_runner_online(
             downloader_runner,
@@ -1166,12 +1407,18 @@ def provision(arguments: argparse.Namespace) -> None:
         )
         append_summary(f"- Runner version: `{runner_version}`")
         append_summary(f"- Selectel server: `{server_id}`")
+        append_summary(f"- Emergency self-destruct: `{emergency_deadline_output}`")
     except Exception:
         if server_id:
             show_console_log(
                 config,
                 server_id,
-                sensitive_values=(*jit_configs.values(), app_token, public_token),
+                sensitive_values=(
+                    *jit_configs.values(),
+                    app_token,
+                    public_token,
+                    emergency_credential_secret,
+                ),
             )
         raise
     finally:
@@ -1197,7 +1444,10 @@ def cleanup(arguments: argparse.Namespace) -> None:
         candidates = []
         if UUID_RE.fullmatch(arguments.server_id or ""):
             candidates.append(arguments.server_id)
-        candidates.extend(find_server_ids(config, identity))
+        try:
+            candidates.extend(find_server_ids(config, identity))
+        except LifecycleError as error:
+            print(f"::warning::Server diagnostics lookup failed: {sanitized(str(error))}")
         for candidate in sorted(set(candidates)):
             show_console_log(config, candidate, sensitive_values=(app_token,))
 
@@ -1240,15 +1490,6 @@ def cleanup(arguments: argparse.Namespace) -> None:
                 deleted_resources=deleted_resources,
             ),
         ),
-        (
-            "Selectel server",
-            lambda: delete_servers(
-                config,
-                identity,
-                arguments.server_id,
-                deleted_resources=deleted_resources,
-            ),
-        ),
     ]
     for label, operation in operations:
         try:
@@ -1256,6 +1497,19 @@ def cleanup(arguments: argparse.Namespace) -> None:
         except Exception as error:  # continue cleanup after every resource failure
             failures.append(f"{label}: {error}")
             print(f"::error::{label} cleanup failed: {sanitized(str(error))}")
+
+    server_cleanup_succeeded = False
+    try:
+        delete_servers(
+            config,
+            identity,
+            arguments.server_id,
+            deleted_resources=deleted_resources,
+        )
+        server_cleanup_succeeded = True
+    except Exception as error:
+        failures.append(f"Selectel server: {error}")
+        print(f"::error::Selectel server cleanup failed: {sanitized(str(error))}")
 
     try:
         token = selectel_token(config)
@@ -1280,6 +1534,22 @@ def cleanup(arguments: argparse.Namespace) -> None:
     except Exception as error:
         failures.append(f"Security group: {error}")
         print(f"::error::Security-group cleanup failed: {sanitized(str(error))}")
+
+    if server_cleanup_succeeded:
+        try:
+            delete_emergency_application_credentials(
+                config,
+                identity,
+                arguments.emergency_credential_id,
+                deleted_resources=deleted_resources,
+            )
+        except Exception as error:
+            failures.append(f"Emergency application credential: {error}")
+            print(
+                f"::error::Emergency application-credential cleanup failed: {sanitized(str(error))}"
+            )
+    else:
+        print("::warning::Emergency application credential retained because server cleanup failed")
 
     write_output("deleted_count", len(deleted_resources))
     append_summary(f"- Resources deleted: `{len(deleted_resources)}`")
@@ -1354,6 +1624,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--server-id", default="")
     cleanup_parser.add_argument("--port-id", default="")
     cleanup_parser.add_argument("--security-group-id", default="")
+    cleanup_parser.add_argument("--emergency-credential-id", default="")
     cleanup_parser.add_argument("--diagnostics", action="store_true")
     cleanup_parser.set_defaults(handler=cleanup)
 

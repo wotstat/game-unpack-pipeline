@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import http.client
+import json
 import os
 import re
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -25,11 +27,19 @@ class ResourceIdentityTests(unittest.TestCase):
 
         self.assertEqual(identity.server_name, "gup-manual-123456-2")
         self.assertEqual(identity.security_group_name, "gup-manual-123456-2-sg")
+        self.assertEqual(
+            identity.emergency_credential_name,
+            "gup-manual-123456-2-self-destruct",
+        )
         self.assertEqual(identity.scope_label, "gup-run-123456-2")
         self.assertEqual(
             identity.descriptor,
             "game-unpack-pipeline;repository=wotstat/game-unpack-pipeline;"
             "run_id=123456;run_attempt=2;instance_key=manual-123456-2",
+        )
+        self.assertEqual(
+            identity.emergency_credential_description,
+            f"{identity.descriptor};purpose=emergency-self-destruct",
         )
 
         downloader = identity.runner("downloader")
@@ -130,6 +140,10 @@ class CloudConfigTests(unittest.TestCase):
         uploader_jit_config = "sensitive-uploader-jit-configuration"
         cloud_config = lifecycle.render_cloud_config(
             template,
+            emergency_auth_url="https://cloud.api.selcloud.ru/identity/v3",
+            emergency_deadline=datetime(2026, 8, 31, 1, 30, tzinfo=UTC),
+            emergency_region="ru-7",
+            emergency_script="#!/usr/bin/env python3\nprint('emergency watchdog')\n",
             runner_download_url=(
                 "https://github.com/actions/runner/releases/download/v2.999.0/"
                 "actions-runner-linux-x64-2.999.0.tar.gz"
@@ -211,6 +225,94 @@ class CloudConfigTests(unittest.TestCase):
         self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
         self.assertNotIn("set -x", bootstrap)
         self.assertIn("permissions: '0700'", cloud_config)
+        self.assertIn("path: /usr/local/sbin/gup-emergency-self-destruct", cloud_config)
+        self.assertIn("path: /etc/systemd/system/gup-emergency-self-destruct.timer", cloud_config)
+
+        encoded_files = re.findall(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
+        decoded_files = [base64.b64decode(value).decode() for value in encoded_files]
+        self.assertTrue(
+            any("OnCalendar=2026-08-31 01:30:00 UTC" in value for value in decoded_files)
+        )
+        self.assertTrue(any("emergency watchdog" in value for value in decoded_files))
+        self.assertTrue(
+            any(
+                value
+                == ('{"auth_url":"https://cloud.api.selcloud.ru/identity/v3","region":"ru-7"}')
+                for value in decoded_files
+            )
+        )
+        self.assertLess(
+            bootstrap.index("systemctl enable --now gup-emergency-self-destruct.timer"),
+            bootstrap.index("curl \\\n"),
+        )
+
+    def test_emergency_schedule_uses_four_hours_plus_one_hour_retry_grace(self) -> None:
+        now = datetime(2026, 8, 30, 12, 0, 0, 123456, tzinfo=UTC)
+
+        deadline, expiration = lifecycle.emergency_schedule(now)
+
+        self.assertEqual(deadline, datetime(2026, 8, 30, 16, 0, tzinfo=UTC))
+        self.assertEqual(expiration - deadline, timedelta(hours=1))
+
+
+class EmergencyCredentialTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.identity = lifecycle.ResourceIdentity(
+            repository="wotstat/game-unpack-pipeline",
+            run_id="123456",
+            run_attempt="2",
+            instance_key="manual-123456-2",
+        )
+
+    def test_creation_is_restricted_to_deleting_the_exact_server(self) -> None:
+        server_id = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
+        credential_id = "123e4567-e89b-12d3-a456-426614174000"
+        result = Mock(stdout=f'{{"id":"{credential_id}","secret":"one-time-secret"}}')
+
+        with patch.object(lifecycle, "openstack", return_value=result) as openstack:
+            actual_id, secret = lifecycle.create_emergency_application_credential(
+                Mock(),
+                self.identity,
+                server_id,
+                datetime(2026, 8, 30, 17, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual((actual_id, secret), (credential_id, "one-time-secret"))
+        arguments = openstack.call_args.args[1]
+        self.assertIn("--restricted", arguments)
+        self.assertEqual(arguments[arguments.index("--role") + 1], "member")
+        access_rules = json.loads(arguments[arguments.index("--access-rules") + 1])
+        self.assertEqual(
+            access_rules,
+            [
+                {
+                    "method": "DELETE",
+                    "path": f"/v2.1/servers/{server_id}",
+                    "service": "compute",
+                }
+            ],
+        )
+
+    def test_deletion_refuses_a_credential_without_matching_ownership(self) -> None:
+        credential_id = "123e4567-e89b-12d3-a456-426614174000"
+        listed = Mock(
+            returncode=0,
+            stdout=f'\n[{{"ID":"{credential_id}","Name":"{self.identity.emergency_credential_name}"}}]',
+        )
+        shown = Mock(
+            returncode=0,
+            stdout=(
+                f'{{"id":"{credential_id}",'
+                f'"name":"{self.identity.emergency_credential_name}",'
+                '"description":"somebody-else"}'
+            ),
+        )
+
+        with (
+            patch.object(lifecycle, "openstack", side_effect=[listed, shown]),
+            self.assertRaises(lifecycle.LifecycleError),
+        ):
+            lifecycle.delete_emergency_application_credentials(Mock(), self.identity)
 
 
 class SanitizerTests(unittest.TestCase):
@@ -297,6 +399,7 @@ class CleanupReportingTests(unittest.TestCase):
             server_id="",
             port_id="",
             security_group_id="",
+            emergency_credential_id="",
         )
         config = Mock(password="not-a-real-secret")
 
@@ -333,6 +436,14 @@ class CleanupReportingTests(unittest.TestCase):
             deleted_resources.append("selectel-security-group")
             raise lifecycle.LifecycleError("simulated post-delete failure")
 
+        def record_emergency_credential(
+            *_args: object,
+            deleted_resources: list[str] | None = None,
+            **_kwargs: object,
+        ) -> None:
+            assert deleted_resources is not None
+            deleted_resources.append("selectel-application-credential")
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             output_path = Path(temporary_directory) / "github-output"
             environment = {
@@ -356,11 +467,61 @@ class CleanupReportingTests(unittest.TestCase):
                     "delete_security_groups",
                     side_effect=delete_security_group,
                 ),
+                patch.object(
+                    lifecycle,
+                    "delete_emergency_application_credentials",
+                    side_effect=record_emergency_credential,
+                ),
                 self.assertRaises(lifecycle.LifecycleError),
             ):
                 lifecycle.cleanup(arguments)
 
-            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=7\n")
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=8\n")
+
+    def test_retains_emergency_credential_when_server_cleanup_fails(self) -> None:
+        arguments = Mock(
+            instance_key="manual-123456-2",
+            run_id="123456",
+            run_attempt="2",
+            diagnostics=False,
+            downloader_runner_id="",
+            wot_gui_assets_runner_id="",
+            wot_src_runner_id="",
+            wotstat_assets_runner_id="",
+            server_id="",
+            port_id="",
+            security_group_id="",
+            emergency_credential_id="",
+        )
+        environment = {
+            "GITHUB_APP_TOKEN": "test-token",
+            "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
+        }
+
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                lifecycle.SelectelConfig,
+                "from_environment",
+                return_value=Mock(password="not-a-real-secret"),
+            ),
+            patch.object(lifecycle, "delete_github_runners"),
+            patch.object(
+                lifecycle,
+                "delete_servers",
+                side_effect=lifecycle.LifecycleError("compute API unavailable"),
+            ),
+            patch.object(lifecycle, "selectel_token", return_value="selectel-token"),
+            patch.object(lifecycle, "delete_public_ports"),
+            patch.object(lifecycle, "delete_security_groups"),
+            patch.object(
+                lifecycle, "delete_emergency_application_credentials"
+            ) as delete_credential,
+            self.assertRaises(lifecycle.LifecycleError),
+        ):
+            lifecycle.cleanup(arguments)
+
+        delete_credential.assert_not_called()
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -436,6 +597,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--wot-gui-assets-runner-id", workflow)
         self.assertIn("--wot-src-runner-id", workflow)
         self.assertIn("--wotstat-assets-runner-id", workflow)
+        self.assertIn("--emergency-credential-id", workflow)
+        self.assertIn("emergency_self_destruct_at", workflow)
         self.assertNotIn("dispatch-publication", workflow)
         self.assertIn(
             "uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@main",

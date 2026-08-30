@@ -16,6 +16,7 @@ runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Teleg
 ```text
 manual workflow_dispatch
   → provision одной VM, direct public IP и egress-only security group в Selectel
+  → systemd kill switch удаляет VM через Selectel API после четырёх часов
   → четыре JIT runner в game-unpack-pipeline: downloader, wot-src, wot-gui-assets и wotstat-assets
   → встроенные downloader stages на downloader runner
   → sealed snapshot на локальном диске VM
@@ -117,6 +118,12 @@ workflow или отдельный репозиторий и не перенос
   `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет обе region.
+- До bootstrap runner cloud-init вооружает абсолютный systemd timer на четыре часа. Для VM создаётся
+  отдельный restricted OpenStack application credential, разрешающий только `DELETE` точного UUID
+  этой VM; credential истекает через час после дедлайна для повторных попыток. Штатный cleanup и
+  reconciler удаляют credential по детерминированным name/description только после успешной очистки
+  или подтверждённого отсутствия VM. Самоудаление VM не очищает direct public port, security group и
+  runner registrations — эти хвосты принадлежат последующему reconciler.
 - Для ручного snapshot run reconciler запускается через `workflow_run`. Snapshot run, созданный
   checker через repository `GITHUB_TOKEN`, после cleanup явно dispatch'ит reconciler, потому что
   GitHub подавляет последующий `workflow_run` для token-originated chain. Оба пути передают исходные
@@ -144,7 +151,8 @@ workflow или отдельный репозиторий и не перенос
   Environment secrets `wotstat-assets-uploader` в `game-unpack-pipeline`. `CLICKHOUSE_HOST`,
   `CLICKHOUSE_USER`, `AWS_REGION`, `AWS_ENDPOINT_URL` и `AWS_BUCKET` хранятся как variables того же
   Environment.
-- JIT-конфигурации и installation tokens считаются секретами даже при коротком TTL.
+- JIT-конфигурации, installation tokens и emergency application credential считаются секретами даже
+  при коротком TTL. `SELECTEL_OS_PASSWORD` никогда не передаётся на VM.
 - Не добавлять credentials, project/account identifiers, runner configs или tokens в код,
   fixtures, документацию, summaries и логи.
 - Реальные Selectel и GitHub mutations выполнять только по явной задаче пользователя. Локальные
@@ -158,6 +166,7 @@ workflow или отдельный репозиторий и не перенос
 - отдельная release identity и retry policy сверх status и подавления дубликата активного run;
 - внешний status store или история запусков вне Git-истории региональных status-файлов;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
+- внешний watchdog или отдельный TTL-reaper вне GitHub Actions и временной VM.
 
 Не проектировать эти части без нового запроса.
 

@@ -14,6 +14,7 @@ schedule каждые два часа на :23 UTC
   → для новых версий workflow_dispatch основного pipeline
 workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
+  → локальный systemd kill switch удаляет VM после четырёх часов
   → четыре изолированных repository-level JIT runner на этой VM
   → встроенный download job собирает полный sealed GameSnapshot
   → выбранные reusable workflows из main: wot-src, wot-gui-assets и wotstat-assets-uploader
@@ -240,6 +241,13 @@ ID. Затем GitHub Git Database API создаёт один final version com
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
   идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7` и `ru-9`.
+- До установки runner cloud-init вооружает systemd timer с абсолютным дедлайном через четыре часа.
+  В дедлайн VM аутентифицируется отдельным истекающим OpenStack application credential, которому
+  разрешён только `DELETE` точного UUID этой VM, и запрашивает собственное удаление. Пароль
+  Selectel service user на VM не передаётся.
+- Штатный cleanup удаляет emergency credential только после успешного удаления или подтверждённого
+  отсутствия VM. Если сработал локальный kill switch, direct public port, security group и runner
+  registrations позднее удаляет обычный reconciler.
 - Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
   reconciler машинно подтвердил `deleted_count > 0`.
 - Для обычного ручного run reconciler стартует по `workflow_run`. Если snapshot был запущен
@@ -269,6 +277,7 @@ Checker запускается по cron каждые два часа без о�
 .github/workflows/reconcile-release-resources.yml
 contracts/v1/
 scripts/bootstrap-actions-runner.sh
+scripts/emergency_self_destruct.py
 scripts/release_status.py
 scripts/render_status_page.py
 scripts/runner_lifecycle.py

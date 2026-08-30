@@ -91,6 +91,11 @@ data-ветки.
 | --- | --- |
 | `SELECTEL_OS_PASSWORD` | Пароль Selectel service user |
 
+Отдельный постоянный secret для emergency self-destruct не нужен. Во время provision service user
+создаёт для конкретной VM restricted OpenStack application credential, передаёт его через metadata
+этой VM и удаляет при штатном cleanup. Credential имеет фиксированный срок действия и не выводится
+в Actions logs или summary.
+
 В `Settings → Secrets and variables → Actions → Secrets` добавить repository secret:
 
 | Secret | Значение |
@@ -257,10 +262,14 @@ Consumer можно включать независимо для каждого 
    egress-only security group с direct-public port.
 2. Provision резервирует все четыре runner в `game-unpack-pipeline`: downloader и по одному runner
    для jobs `wot-src`, `wot-gui-assets` и `wotstat-assets-uploader`, затем создаёт VM.
-3. Cloud-init скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и запускает
-   четыре systemd service под разными Unix-пользователями.
-4. Provision ждёт статус VM `ACTIVE` и состояние `online` всех четырёх runner.
-5. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
+3. После получения UUID provision создаёт restricted OpenStack application credential с единственным
+   access rule `DELETE` для этой VM. Credential истекает через пять часов: systemd kill switch
+   срабатывает через четыре часа, а дополнительный час оставлен для повторных попыток API.
+4. Cloud-init до скачивания runner вооружает persistent systemd timer на абсолютный четырёхчасовой
+   дедлайн. Затем он скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и
+   запускает четыре systemd service под разными Unix-пользователями.
+5. Provision ждёт статус VM `ACTIVE` и состояние `online` всех четырёх runner.
+6. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
    стадии от `resolve` до `snapshot` видны отдельными Actions steps; metrics и небольшие
    diagnostic files загружаются как artifact. Если отдельный большой Artifact не поддерживает
    согласованный parallel Range, downloader удаляет только его range-state и повторяет загрузку
@@ -268,19 +277,20 @@ Consumer можно включать независимо для каждого 
    конечный host и отброшенные байты записываются в `parallel-range-fallbacks.json`.
    Aggregate near-stall watchdog прерывает download только если скорость остаётся ниже `1 MiB/s`
    в течение пяти минут; отдельный HTTP read без данных по-прежнему ограничен 60 секундами.
-6. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
+7. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
    `x.x.x.x #xxx` из корневого `version.xml`, snapshot ID, абсолютный path и SHA-256 canonical
    descriptor.
-7. Включённые `Publish wot-src`, `Publish wot-gui-assets` и `Upload wotstat assets` параллельно
+8. Включённые `Publish wot-src`, `Publish wot-gui-assets` и `Upload wotstat assets` параллельно
    вызывают reusable workflow соответствующего репозитория через прямой
    `uses: ...@main`. Jobs входят в основной run, checkout’ят собственный consumer-код через
    `job.workflow_repository` и `job.workflow_sha` и получают одинаковую snapshot identity.
    Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
-8. Каждый включённый consumer проверяет sealed handoff. Data publisher создаёт version commit или
+9. Каждый включённый consumer проверяет sealed handoff. Data publisher создаёт version commit или
    возвращает `unchanged`; uploader выполняет все loaders и возвращает `uploaded`. Ошибка любого
    loader делает всю uploader job неуспешной.
-9. `Cleanup` удаляет все runner registrations, VM, direct-public port и security group.
-10. После cleanup `Record pipeline status` с `always()` перезаписывает `last_run` в
+10. `Cleanup` удаляет все runner registrations, VM, direct-public port, security group и emergency
+    application credential. Credential удаляется последним и только после успешной проверки VM.
+11. После cleanup `Record pipeline status` с `always()` перезаписывает `last_run` в
     `status/<target>.json` и коммитит результат, время, длительность и ссылку на Actions run в
     default branch. При полном успехе он также обновляет `release_name` и `readable_version`
     `x.x.x.x #xxx`; при ошибке последняя успешная версия остаётся прежней, а та же неуспешная версия
@@ -288,17 +298,17 @@ Consumer можно включать независимо для каждого 
     `detected_release_name` сохраняется даже при ошибке до `resolve`; точная `readable_version`
     появляется только после чтения `version.xml` из готового snapshot. Параллельные status-job
     сериализуются и не отменяют друг друга.
-11. `Deploy public status page` после status commit читает текущие файлы, их полную Git-историю и
+12. `Deploy public status page` после status commit читает текущие файлы, их полную Git-историю и
     метаданные последнего завершённого checker run, затем собирает `_site` и публикует Pages artifact.
     Время проверки не коммитится; checker сам вызывает тот же Pages workflow после своего отчёта.
     История pipeline не хранится отдельным массивом или набором файлов: каждый status commit становится
     одной записью временной шкалы.
-12. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
+13. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
     `x.x.x.x #xxx` или переданной release name при ранней ошибке, target, client type, языками и
     состоянием всех consumer; `published` ведёт ссылкой на точный commit, а `ALL` сохраняется в
     заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
-13. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
+14. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
     `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
     явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
@@ -312,6 +322,11 @@ job ограничены 60 минутами, uploader — 120 минутами;
 
 Обычная кнопка **Cancel workflow** не должна оставлять инфраструктуру: основной cleanup использует
 `always()`, а после завершения run с branch `main` запускается отдельный `workflow_run` reconciler.
+
+Если GitHub Actions полностью недоступен, локальный timer через четыре часа запрашивает удаление
+собственной VM напрямую у Selectel. Это аварийный третий контур, а не полный reconciler: после
+самоудаления VM direct public port и security group могут остаться до восстановления GitHub Actions.
+Внешнего watchdog или отдельного scheduler в архитектуре нет.
 
 Если автоматический reconciler завершился с ошибкой:
 
@@ -333,8 +348,9 @@ JIT-конфигурации, известные tokens/passwords и распр�
 log не сохраняется как artifact.
 
 Нельзя вставлять в issue или лог содержимое cloud-init user data, `/run/actions-runner/*/jit-config`,
-GitHub App private key или Selectel password. Если нужно показать сбой, использовать Actions
-summary, diagnostic artifact downloader и уже очищенный console tail из cleanup job.
+GitHub App private key, emergency application credential или Selectel password. Если нужно показать
+сбой, использовать Actions summary, diagnostic artifact downloader и уже очищенный console tail из
+cleanup job.
 
 ## Первичные справочники
 
@@ -342,4 +358,5 @@ summary, diagnostic artifact downloader и уже очищенный console tai
 - [GitHub: `actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
 - [GitHub: custom workflows for GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 - [Selectel: Public Network API](https://docs.selectel.ru/api/cloud-public-network/)
+- [OpenStack CLI: `application credential`](https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/application-credentials.html)
 - [OpenStack CLI: `server create`](https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/server.html#server-create)

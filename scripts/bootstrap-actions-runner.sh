@@ -19,6 +19,10 @@ readonly RUNNER_TEMPLATE_DIR=/opt/actions-runner-template
 readonly RUNNERS_ROOT=/opt/actions-runners
 readonly RUNNER_ARCHIVE=/tmp/actions-runner.tar.gz
 
+echo 'gup-bootstrap: arming four-hour emergency self-destruct timer'
+systemctl daemon-reload
+systemctl enable --now gup-emergency-self-destruct.timer
+
 echo "gup-bootstrap: downloading GitHub Actions Runner ${RUNNER_VERSION}"
 install -d -m 0755 "${RUNNER_TEMPLATE_DIR}" "${RUNNERS_ROOT}"
 curl \
