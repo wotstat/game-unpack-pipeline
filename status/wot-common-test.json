@@ -1,5 +1,15 @@
 {
   "release_name": null,
   "readable_version": null,
-  "last_run": null
+  "last_run": {
+    "result": "failure",
+    "release_name": "2.4.0.5415",
+    "readable_version": null,
+    "started_at": "2026-08-30T01:52:33Z",
+    "completed_at": "2026-08-30T02:30:52Z",
+    "duration_seconds": 2299,
+    "run_id": 33286663518,
+    "run_attempt": 1,
+    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/33286663518"
+  }
 }
