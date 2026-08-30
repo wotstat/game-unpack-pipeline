@@ -45,6 +45,7 @@ def test_status_page_build_checks_out_full_history_and_uploads_site() -> None:
     }
     assert configure["uses"] == "actions/configure-pages@v6.0.0"
     assert "check-game-releases.yml/runs" in resolve["run"]
+    assert "event=workflow_dispatch" not in resolve["run"]
     assert 'select(.name == "Release check report")' in resolve["run"]
     assert "scripts/render_status_page.py" in render["run"]
     assert "--release-check-completed-at" in render["run"]

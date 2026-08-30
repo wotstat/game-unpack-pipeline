@@ -77,7 +77,6 @@ jobs:
           if ((provided == 0)); then
             runs="$(gh api --method GET \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/check-game-releases.yml/runs" \
-              -f event=workflow_dispatch \
               -f status=completed \
               -f per_page=1)"
             run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"${runs}")"

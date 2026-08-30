@@ -1,7 +1,7 @@
 # Техническое введение в game-unpack-pipeline
 
-Публичный pipeline ручного скачивания, распаковки и публикации снимков клиентов World of Tanks и
-«Мира танков». Репозиторий содержит всю основную полезную нагрузку: протоколы WGUS/LSTUS,
+Публичный pipeline автоматической проверки, скачивания, распаковки и публикации снимков клиентов
+World of Tanks и «Мира танков». Репозиторий содержит всю основную полезную нагрузку: протоколы WGUS/LSTUS,
 download/verify, распаковку VFS, readable transforms, sealed `GameSnapshot`, временную Selectel VM
 и вызов publisher workflows. Текущее состояние и короткая история завершённых запусков публикуются
 как статическая страница GitHub Pages.
@@ -9,6 +9,9 @@ download/verify, распаковку VFS, readable transforms, sealed `GameSnap
 ## Поток
 
 ```text
+schedule каждые два часа на :23 UTC
+  → lightweight-проверка всех targets
+  → для новых версий workflow_dispatch основного pipeline
 workflow_dispatch
   → одна временная VM, direct public IP и egress-only security group в Selectel
   → четыре изолированных repository-level JIT runner на этой VM
@@ -129,22 +132,24 @@ HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7
 
 ## Проверка новых версий
 
-[`check-game-releases.yml`](../.github/workflows/check-game-releases.yml) — отдельный ручной checker
-без schedule. Он не создаёт downloader Run и не скачивает клиент: для каждого выбранного target
-lightweight probe запрашивает WGUS/LSTUS metadata и один patches chain для объявленной default
-language, затем сравнивает `release_name` с [`status`](../status).
+[`check-game-releases.yml`](../.github/workflows/check-game-releases.yml) — отдельный checker с
+автоматическим расписанием `23 */2 * * *` и ручным `workflow_dispatch`. Он не скачивает клиент:
+для каждого выбранного target lightweight probe запрашивает WGUS/LSTUS metadata и один patches
+chain для объявленной default language, затем сравнивает `release_name` с [`status`](../status).
 
-Workflow предоставляет семь независимых whitelist-чекбоксов. По умолчанию включён только
-`wot-eu`, а `dispatch_pipelines` выключен: несовпадение лишь выводится в лог как
-`action=would-dispatch`. При явном включении dispatch checker сначала исключает уже ожидающий или
-работающий pipeline того же target. Если последняя завершённая попытка той же `release_name` уже
-имеет результат `failure` или `cancelled`, checker не повторяет её и требует ручного запуска
-основного workflow. Остальные отличающиеся targets запускаются параллельно на default branch с
-`sd`, `ALL` и всеми тремя consumer. Checker передаёт найденную `release_name` как необязательную
-подсказку, чтобы ранняя ошибка pipeline всё равно была привязана к проверенной версии. После
-завершения матрицы общий Job Summary показывает таблицу с сохранённой и найденной версиями,
-результатом сравнения и действием для каждого выбранного target; сбои отдельных targets остаются
-видны отдельными строками.
+Scheduled run каждые два часа проверяет все семь targets и автоматически dispatch'ит основной
+pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов: по
+умолчанию включён только `wot-eu`, а `dispatch_pipelines` выключен, поэтому он остаётся безопасным
+dry-run.
+
+При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же
+target. Если последняя завершённая попытка той же `release_name` уже имеет результат `failure` или
+`cancelled`, checker не повторяет её и требует ручного запуска основного workflow. Остальные
+отличающиеся targets запускаются параллельно на default branch с `sd`, `ALL` и всеми тремя consumer.
+Checker передаёт найденную `release_name` как необязательную подсказку, чтобы ранняя ошибка pipeline
+всё равно была привязана к проверенной версии. После завершения матрицы общий Job Summary показывает
+таблицу с сохранённой и найденной версиями, результатом сравнения и действием для каждого выбранного
+target; сбои отдельных targets остаются видны отдельными строками.
 
 Каждый status-файл хранит последнюю успешно опубликованную `release_name`, соответствующую
 `readable_version` в Telegram-формате `x.x.x.x #xxx` и описание `last_run`: результат, обе версии,
@@ -242,12 +247,12 @@ ID. Затем GitHub Git Database API создаёт один final version com
   эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
   token-originated цепочке.
 
-Cron/schedule и внешний status store не входят в текущую систему. Автоматическая повторная попытка
-той же неуспешной `release_name` подавляется; отдельного backoff или retry scheduler нет. Git-история
-региональных status-файлов является единственным источником истории страницы; отдельная база или
-накопительный log-файл не создаются. Загрузка в S3 и ClickHouse пока использует временные namespaces
-uploader. Production S3 assets пишутся в `wot` и `mt`, а public-test targets изолированы в
-`wot-test`/`mt-test`; uploader runs не сериализуются.
+Checker запускается по cron каждые два часа без отдельной telemetry задержек schedule. Автоматическая
+повторная попытка той же неуспешной `release_name` подавляется; отдельного backoff или retry scheduler
+нет. Внешний status store отсутствует: Git-история региональных status-файлов является единственным
+источником истории страницы, отдельная база или накопительный log-файл не создаются. Загрузка в S3
+и ClickHouse пока использует временные namespaces uploader. Production S3 assets пишутся в `wot` и
+`mt`, а public-test targets изолированы в `wot-test`/`mt-test`; uploader runs не сериализуются.
 
 ## Настройка и проверка
 

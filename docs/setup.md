@@ -1,8 +1,9 @@
 # Настройка и эксплуатация pipeline
 
-Эта инструкция описывает текущий ручной production workflow, ручной checker новых версий и
-публичную статус-страницу GitHub Pages. В ней нет реальных credentials: пароли и private keys нужно
-вводить непосредственно в GitHub Settings, не отправляя их в issues, commits, чаты или логи.
+Эта инструкция описывает текущий production workflow, автоматический и ручной checker новых версий,
+а также публичную статус-страницу GitHub Pages. В ней нет реальных credentials: пароли и private
+keys нужно вводить непосредственно в GitHub Settings, не отправляя их в issues, commits, чаты или
+логи.
 
 `Process game release` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
 direct public IP в Selectel. `Check game releases`, напротив, по умолчанию только сравнивает версии
@@ -193,11 +194,15 @@ ClickHouse и S3 в Pages workflow недоступны.
 Стандартный URL проекта после первого deployment:
 `https://wotstat.github.io/game-unpack-pipeline/`.
 
-## 7. Ручная проверка новых версий
+## 7. Автоматическая и ручная проверка новых версий
 
-Открыть `Actions → Check game releases → Run workflow` на `main`. Workflow пока не имеет schedule.
-Он предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
-`check_wot_eu`. `dispatch_pipelines` по умолчанию выключен, поэтому первый запуск безопасно покажет
+Workflow автоматически запускается каждые два часа по расписанию `23 */2 * * *`: в `00:23`,
+`02:23`, ... UTC. Scheduled run проверяет все семь targets и dispatch'ит основной pipeline для
+найденных новых версий.
+
+Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
+предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
+`check_wot_eu`. `dispatch_pipelines` по умолчанию выключен, поэтому ручной запуск безопасно покажет
 в логе одно из состояний:
 
 - `action=none` — release name совпадает со status;

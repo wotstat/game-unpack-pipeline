@@ -8,8 +8,8 @@ downloader, GitHub Actions entrypoint, жизненным циклом врем�
 runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Telegram-отчётами и публичной
 статус-страницей GitHub Pages.
 
-Ручной checker новых версий и repository status-файлы реализованы. Короткая публичная история
-строится из Git-истории этих файлов; cron и внешний status store отсутствуют.
+Автоматический и ручной checker новых версий и repository status-файлы реализованы. Короткая
+публичная история строится из Git-истории этих файлов; внешний status store отсутствует.
 
 ## Реализованный поток
 
@@ -28,10 +28,11 @@ manual workflow_dispatch
   → recovery alert только при deleted_count > 0
 ```
 
-Отдельный ручной `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe
-проверяет выбранные targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме
-параллельно запускает основной workflow для отличающихся targets. По умолчанию он проверяет только
-`wot-eu` и работает как безопасный dry-run. Schedule пока отсутствует.
+Отдельный `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe проверяет
+targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме параллельно запускает
+основной workflow для отличающихся targets. Cron `23 */2 * * *` проверяет все семь targets и всегда
+работает в dispatch-режиме. Ручной запуск по умолчанию проверяет только `wot-eu` как безопасный
+dry-run.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
 target, client type, languages и три независимых переключателя `publish_wot_src`,
@@ -61,10 +62,10 @@ workflow или отдельный репозиторий и не перенос
 ## Текущие контракты
 
 - Единственная точка ручного production-запуска — `.github/workflows/process-game-release.yml`.
-- `.github/workflows/check-game-releases.yml` — пока только ручной checker. Он имеет отдельные
-  boolean whitelist inputs для семи targets, `wot-eu: true` по умолчанию и
-  `dispatch_pipelines: false`. Реальный dispatch всегда использует default branch, `sd`, `ALL` и
-  все три snapshot consumer.
+- `.github/workflows/check-game-releases.yml` запускается по cron `23 */2 * * *` и вручную. Cron
+  проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
+  inputs, `wot-eu: true` по умолчанию и `dispatch_pipelines: false`. Реальный dispatch всегда
+  использует default branch, `sd`, `ALL` и все три snapshot consumer.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
@@ -153,7 +154,7 @@ workflow или отдельный репозиторий и не перенос
 
 ## Что не входит в систему
 
-- cron/schedule для checker новых WGUS/LSTUS releases;
+- отдельная telemetry задержек scheduled checker;
 - отдельная release identity и retry policy сверх status и подавления дубликата активного run;
 - внешний status store или история запусков вне Git-истории региональных status-файлов;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
