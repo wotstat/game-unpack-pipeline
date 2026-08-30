@@ -92,7 +92,6 @@ code,
 .overall {
   min-height: 290px;
   padding: 62px 0 42px;
-  border-bottom: 1px solid var(--ink);
 }
 
 .header-actions {
@@ -196,6 +195,7 @@ body,
 .timeline,
 .target-row,
 .timeline-item,
+.pipeline-description,
 footer {
   transition:
     color 160ms ease,
@@ -210,6 +210,7 @@ html[data-theme-transition="running"] .product-group,
 html[data-theme-transition="running"] .timeline,
 html[data-theme-transition="running"] .target-row,
 html[data-theme-transition="running"] .timeline-item,
+html[data-theme-transition="running"] .pipeline-description,
 html[data-theme-transition="running"] footer {
   transition: none;
 }
@@ -308,6 +309,38 @@ html[data-theme-transition="running"] footer {
   color: var(--muted);
   font-size: 17px;
   line-height: 1.5;
+}
+
+.pipeline-description {
+  max-width: 620px;
+  margin: -8px 0 32px;
+  padding: 2px 0 2px 17px;
+  border-left: 2px solid var(--green);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.overall--success .pipeline-description {
+  border-left-color: var(--green);
+}
+
+.overall--failure .pipeline-description {
+  border-left-color: var(--red);
+}
+
+.overall--pending .pipeline-description {
+  border-left-color: var(--amber);
+}
+
+.pipeline-description a {
+  color: var(--link);
+  font-weight: 650;
+  text-decoration-thickness: 1px;
+}
+
+.pipeline-description a:hover {
+  text-decoration-thickness: 2px;
 }
 
 .overall-meta {
@@ -647,6 +680,10 @@ footer {
   .overall-meta {
     flex-direction: column;
     gap: 4px;
+  }
+
+  .pipeline-description {
+    margin-top: -6px;
   }
 
   .product-heading {

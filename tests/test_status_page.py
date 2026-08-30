@@ -106,6 +106,12 @@ def test_page_uses_selected_overall_and_empty_state_copy() -> None:
     assert "Для 7 из 7 регионов ещё нет успешной публикации." in pending_page
     assert "Обновлений ещё не было" in pending_page
     assert "Проверок ещё не было" in pending_page
+    assert 'class="pipeline-description"' in pending_page
+    assert (
+        "Статус автоматической распаковки новых версий WoT и «Мира танков».<br />" in pending_page
+    )
+    assert 'href="https://github.com/wotstat/wot-src">wot-src</a>' in pending_page
+    assert 'href="https://github.com/wotstat/wot-gui-assets">wot-gui-assets</a>' in pending_page
     assert 'content="WOTSTAT — unpack status"' in pending_page
     assert 'content="Статус распаковки WoT и MT по регионам и история запусков."' in pending_page
 

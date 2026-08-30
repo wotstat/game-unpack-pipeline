@@ -30,6 +30,8 @@ from scripts.release_status import (
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 DEFAULT_REPOSITORY_URL = "https://github.com/wotstat/game-unpack-pipeline"
+WOT_SRC_URL = "https://github.com/wotstat/wot-src"
+WOT_GUI_ASSETS_URL = "https://github.com/wotstat/wot-gui-assets"
 MOSCOW = ZoneInfo("Europe/Moscow")
 MONTHS = (
     "января",
@@ -583,6 +585,12 @@ def render_page(
           <p class="eyebrow">Состояние публикаций</p>
           <h1>{html.escape(title[:-1])}<span>.</span></h1>
           <p>{html.escape(description)}</p>
+          <p class="pipeline-description">
+            Статус автоматической распаковки новых версий WoT и «Мира танков».<br />
+            Результат публикуется в репозиториях
+            <a href="{WOT_SRC_URL}">wot-src</a> и
+            <a href="{WOT_GUI_ASSETS_URL}">wot-gui-assets</a>.
+          </p>
           <div class="overall-meta">
             <div><span>Последнее обновление</span><strong>{updated_label}</strong></div>
             <div><span>Последняя проверка</span><strong>{check_label}</strong></div>
