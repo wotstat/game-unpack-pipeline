@@ -54,15 +54,26 @@ class _ResolveTransport:
         )
 
 
-def test_readable_version_matches_wot_src_commit_subject_format(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("v.2.3.1.5400 #1827", "2.3.1.5400 #1827"),
+        ("v.2.4.0.0 Common Test #927", "2.4.0.0 #927"),
+    ),
+)
+def test_readable_version_matches_wot_src_commit_subject_format(
+    tmp_path: Path,
+    value: str,
+    expected: str,
+) -> None:
     version_path = tmp_path / "sources/base/version.xml"
     version_path.parent.mkdir(parents=True)
     version_path.write_text(
-        "<root><version>\n  v.2.3.1.5400   #1827\n</version></root>",
+        f"<root><version>\n  {value}\n</version></root>",
         encoding="utf-8",
     )
 
-    assert _readable_version()(tmp_path) == "2.3.1.5400 #1827"
+    assert _readable_version()(tmp_path) == expected
 
 
 def test_collect_result_exports_resolved_release_before_snapshot(

@@ -18,7 +18,10 @@ from game_downloader.models import (
 from game_downloader.pipeline import Pipeline
 from game_downloader.workspace import Workspace
 
-VERSION_XML_READABLE_RE = re.compile(r"^v\.[0-9]+(?:\.[0-9]+){3} #[0-9]+$")
+VERSION_XML_READABLE_RE = re.compile(
+    r"^v\.(?P<version>[0-9]+(?:\.[0-9]+){3})"
+    r"(?: [A-Za-z]+(?: [A-Za-z]+)*)? #(?P<build>[0-9]+)$"
+)
 
 
 def _readable_version(snapshot_path: Path) -> str:
@@ -29,9 +32,10 @@ def _readable_version(snapshot_path: Path) -> str:
         raise ValueError(f"cannot parse root version.xml: {error}") from error
     version = root.find("version")
     value = " ".join(version.text.split()) if version is not None and version.text else ""
-    if not VERSION_XML_READABLE_RE.fullmatch(value):
+    match = VERSION_XML_READABLE_RE.fullmatch(value)
+    if match is None:
         raise ValueError(f"root version.xml has an invalid readable version: {value!r}")
-    return value.removeprefix("v.")
+    return f"{match.group('version')} #{match.group('build')}"
 
 
 def _format_duration(seconds: object) -> str:
