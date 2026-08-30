@@ -123,6 +123,59 @@ def test_page_keeps_successful_version_visible_after_failed_run() -> None:
     assert json.loads(render_badge("mt-ru", cancelled_status))["color"] == "yellow"
 
 
+def test_page_describes_failed_run_without_known_version() -> None:
+    failure = PipelineRun(
+        result="failure",
+        release_name=None,
+        readable_version=None,
+        started_at="2026-08-30T08:00:00Z",
+        completed_at="2026-08-30T08:12:00Z",
+        duration_seconds=720,
+        run_id=200,
+        run_attempt=1,
+        run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/200",
+    )
+    statuses = {
+        target: ReleaseStatus(
+            release_name=None,
+            readable_version=None,
+            last_run=failure if target == "mt-ru" else None,
+        )
+        for target in (
+            "wot-eu",
+            "wot-na",
+            "wot-asia",
+            "wot-common-test",
+            "wot-cn",
+            "mt-ru",
+            "mt-public-test",
+        )
+    }
+
+    page = render_page(
+        statuses,
+        (
+            HistoryEntry(
+                target="mt-ru",
+                result="failure",
+                release_name=None,
+                readable_version=None,
+                started_at=datetime(2026, 8, 30, 8, tzinfo=UTC),
+                completed_at=datetime(2026, 8, 30, 8, 12, tzinfo=UTC),
+                duration_seconds=720,
+                run_id=200,
+                run_attempt=1,
+                run_url=failure.run_url,
+            ),
+        ),
+        repository_url="https://github.com/wotstat/game-unpack-pipeline",
+        site_url="",
+    )
+
+    assert "Публикация не завершена. Версия неизвестна" in page
+    assert "Публикация версии неизвестной версии не завершена" not in page
+
+
 def test_history_distinguishes_wot_and_mt_test_targets() -> None:
     statuses = {
         target: ReleaseStatus(release_name=None, readable_version=None, last_run=None)

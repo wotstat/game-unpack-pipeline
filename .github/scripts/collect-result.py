@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from game_downloader._json import canonical_json_bytes
-from game_downloader.models import DownloadResult, SnapshotResult, Stage, StageResult
+from game_downloader.models import (
+    DownloadResult,
+    ResolveResult,
+    SnapshotResult,
+    Stage,
+    StageResult,
+)
 from game_downloader.pipeline import Pipeline
 from game_downloader.workspace import Workspace
 
@@ -225,6 +231,15 @@ def main() -> None:
         canonical_json_bytes(_parallel_range_fallback_report(download_payload))
     )
 
+    resolve: ResolveResult | None = None
+    resolve_stage = next(item for item in report.stages if item.stage is Stage.RESOLVE)
+    if resolve_stage.state.value == "succeeded":
+        raw_result = workspace.read_bytes(
+            workspace.stage_path(run_id, Stage.RESOLVE) / "result.json"
+        )
+        stage_result = StageResult.model_validate_json(raw_result)
+        resolve = ResolveResult.model_validate(stage_result.payload)
+
     snapshot: SnapshotResult | None = None
     snapshot_stage = next(item for item in report.stages if item.stage is Stage.SNAPSHOT)
     if snapshot_stage.state.value == "succeeded":
@@ -236,11 +251,12 @@ def main() -> None:
 
     _write_output("run_id", report.run_id)
     _write_output("data_root", data_root.as_posix())
+    if resolve is not None:
+        _write_output("version_name", resolve.release_name)
     if snapshot is not None:
         snapshot_path = data_root / snapshot.snapshot_path
         readable_version = _readable_version(snapshot_path)
         _write_output("snapshot_id", snapshot.snapshot_id)
-        _write_output("version_name", snapshot.version_name)
         _write_output("readable_version", readable_version)
         _write_output("snapshot_path", snapshot_path.as_posix())
         _write_output("descriptor_sha256", snapshot.descriptor_sha256)
@@ -262,9 +278,10 @@ def main() -> None:
         f"- Languages: `{_escape(','.join(report.request.languages))}`",
         f"- Active time: `{_format_duration(report.active_duration_seconds)}`",
     ]
+    if resolve is not None:
+        lines.append(f"- Version: `{_escape(resolve.release_name)}`")
     if snapshot is not None:
         lines.append(f"- Snapshot: `{_escape(snapshot.snapshot_id)}`")
-        lines.append(f"- Version: `{_escape(snapshot.version_name)}`")
         lines.append(f"- Readable version: `{_escape(readable_version)}`")
     lines.extend(
         [

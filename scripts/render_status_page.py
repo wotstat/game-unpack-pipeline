@@ -396,7 +396,14 @@ def _render_product(
 
 
 def _history_description(entry: HistoryEntry) -> str:
-    version = html.escape(entry.readable_version or entry.release_name or "неизвестной версии")
+    raw_version = entry.readable_version or entry.release_name
+    if raw_version is None:
+        if entry.result == "success" or entry.legacy:
+            return "Публикация завершена. Версия неизвестна"
+        if entry.result == "cancelled":
+            return "Запуск отменён. Версия неизвестна"
+        return "Публикация не завершена. Версия неизвестна"
+    version = html.escape(raw_version)
     if entry.legacy:
         return f"Зафиксирована версия {version}"
     if entry.result == "success":
