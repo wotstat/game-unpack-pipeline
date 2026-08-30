@@ -107,7 +107,7 @@ code,
 }
 
 .theme-toggle {
-  position: fixed;
+  position: absolute;
   z-index: 1000;
   top: 25px;
   right: max(32px, calc((100vw - 1240px) / 2));
