@@ -394,13 +394,13 @@ def _overall_copy(states: tuple[CurrentState, ...]) -> tuple[str, str, str]:
         )
     if pending:
         return (
-            "Статус неполный.",
+            "Данных недостаточно.",
             f"Для {pending} из {len(states)} регионов ещё нет успешной публикации.",
             "pending",
         )
     return (
-        "Всё актуально.",
-        f"Все {len(states)} регионов синхронизированы с последними обработанными версиями игр.",
+        "Всё в порядке.",
+        f"Для всех {len(states)} регионов успешно обработаны актуальные версии.",
         "success",
     )
 
@@ -462,18 +462,18 @@ def _history_description(entry: HistoryEntry) -> str:
     raw_version = entry.readable_version or entry.release_name
     if raw_version is None:
         if entry.result == "success" or entry.legacy:
-            return "Публикация завершена. Версия неизвестна"
+            return "Обработка завершена, версия не указана"
         if entry.result == "cancelled":
-            return "Запуск отменён. Версия неизвестна"
-        return "Публикация не завершена. Версия неизвестна"
+            return "Обработка была отменена, версия неизвестна"
+        return "Не удалось завершить обработку, версия неизвестна"
     version = html.escape(raw_version)
     if entry.legacy:
-        return f"Зафиксирована версия {version}"
+        return f"Успешно обработана версия {version}"
     if entry.result == "success":
-        return f"Опубликована версия {version}"
+        return f"Успешно обработана версия {version}"
     if entry.result == "cancelled":
-        return f"Запуск для версии {version} отменён"
-    return f"Публикация версии {version} не завершена"
+        return f"Обработка версии {version} была отменена"
+    return f"Обработка версии {version} завершилась с ошибкой"
 
 
 def _render_history(entries: tuple[HistoryEntry, ...]) -> str:
@@ -528,7 +528,7 @@ def render_page(
     )
     history_url = f"{repository_url.rstrip('/')}/commits/main/status"
     if last_activity is None:
-        updated_label = "ещё не было"
+        updated_label = "Обновлений ещё не было"
     else:
         updated_at, updated_run_url = last_activity
         updated_text = _format_date(updated_at) + " МСК"
@@ -538,7 +538,7 @@ def render_page(
             else updated_text
         )
     if release_check is None:
-        check_label = "ещё не было"
+        check_label = "Проверок ещё не было"
     else:
         check_text = _format_date(release_check.completed_at) + " МСК"
         check_label = f'<a href="{html.escape(release_check.run_url, quote=True)}">{check_text}</a>'
@@ -552,9 +552,9 @@ def render_page(
     <meta name="description"
       content="Публичный статус скачивания и публикации игровых клиентов wotstat." />
     <meta name="theme-color" content="#ffffff" />
-    <meta property="og:title" content="game-unpack-pipeline — статус" />
+    <meta property="og:title" content="WOTSTAT — unpack status" />
     <meta property="og:description"
-      content="Текущие версии по регионам и история запусков pipeline." />
+      content="Статус распаковки WoT и MT по регионам и история запусков." />
     <meta property="og:type" content="website" />
     {canonical}
     <title>WOTSTAT – Unpack status</title>

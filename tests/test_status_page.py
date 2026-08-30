@@ -60,6 +60,56 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     )
 
 
+def test_page_uses_selected_overall_and_empty_state_copy() -> None:
+    success = PipelineRun(
+        result="success",
+        release_name="1.45.0.9000",
+        readable_version="1.45.0.0 #2300",
+        started_at="2026-08-30T08:00:00Z",
+        completed_at="2026-08-30T08:12:00Z",
+        duration_seconds=720,
+        run_id=200,
+        run_attempt=1,
+        run_url="https://github.com/wotstat/game-unpack-pipeline/actions/runs/200",
+    )
+    successful_statuses = {
+        target: ReleaseStatus(
+            release_name=success.release_name,
+            readable_version=success.readable_version,
+            last_run=success,
+        )
+        for target in TARGETS
+    }
+
+    successful_page = render_page(
+        successful_statuses,
+        (),
+        repository_url="https://github.com/wotstat/game-unpack-pipeline",
+        site_url="",
+    )
+
+    assert "Всё в порядке" in successful_page
+    assert "Для всех 7 регионов успешно обработаны актуальные версии." in successful_page
+
+    pending_statuses = {
+        target: ReleaseStatus(release_name=None, readable_version=None, last_run=None)
+        for target in TARGETS
+    }
+    pending_page = render_page(
+        pending_statuses,
+        (),
+        repository_url="https://github.com/wotstat/game-unpack-pipeline",
+        site_url="",
+    )
+
+    assert "Данных недостаточно" in pending_page
+    assert "Для 7 из 7 регионов ещё нет успешной публикации." in pending_page
+    assert "Обновлений ещё не было" in pending_page
+    assert "Проверок ещё не было" in pending_page
+    assert 'content="WOTSTAT — unpack status"' in pending_page
+    assert 'content="Статус распаковки WoT и MT по регионам и история запусков."' in pending_page
+
+
 def test_page_keeps_successful_version_visible_after_failed_run() -> None:
     failure = PipelineRun(
         result="failure",
@@ -112,7 +162,7 @@ def test_page_keeps_successful_version_visible_after_failed_run() -> None:
 
     assert "Есть проблемы" in page
     assert "1.44.0.0 #2262" in page
-    assert "Публикация версии 1.45.0.0 #2300 не завершена" in page
+    assert "Обработка версии 1.45.0.0 #2300 завершилась с ошибкой" in page  # noqa: RUF001
     assert "12 мин 00 с" in page  # noqa: RUF001
     assert "actions/runs/200" in page
     assert 'id="mt-ru"' in page
@@ -176,8 +226,10 @@ def test_page_describes_failed_run_without_known_version() -> None:
         site_url="",
     )
 
-    assert "Публикация не завершена. Версия неизвестна" in page
-    assert "Публикация версии неизвестной версии не завершена" not in page
+    assert "Не удалось завершить обработку, версия неизвестна" in page  # noqa: RUF001
+    assert (
+        "Обработка версии неизвестной версии завершилась с ошибкой" not in page  # noqa: RUF001
+    )
 
 
 def test_page_links_latest_pipeline_and_release_check_and_renders_global_badge() -> None:
