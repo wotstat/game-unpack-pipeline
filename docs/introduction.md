@@ -134,11 +134,11 @@ HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7
 ## Проверка новых версий
 
 [`check-game-releases.yml`](../.github/workflows/check-game-releases.yml) — отдельный checker с
-автоматическим расписанием `23 */2 * * *` и ручным `workflow_dispatch`. Он не скачивает клиент:
+автоматическим расписанием `23 * * * *` и ручным `workflow_dispatch`. Он не скачивает клиент:
 для каждого выбранного target lightweight probe запрашивает WGUS/LSTUS metadata и один patches
 chain для объявленной default language, затем сравнивает `release_name` с [`status`](../status).
 
-Scheduled run каждые два часа проверяет все семь targets и автоматически dispatch'ит основной
+Scheduled run каждый час проверяет все семь targets и автоматически dispatch'ит основной
 pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов: по
 умолчанию включён только `wot-eu`, а `dispatch_pipelines` выключен, поэтому он остаётся безопасным
 dry-run.

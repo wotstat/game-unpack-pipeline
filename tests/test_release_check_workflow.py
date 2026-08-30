@@ -13,13 +13,13 @@ def workflow() -> dict[Any, Any]:
     return cast(dict[Any, Any], yaml.safe_load(WORKFLOW_PATH.read_text()))
 
 
-def test_release_checker_runs_every_two_hours_and_keeps_safe_manual_defaults() -> None:
+def test_release_checker_runs_hourly_and_keeps_safe_manual_defaults() -> None:
     document = workflow()
     trigger = document[True]
     inputs = trigger["workflow_dispatch"]["inputs"]
 
     assert set(trigger) == {"schedule", "workflow_dispatch"}
-    assert trigger["schedule"] == [{"cron": "23 */2 * * *"}]
+    assert trigger["schedule"] == [{"cron": "23 * * * *"}]
     assert set(inputs) == {
         "check_wot_eu",
         "check_wot_na",

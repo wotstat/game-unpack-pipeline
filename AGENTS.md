@@ -31,7 +31,7 @@ manual workflow_dispatch
 
 Отдельный `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe проверяет
 targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме параллельно запускает
-основной workflow для отличающихся targets. Cron `23 */2 * * *` проверяет все семь targets и всегда
+основной workflow для отличающихся targets. Cron `23 * * * *` проверяет все семь targets и всегда
 работает в dispatch-режиме. Ручной запуск по умолчанию проверяет только `wot-eu` как безопасный
 dry-run.
 
@@ -63,7 +63,7 @@ workflow или отдельный репозиторий и не перенос
 ## Текущие контракты
 
 - Единственная точка ручного production-запуска — `.github/workflows/process-game-release.yml`.
-- `.github/workflows/check-game-releases.yml` запускается по cron `23 */2 * * *` и вручную. Cron
+- `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, `wot-eu: true` по умолчанию и `dispatch_pipelines: false`. Реальный dispatch всегда
   использует default branch, `sd`, `ALL` и все три snapshot consumer.

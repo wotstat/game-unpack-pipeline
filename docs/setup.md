@@ -201,8 +201,8 @@ ClickHouse и S3 в Pages workflow недоступны.
 
 ## 7. Автоматическая и ручная проверка новых версий
 
-Workflow автоматически запускается каждые два часа по расписанию `23 */2 * * *`: в `00:23`,
-`02:23`, ... UTC. Scheduled run проверяет все семь targets и dispatch'ит основной pipeline для
+Workflow автоматически запускается каждый час по расписанию `23 * * * *`: в `00:23`,
+`01:23`, ... UTC. Scheduled run проверяет все семь targets и dispatch'ит основной pipeline для
 найденных новых версий.
 
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
