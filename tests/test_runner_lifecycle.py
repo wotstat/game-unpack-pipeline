@@ -315,6 +315,94 @@ class EmergencyCredentialTests(unittest.TestCase):
             lifecycle.delete_emergency_application_credentials(Mock(), self.identity)
 
 
+class ProvisionOrderingTests(unittest.TestCase):
+    def test_waits_for_active_before_publishing_emergency_metadata(self) -> None:
+        arguments = Mock(instance_key="manual-123456-2")
+        config = Mock(
+            password="not-a-real-secret",
+            auth_url="https://cloud.api.selcloud.ru/identity/v3",
+            region_name="ru-7",
+        )
+        server_id = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
+        credential_id = "123e4567-e89b-12d3-a456-426614174000"
+        server_is_active = False
+
+        def mark_server_active(*_args: object, **_kwargs: object) -> None:
+            nonlocal server_is_active
+            server_is_active = True
+
+        def publish_emergency_metadata(*_args: object, **_kwargs: object) -> None:
+            self.assertTrue(
+                server_is_active,
+                "emergency metadata must not be written while the server is BUILDING",
+            )
+
+        environment = {
+            "GITHUB_APP_TOKEN": "test-app-token",
+            "GITHUB_PUBLIC_TOKEN": "test-public-token",
+            "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_RUN_ID": "123456",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(lifecycle.SelectelConfig, "from_environment", return_value=config),
+            patch.object(lifecycle, "add_mask"),
+            patch.object(lifecycle, "write_output"),
+            patch.object(lifecycle, "append_summary"),
+            patch.object(lifecycle, "preflight"),
+            patch.object(
+                lifecycle,
+                "emergency_schedule",
+                return_value=(
+                    datetime(2026, 8, 31, 12, 0, tzinfo=UTC),
+                    datetime(2026, 8, 31, 13, 0, tzinfo=UTC),
+                ),
+            ),
+            patch.object(lifecycle, "create_security_group", return_value="security-group-id"),
+            patch.object(
+                lifecycle,
+                "create_public_port",
+                return_value=("public-port-id", "192.0.2.1"),
+            ),
+            patch.object(
+                lifecycle,
+                "resolve_runner_package",
+                return_value=("https://example.test/runner.tgz", "a" * 64, "2.999.0"),
+            ),
+            patch.object(
+                lifecycle,
+                "create_jit_runner",
+                side_effect=[
+                    ("1", "downloader-jit"),
+                    ("2", "gui-assets-jit"),
+                    ("3", "source-jit"),
+                    ("4", "uploader-jit"),
+                ],
+            ),
+            patch.object(lifecycle, "render_cloud_config", return_value="#cloud-config\n"),
+            patch.object(lifecycle, "create_server", return_value=server_id),
+            patch.object(
+                lifecycle,
+                "create_emergency_application_credential",
+                return_value=(credential_id, "emergency-secret"),
+            ),
+            patch.object(
+                lifecycle,
+                "wait_for_server_active",
+                side_effect=mark_server_active,
+            ),
+            patch.object(
+                lifecycle,
+                "set_server_emergency_credentials",
+                side_effect=publish_emergency_metadata,
+            ),
+            patch.object(lifecycle, "wait_for_runner_online"),
+            patch.object(lifecycle, "show_console_log"),
+        ):
+            lifecycle.provision(arguments)
+
+
 class SanitizerTests(unittest.TestCase):
     def test_redacts_known_token_shapes_and_jit_lines(self) -> None:
         registration_token = "ghs" + "_" + "a" * 40
@@ -631,6 +719,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("READABLE_VERSION: ${{ needs.download.outputs.readable_version }}", workflow)
         self.assertNotIn("VERSION_NAME: ${{ needs.download.outputs.version_name }}", workflow)
         self.assertIn("actions: read", workflow)
+        self.assertIn("GH_REPO: ${{ github.repository }}", workflow)
         self.assertIn("PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}", workflow)
         self.assertIn("format: html", workflow)
         self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)

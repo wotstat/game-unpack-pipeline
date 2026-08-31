@@ -1364,6 +1364,7 @@ def provision(arguments: argparse.Namespace) -> None:
         server_id = create_server(config, identity, port_id, cloud_config_path)
         write_output("server_id", server_id)
         print(f"Server created: {server_id}")
+        wait_for_server_active(config, server_id, timeout_seconds=300)
         emergency_credential_id, emergency_credential_secret = (
             create_emergency_application_credential(
                 config,
@@ -1380,7 +1381,6 @@ def provision(arguments: argparse.Namespace) -> None:
             emergency_credential_secret,
         )
         print(f"Four-hour emergency self-destruct armed: {emergency_deadline_output}")
-        wait_for_server_active(config, server_id, timeout_seconds=300)
         wait_for_runner_online(
             downloader_runner,
             downloader_runner_id,
