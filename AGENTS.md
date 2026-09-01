@@ -32,8 +32,8 @@ manual workflow_dispatch
 Отдельный `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe проверяет
 targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме параллельно запускает
 основной workflow для отличающихся targets. Cron `23 * * * *` проверяет все семь targets и всегда
-работает в dispatch-режиме. Ручной запуск по умолчанию проверяет только `wot-eu` как безопасный
-dry-run.
+работает в dispatch-режиме. Ручной запуск по умолчанию также проверяет все семь targets и работает в
+dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
 target, client type, languages и три независимых переключателя `publish_wot_src`,
@@ -62,10 +62,11 @@ workflow или отдельный репозиторий и не перенос
 
 ## Текущие контракты
 
-- Единственная точка ручного production-запуска — `.github/workflows/process-game-release.yml`.
+- Единственный production workflow — `.github/workflows/process-game-release.yml`; checker только
+  dispatch'ит его и не создаёт downloader Run самостоятельно.
 - `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
-  inputs, `wot-eu: true` по умолчанию и `dispatch_pipelines: false`. Реальный dispatch всегда
+  inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
   использует default branch, `sd`, `ALL` и все три snapshot consumer.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status

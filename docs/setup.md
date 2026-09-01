@@ -6,8 +6,8 @@ keys нужно вводить непосредственно в GitHub Settings
 логи.
 
 `Process game release` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
-direct public IP в Selectel. `Check game releases`, напротив, по умолчанию только сравнивает версии
-и ничего не создаёт.
+direct public IP в Selectel. `Check game releases` по умолчанию проверяет все регионы и dispatch'ит
+production pipeline для найденных новых версий; такой запуск тоже может создать тарифицируемые ресурсы.
 
 ## 1. Selectel project и ёмкость
 
@@ -206,9 +206,9 @@ Workflow автоматически запускается каждый час �
 найденных новых версий.
 
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
-предоставляет отдельный checkbox для каждого из семи targets; по умолчанию включён только
-`check_wot_eu`. `dispatch_pipelines` по умолчанию выключен, поэтому ручной запуск безопасно покажет
-в логе одно из состояний:
+предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
+и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
+Для dry-run нужно снять `dispatch_pipelines`. В логе появится одно из состояний:
 
 - `action=none` — release name совпадает со status;
 - `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;

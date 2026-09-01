@@ -139,9 +139,9 @@ HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD` в `ru-7
 chain для объявленной default language, затем сравнивает `release_name` с [`status`](../status).
 
 Scheduled run каждый час проверяет все семь targets и автоматически dispatch'ит основной
-pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов: по
-умолчанию включён только `wot-eu`, а `dispatch_pipelines` выключен, поэтому он остаётся безопасным
-dry-run.
+pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов; по
+умолчанию включены все семь targets и `dispatch_pipelines`, поэтому найденные новые версии сразу
+запускают production pipeline. Для dry-run нужно явно выключить `dispatch_pipelines`.
 
 При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же
 target. Если последняя завершённая попытка той же `release_name` уже имеет результат `failure` или
@@ -267,7 +267,7 @@ scheduler нет. Внешний status store отсутствует: Git-ист
 
 Полная настройка Selectel, GitHub App, Environments, variables и Telegram описана в
 [`setup.md`](setup.md). `Process game release` сразу создаёт тарифицируемые ресурсы;
-`Check game releases` по умолчанию работает как безопасный dry-run.
+`Check game releases` по умолчанию dispatch'ит production pipeline для найденных новых версий.
 
 ```text
 .github/actions/setup-openstack/

@@ -13,7 +13,7 @@ def workflow() -> dict[Any, Any]:
     return cast(dict[Any, Any], yaml.safe_load(WORKFLOW_PATH.read_text()))
 
 
-def test_release_checker_runs_hourly_and_keeps_safe_manual_defaults() -> None:
+def test_release_checker_runs_hourly_and_dispatches_all_targets_by_default() -> None:
     document = workflow()
     trigger = document[True]
     inputs = trigger["workflow_dispatch"]["inputs"]
@@ -30,8 +30,7 @@ def test_release_checker_runs_hourly_and_keeps_safe_manual_defaults() -> None:
         "check_mt_public_test",
         "dispatch_pipelines",
     }
-    assert inputs["check_wot_eu"]["default"] is True
-    assert all(item["default"] is False for name, item in inputs.items() if name != "check_wot_eu")
+    assert all(item["default"] is True for item in inputs.values())
     assert all(item["type"] == "boolean" for item in inputs.values())
 
 

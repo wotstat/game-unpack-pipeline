@@ -19,37 +19,37 @@ on:
       check_wot_na:
         description: Check WoT NA
         required: true
-        default: false
+        default: true
         type: boolean
       check_wot_asia:
         description: Check WoT Asia
         required: true
-        default: false
+        default: true
         type: boolean
       check_wot_common_test:
         description: Check WoT Common Test
         required: true
-        default: false
+        default: true
         type: boolean
       check_wot_cn:
         description: Check WoT CN
         required: true
-        default: false
+        default: true
         type: boolean
       check_mt_ru:
         description: Check Мир танков RU
         required: true
-        default: false
+        default: true
         type: boolean
       check_mt_public_test:
         description: Check Мир танков Public Test
         required: true
-        default: false
+        default: true
         type: boolean
       dispatch_pipelines:
         description: Dispatch pipelines for mismatched releases
         required: true
-        default: false
+        default: true
         type: boolean
 
 permissions:
