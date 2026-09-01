@@ -10,6 +10,7 @@ from scripts.render_status_page import (
     HistoryEntry,
     ReleaseCheck,
     build_site,
+    collect_history,
     render_badge,
     render_page,
     render_release_check_badge,
@@ -19,6 +20,8 @@ REPOSITORY_ROOT = Path(__file__).parents[1]
 
 
 def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> None:
+    statuses = {target: load_status(REPOSITORY_ROOT / "status", target) for target in TARGETS}
+    history = collect_history(REPOSITORY_ROOT, statuses, limit=12)
     build_site(
         REPOSITORY_ROOT,
         tmp_path,
@@ -32,7 +35,15 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     assert "2.3.1.3 #926" in page
     assert "Общий тест WoT" in page
     assert "Общий тест МТ" in page  # noqa: RUF001
-    assert "#33258764585" in page
+    current_run_ids = {
+        status.last_run.run_id for status in statuses.values() if status.last_run is not None
+    }
+    historical_run = next(
+        entry
+        for entry in history
+        if entry.run_id is not None and entry.run_id not in current_run_ids
+    )
+    assert f"#{historical_run.run_id}" in page
     assert 'class="overall overall--' in page
     assert 'class="theme-toggle"' in page
     assert 'class="theme-transition-scope"' in page
