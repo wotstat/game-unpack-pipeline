@@ -67,6 +67,36 @@ def test_contract_supports_loose_file_provenance() -> None:
     assert isinstance(validated, FileManifestEntryV1)
 
 
+def test_contract_supports_formatted_web_sources() -> None:
+    document = {
+        "path": "gui/gameface/bundle.js",
+        "layer": {"kind": "base"},
+        "size": 24,
+        "sha256": SHA_A,
+        "source": {
+            "kind": "loose-file",
+            "part": "client",
+            "part_version": "opaque.1",
+            "client_tree_path": "res/gui/gameface/bundle.js",
+            "client_tree_sha256": SHA_B,
+            "entry_path": "gui/gameface/bundle.js",
+            "entry_sha256": SHA_B,
+        },
+        "representation": {
+            "kind": "web-format",
+            "source_path": "gui/gameface/bundle.js",
+            "source_sha256": SHA_B,
+            "tool": "prettier",
+            "tool_version": "3.9.6",
+            "diagnostics": ["parser=babel"],
+        },
+    }
+
+    validated = ContractRegistry().validate("file-manifest-entry", document)
+
+    assert isinstance(validated, FileManifestEntryV1)
+
+
 def test_file_manifest_rejects_actionscript_representation() -> None:
     document = {
         "path": "base_app/scripts/App.as",

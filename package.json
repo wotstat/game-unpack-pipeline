@@ -1,0 +1,7 @@
+{
+  "name": "game-unpack-pipeline-tools",
+  "private": true,
+  "dependencies": {
+    "prettier": "3.9.6"
+  }
+}

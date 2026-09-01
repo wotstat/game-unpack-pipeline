@@ -40,6 +40,7 @@ from game_downloader.pipeline import (
 )
 from game_downloader.readable import (
     FfdecTransformer,
+    PrettierFormatter,
     ReadablePolicy,
     Uncompyle6Transformer,
     create_readable_implementations,
@@ -329,6 +330,18 @@ def doctor(
         )
     except Exception as exc:
         checks.append({"detail": str(exc), "name": "actionscript-decompiler", "ok": False})
+
+    try:
+        identity = PrettierFormatter(ReadablePolicy()).identity
+        checks.append(
+            {
+                "detail": f"{identity.name} {identity.version}",
+                "name": "web-formatter",
+                "ok": True,
+            }
+        )
+    except Exception as exc:
+        checks.append({"detail": str(exc), "name": "web-formatter", "ok": False})
 
     archive_tool = next(
         (name for name in ("7zz", "7z", "bsdtar") if shutil.which(name) is not None),

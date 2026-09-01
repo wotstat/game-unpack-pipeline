@@ -188,7 +188,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           "${apt[@]}" update
           "${apt[@]}" install --yes --no-install-recommends \
-            aria2 ca-certificates curl openjdk-17-jre-headless p7zip-full sysstat time unzip
+            aria2 ca-certificates curl nodejs npm openjdk-17-jre-headless p7zip-full sysstat time unzip
           "${apt[@]}" clean
           "${privileged[@]}" rm -rf /var/lib/apt/lists/*
 
@@ -218,7 +218,11 @@ jobs:
 
       - name: Install downloader
         shell: bash
-        run: uv sync --frozen --no-dev
+        run: |
+          uv sync --frozen --no-dev
+          npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+          printf 'GAME_DOWNLOADER_PRETTIER=%s/node_modules/.bin/prettier\n' \
+            "${GITHUB_WORKSPACE}" >>"${GITHUB_ENV}"
 
       - name: Check runtime
         shell: bash
@@ -257,7 +261,7 @@ jobs:
         shell: bash
         run: bash .github/scripts/run-stage.sh plan-readable
 
-      - name: Readable · Transform Python, XML and translations
+      - name: Readable · Transform Python, XML, translations and web sources
         shell: bash
         run: bash .github/scripts/run-stage.sh transform-readable
 

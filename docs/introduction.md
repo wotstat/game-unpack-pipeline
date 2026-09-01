@@ -64,8 +64,10 @@ resolve → plan-acquisition → download → verify → assemble-client
 
 Стадии сохраняют атомарные checkpoints внутри run directory. Переход читает непосредственный
 checkpoint, проверяет его digest и завершает процесс полной независимой проверкой snapshot.
-Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и ActionScript из SWC, сохраняет
-исходные assets и формирует provenance manifests. `READY` появляется последним.
+Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и ActionScript из SWC, а также
+форматирует HTML, CSS и JavaScript через pinned Prettier. Остальные assets сохраняются без
+изменений; для каждого преобразования provenance manifest фиксирует исходный digest, вид
+representation и точную версию инструмента. `READY` появляется последним.
 
 Формат результата закреплён схемами из [`contracts/v1`](../contracts/v1). Publisher получают только
 абсолютный snapshot path, snapshot ID и SHA-256 canonical descriptor и повторно проверяют handoff
@@ -100,10 +102,12 @@ Pass multiple languages as a comma-separated list. Additional examples:
 ./download.sh mt-ru ./mt-data --language RU --client hd
 ```
 
-The script requires a Unix-like system, [`uv`](https://docs.astral.sh/uv/), Java, and one of `7zz`,
-`7z`, or `bsdtar`. It downloads the pinned FFDec `26.2.1` release into the ignored local `.tools`
-directory, verifies the official archive's SHA-256 checksum, and reuses the installation on later
-runs. The initial FFDec installation also requires `curl` and `unzip`.
+The script requires a Unix-like system, [`uv`](https://docs.astral.sh/uv/), Java, Node.js with npm,
+and one of `7zz`, `7z`, or `bsdtar`. It installs the lockfile-pinned Prettier `3.9.6` package into
+the ignored local `node_modules` directory. It also downloads the pinned FFDec `26.2.1` release
+into the ignored local `.tools` directory, verifies the official archive's SHA-256 checksum, and
+reuses both installations on later runs. The initial FFDec installation also requires `curl` and
+`unzip`.
 
 The selected directory is a persistent workspace containing the download cache, checkpoints, and
 sealed snapshots. Later runs reuse already verified blobs. The completed result is stored under

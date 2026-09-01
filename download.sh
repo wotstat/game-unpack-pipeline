@@ -143,6 +143,10 @@ command -v uv >/dev/null 2>&1 ||
   fail "uv was not found; install it from https://docs.astral.sh/uv/"
 command -v java >/dev/null 2>&1 ||
   fail "Java was not found; install OpenJDK 17 or newer"
+command -v node >/dev/null 2>&1 ||
+  fail "Node.js was not found; install Node.js 14 or newer"
+command -v npm >/dev/null 2>&1 ||
+  fail "npm was not found; install it with Node.js"
 
 archive_tool=""
 for candidate in 7zz 7z bsdtar; do
@@ -153,6 +157,23 @@ for candidate in 7zz 7z bsdtar; do
 done
 [[ -n "${archive_tool}" ]] ||
   fail "7zz, 7z, or bsdtar was not found; install 7-Zip or libarchive"
+
+readonly prettier_version="3.9.6"
+prettier_executable="${GAME_DOWNLOADER_PRETTIER:-}"
+if [[ -z "${prettier_executable}" ]]; then
+  prettier_executable="${repo_root}/node_modules/.bin/prettier"
+  if [[ ! -x "${prettier_executable}" ]] ||
+    [[ "$("${prettier_executable}" --version 2>/dev/null || true)" != "${prettier_version}" ]]; then
+    (cd "${repo_root}" && npm ci --ignore-scripts --omit=dev --no-audit --no-fund)
+  fi
+elif [[ "${prettier_executable}" != /* ]]; then
+  prettier_executable="${invocation_root}/${prettier_executable}"
+fi
+[[ -x "${prettier_executable}" ]] ||
+  fail "Prettier was not found or is not executable: ${prettier_executable}"
+[[ "$("${prettier_executable}" --version)" == "${prettier_version}" ]] ||
+  fail "Prettier failed the ${prettier_version} version check"
+export GAME_DOWNLOADER_PRETTIER="${prettier_executable}"
 
 readonly ffdec_version="26.2.1"
 readonly ffdec_sha256="0333b56998a55bd83f4e0deb678a811fcdc45607582b4f5dd438309c8c3ad5ce"

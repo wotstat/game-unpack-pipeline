@@ -79,10 +79,16 @@ def test_doctor_checks_contracts_and_workspace(tmp_path: Path) -> None:
     ffdec = tmp_path / "ffdec"
     ffdec.write_text("#!/bin/sh\necho 'JPEXS Free Flash Decompiler v.26.2.1'\n")
     ffdec.chmod(0o755)
+    prettier = tmp_path / "prettier"
+    prettier.write_text("#!/bin/sh\necho '3.9.6'\n")
+    prettier.chmod(0o755)
     result = CliRunner().invoke(
         cli,
         ["doctor", "--data-root", str(tmp_path), "--json"],
-        env={"GAME_DOWNLOADER_FFDEC": str(ffdec)},
+        env={
+            "GAME_DOWNLOADER_FFDEC": str(ffdec),
+            "GAME_DOWNLOADER_PRETTIER": str(prettier),
+        },
     )
 
     assert result.exit_code == 0, result.output
@@ -96,6 +102,7 @@ def test_doctor_checks_contracts_and_workspace(tmp_path: Path) -> None:
         "contracts",
         "pyc-decompiler",
         "targets",
+        "web-formatter",
         "workspace",
     }
 

@@ -28,7 +28,7 @@ def test_download_job_exposes_every_pipeline_stage_as_one_step() -> None:
     ]
     assert [step["name"] for step in stage_steps[7:13]] == [
         "Readable · Plan output",
-        "Readable · Transform Python, XML and translations",
+        "Readable · Transform Python, XML, translations and web sources",
         "Readable · Decompile ActionScript",
         "Readable · Assemble and link tree",
         "Readable · Generate engine stubs",

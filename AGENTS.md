@@ -42,7 +42,7 @@ target, client type, languages и три независимых переключ
 ## Границы компонентов
 
 - `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,
-  client/VFS/readable pipeline, transforms, stubs, seal и verify `GameSnapshot`.
+  client/VFS/readable pipeline, Python/XML/MO/web transforms, stubs, seal и verify `GameSnapshot`.
 - `.github/workflows`, `.github/scripts`, `scripts`, `status-page`: production entrypoint, stage
   execution и telemetry, Selectel lifecycle, JIT runner bootstrap, publisher calls,
   cleanup/reconciliation и генерация GitHub Pages.

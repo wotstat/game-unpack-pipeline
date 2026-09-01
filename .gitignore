@@ -15,5 +15,6 @@ build/
 .env
 .env.*
 .venv/
+node_modules/
 *.pem
 .DS_Store

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wotstat.info/contracts/game-downloader/file-manifest-entry/v1.0.0.json",
+  "$id": "https://wotstat.info/contracts/game-downloader/file-manifest-entry/v1.1.0.json",
   "title": "GameSnapshot v1 file manifest entry",
   "type": "object",
   "additionalProperties": false,
@@ -45,7 +45,8 @@
             "passthrough",
             "pyc-to-py",
             "packed-xml-to-xml",
-            "mo-to-po"
+            "mo-to-po",
+            "web-format"
           ]
         },
         "source_path": { "$ref": "#/$defs/relativePath" },

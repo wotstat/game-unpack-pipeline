@@ -1015,6 +1015,7 @@ class RepresentationKind(StrEnum):
     PYC_TO_PY = "pyc-to-py"
     PACKED_XML_TO_XML = "packed-xml-to-xml"
     MO_TO_PO = "mo-to-po"
+    WEB_FORMAT = "web-format"
     SWC_TO_AS = "swc-to-as"
 
 
@@ -1167,6 +1168,11 @@ class ReadableFile(FrozenModel):
         elif self.representation.kind is RepresentationKind.PACKED_XML_TO_XML:
             if self.path != self.source.path or not self.path.lower().endswith(".xml"):
                 raise ValueError("packed XML representation must preserve the .xml path")
+        elif self.representation.kind is RepresentationKind.WEB_FORMAT:
+            if self.path != self.source.path or not self.path.lower().endswith(
+                (".html", ".css", ".js")
+            ):
+                raise ValueError("web formatting must preserve an HTML, CSS, or JS path")
         elif self.representation.kind is RepresentationKind.SWC_TO_AS:
             raise ValueError("SWC representations belong in ActionScript outputs")
         return self

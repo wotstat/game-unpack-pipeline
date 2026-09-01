@@ -79,6 +79,11 @@ PYTHON27_SYNTAX_TOOL = ToolIdentity(
     source="https://github.com/amyreese/fissix",
 )
 ENGINE_STUBS_TOOL = ToolIdentity(name="game-downloader-engine-stubs", version="2")
+WEB_FORMAT_PARSERS = {
+    ".css": "css",
+    ".html": "html",
+    ".js": "babel",
+}
 
 
 class TransformFailedError(StageExecutionError):
@@ -90,7 +95,7 @@ class ReadablePolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = "wot-readable"
-    version: str = "12"
+    version: str = "13"
     pyc_tool_name: str = "game-downloader-pyc"
     pyc_tool_version: str = "4+uncompyle6-3.9.3"
     pyc_tool_source: str = "https://github.com/rocky/python-uncompyle6"
@@ -102,6 +107,11 @@ class ReadablePolicy(FrozenModel):
     actionscript_tool_name: str = "ffdec"
     actionscript_tool_version: str = "26.2.1"
     actionscript_tool_source: str = "https://github.com/jindrapetrik/jpexs-decompiler"
+    web_formatter_tool_name: str = "prettier"
+    web_formatter_tool_version: str = "3.9.6"
+    web_formatter_tool_source: str = "https://github.com/prettier/prettier"
+    web_formatter_print_width: int = Field(default=100, ge=40, le=240)
+    web_formatter_tab_width: int = Field(default=2, ge=1, le=8)
     transform_workers: int = Field(default=6, ge=1, le=32)
     pyc_batch_size: int = Field(default=32, ge=1, le=256)
     actionscript_workers: int = Field(default=1, ge=1, le=4)
@@ -135,6 +145,17 @@ class PycTransformer(Protocol):
         source: Path,
         magic: bytes,
         scratch_directory: Path,
+    ) -> tuple[bytes, tuple[str, ...]]: ...
+
+
+class WebFormatter(Protocol):
+    @property
+    def identity(self) -> ToolIdentity: ...
+
+    def format(
+        self,
+        source: Path,
+        parser: str,
     ) -> tuple[bytes, tuple[str, ...]]: ...
 
 
@@ -276,6 +297,110 @@ def _limit_ffdec(maximum_cpu_seconds: int) -> None:
         _set_resource_limit(resource.RLIMIT_FSIZE, 128 * 1024 * 1024)
     with suppress(OSError, ValueError):
         _set_resource_limit(resource.RLIMIT_NOFILE, 256)
+
+
+class PrettierFormatter:
+    def __init__(self, policy: ReadablePolicy, executable: Path | None = None) -> None:
+        self._policy = policy
+        self._configured_executable = executable
+        self._resolved_executable: Path | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def identity(self) -> ToolIdentity:
+        self._ensure_healthy()
+        return ToolIdentity(
+            name=self._policy.web_formatter_tool_name,
+            version=self._policy.web_formatter_tool_version,
+            source=self._policy.web_formatter_tool_source,
+        )
+
+    def _ensure_healthy(self) -> Path:
+        with self._lock:
+            if self._resolved_executable is not None:
+                return self._resolved_executable
+            configured = self._configured_executable
+            if configured is None:
+                configured_value = os.environ.get("GAME_DOWNLOADER_PRETTIER")
+                discovered = configured_value or shutil.which(self._policy.web_formatter_tool_name)
+                if discovered is None:
+                    raise TransformFailedError(
+                        f"{self._policy.web_formatter_tool_name} "
+                        f"{self._policy.web_formatter_tool_version} is not installed"
+                    )
+                configured = Path(discovered)
+            if not configured.is_file():
+                raise TransformFailedError(f"web formatter does not exist: {configured}")
+            try:
+                completed = subprocess.run(
+                    [str(configured), "--version"],
+                    check=False,
+                    capture_output=True,
+                    timeout=30,
+                    env={
+                        "HOME": os.environ.get("HOME", "/nonexistent"),
+                        "LANG": "C.UTF-8",
+                        "LC_ALL": "C.UTF-8",
+                        "PATH": os.environ.get("PATH", ""),
+                    },
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise TransformFailedError(f"cannot run web formatter: {exc}") from exc
+            observed = (completed.stdout + completed.stderr).decode("utf-8", "replace").strip()
+            if completed.returncode != 0 or observed != self._policy.web_formatter_tool_version:
+                raise TransformFailedError(
+                    "web formatter health check did not report the pinned version "
+                    f"{self._policy.web_formatter_tool_version}: {observed[:512]}"
+                )
+            self._resolved_executable = configured.resolve()
+            return self._resolved_executable
+
+    def format(self, source: Path, parser: str) -> tuple[bytes, tuple[str, ...]]:
+        executable = self._ensure_healthy()
+        source_bytes = source.read_bytes()
+        try:
+            source_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise TransformFailedError(f"web source is not UTF-8: {source}") from exc
+        try:
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--no-config",
+                    "--parser",
+                    parser,
+                    "--print-width",
+                    str(self._policy.web_formatter_print_width),
+                    "--tab-width",
+                    str(self._policy.web_formatter_tab_width),
+                    "--end-of-line",
+                    "lf",
+                ],
+                input=source_bytes,
+                check=False,
+                capture_output=True,
+                timeout=self._policy.subprocess_timeout_seconds,
+                env={
+                    "HOME": os.environ.get("HOME", "/nonexistent"),
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PATH": os.environ.get("PATH", ""),
+                },
+                start_new_session=True,
+                preexec_fn=partial(
+                    _limit_decompiler,
+                    self._policy.subprocess_timeout_seconds,
+                    self._policy.max_transform_output_bytes,
+                ),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransformFailedError(f"web formatter timed out for {source}") from exc
+        except OSError as exc:
+            raise TransformFailedError(f"cannot run web formatter for {source}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", "replace").strip()
+            raise TransformFailedError(f"web formatter failed for {source}: {detail[:512]}")
+        return completed.stdout, (f"parser={parser}",)
 
 
 class FfdecTransformer:
@@ -1367,10 +1492,12 @@ class ReadableAssembler:
         policy: ReadablePolicy | None = None,
         pyc_transformer: PycTransformer | None = None,
         actionscript_transformer: ActionScriptTransformer | None = None,
+        web_formatter: WebFormatter | None = None,
     ) -> None:
         self._policy = policy or ReadablePolicy()
         self._pyc = pyc_transformer or Uncompyle6Transformer(self._policy)
         self._actionscript = actionscript_transformer or FfdecTransformer(self._policy)
+        self._web_formatter = web_formatter or PrettierFormatter(self._policy)
         self._pyc_syntax = Python27SourceValidator(self._policy)
         self._mo = MoCatalogueConverter(self._policy)
 
@@ -1625,6 +1752,9 @@ class ReadableAssembler:
             else:
                 raise TransformFailedError(f"unknown XML encoding/format: {item.path}")
             output = item.path
+        elif PurePosixPath(lowered).suffix in WEB_FORMAT_PARSERS:
+            representation = RepresentationKind.WEB_FORMAT
+            output = item.path
         else:
             representation = RepresentationKind.PASSTHROUGH
             output = item.path
@@ -1709,6 +1839,13 @@ class ReadableAssembler:
         elif plan.representation is RepresentationKind.MO_TO_PO:
             output, diagnostics = self._mo.convert(plan.source_path.read_bytes())
             tool = MO_TOOL
+        elif plan.representation is RepresentationKind.WEB_FORMAT:
+            suffix = PurePosixPath(plan.source.path).suffix.casefold()
+            parser = WEB_FORMAT_PARSERS.get(suffix)
+            if parser is None:
+                raise AssertionError("web-format plan has an unsupported suffix")
+            output, diagnostics = self._web_formatter.format(plan.source_path, parser)
+            tool = self._web_formatter.identity
         else:
             raise AssertionError("passthrough plan reached transformer")
         return self._commit_transform(plan, root, output, diagnostics, tool)
@@ -1842,6 +1979,9 @@ class ReadableAssembler:
             identities[(PACKED_XML_TOOL.name, PACKED_XML_TOOL.version)] = PACKED_XML_TOOL
         if RepresentationKind.MO_TO_PO in representations:
             identities[(MO_TOOL.name, MO_TOOL.version)] = MO_TOOL
+        if RepresentationKind.WEB_FORMAT in representations:
+            identity = self._web_formatter.identity
+            identities[(identity.name, identity.version)] = identity
         if has_actionscript:
             identity = self._actionscript.identity
             identities[(identity.name, identity.version)] = identity
@@ -2131,9 +2271,15 @@ def create_readable_implementations(
     policy: ReadablePolicy | None = None,
     pyc_transformer: PycTransformer | None = None,
     actionscript_transformer: ActionScriptTransformer | None = None,
+    web_formatter: WebFormatter | None = None,
 ) -> Mapping[Stage, StageImplementation]:
     selected = policy or ReadablePolicy()
-    assembler = ReadableAssembler(selected, pyc_transformer, actionscript_transformer)
+    assembler = ReadableAssembler(
+        selected,
+        pyc_transformer,
+        actionscript_transformer,
+        web_formatter,
+    )
     configuration = cast(Mapping[str, JsonValue], selected.model_dump(mode="json"))
 
     def execute_plan(context: StageContext) -> Mapping[str, JsonValue]:
@@ -2248,9 +2394,10 @@ def create_readable_implementations(
             item.representation is RepresentationKind.PACKED_XML_TO_XML for item in remaining
         )
         mo_count = sum(item.representation is RepresentationKind.MO_TO_PO for item in remaining)
+        web_count = sum(item.representation is RepresentationKind.WEB_FORMAT for item in remaining)
         context.progress(
             f"scheduled {len(batched_pyc)} PYC, "
-            f"{packed_xml_count} packed XML and {mo_count} MO transformations"
+            f"{packed_xml_count} packed XML, {mo_count} MO and {web_count} web transformations"
         )
         if batched_pyc:
             assert batch_transformer is not None
@@ -2323,7 +2470,7 @@ def create_readable_implementations(
                                     f"transformed {completed}/{len(runtime_plans)} files"
                                 )
                     context.progress(
-                        f"converted {len(remaining_work)} XML/MO inputs in "
+                        f"converted {len(remaining_work)} non-PYC inputs in "
                         f"{time.monotonic() - phase_started:.1f}s"
                     )
             finally:
@@ -2676,13 +2823,13 @@ def create_readable_implementations(
 
     return {
         Stage.PLAN_READABLE: StageImplementation(
-            implementation_version="plan-readable-v1",
+            implementation_version="plan-readable-v2",
             execute=execute_plan,
             validate=validate_plan,
             configuration=configuration,
         ),
         Stage.TRANSFORM_READABLE: StageImplementation(
-            implementation_version="transform-readable-v5",
+            implementation_version="transform-readable-v6",
             execute=execute_transforms,
             validate=validate_transforms,
             audit=audit_transforms,
@@ -2723,10 +2870,12 @@ __all__ = [
     "FfdecTransformer",
     "MoCatalogueConverter",
     "PackedXmlDecoder",
+    "PrettierFormatter",
     "PycTransformer",
     "ReadableAssembler",
     "ReadablePolicy",
     "TransformFailedError",
     "Uncompyle6Transformer",
+    "WebFormatter",
     "create_readable_implementations",
 ]

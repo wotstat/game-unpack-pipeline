@@ -45,6 +45,7 @@ from game_downloader.readable import (
     FfdecTransformer,
     MoCatalogueConverter,
     PackedXmlDecoder,
+    PrettierFormatter,
     Python27SourceValidator,
     ReadableAssembler,
     ReadablePolicy,
@@ -247,6 +248,19 @@ class _FakeActionScriptTransformer:
         )
 
 
+class _FakeWebFormatter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    @property
+    def identity(self) -> ToolIdentity:
+        return ToolIdentity(name="fixture-prettier", version="1")
+
+    def format(self, source: Path, parser: str) -> tuple[bytes, tuple[str, ...]]:
+        self.calls.append((source.name, parser))
+        return f"formatted {parser}\n".encode(), (f"parser={parser}",)
+
+
 def _materialized_file(path: str, data: bytes, *, language: str | None = None) -> MaterializedFile:
     digest = hashlib.sha256(data).hexdigest()
     part = PartName.LOCALE if language is not None else PartName.CLIENT
@@ -337,6 +351,78 @@ def test_readable_assembler_transforms_required_formats_and_removes_compiled_sou
     )
     assert not os.access(workspace.root / result.base_root / "config.xml", os.W_OK)
     assert (workspace.root / result.actionscript_root).is_dir()
+
+
+def test_readable_assembler_formats_html_css_and_javascript_in_place(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "data")
+    workspace.initialize()
+    base_root = workspace.root / "materialized/base"
+    locale_root = workspace.root / "materialized/locales/EN"
+    base_root.mkdir(parents=True)
+    locale_root.mkdir(parents=True)
+    source_data = {
+        "gui/gameface/index.html": b"<!doctype html><html><body></body></html>",
+        "gui/gameface/styles.css": b"body{display:flex}",
+        "gui/gameface/bundle.js": b"const value={answer:42};",
+    }
+    for relative, data in source_data.items():
+        path = base_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o444)
+    materialized = MaterializationResult(
+        vfs_index_result_sha256="sha256:" + "1" * 64,
+        base_root="materialized/base",
+        locale_roots={"EN": "materialized/locales/EN"},
+        files=tuple(_materialized_file(path, data) for path, data in source_data.items()),
+    )
+    work_directory = workspace.root / "work/run/080-make-readable"
+    work_directory.mkdir(parents=True)
+    formatter = _FakeWebFormatter()
+
+    result = ReadableAssembler(web_formatter=formatter).build(
+        materialized,
+        workspace,
+        work_directory,
+    )
+
+    assert sorted(formatter.calls) == [
+        ("bundle.js", "babel"),
+        ("index.html", "html"),
+        ("styles.css", "css"),
+    ]
+    files = {item.path: item for item in result.files}
+    assert set(files) == set(source_data)
+    assert all(item.representation.kind is RepresentationKind.WEB_FORMAT for item in files.values())
+    assert files["gui/gameface/bundle.js"].diagnostics == ("parser=babel",)
+    assert files["gui/gameface/bundle.js"].representation.tool == "fixture-prettier"
+    assert (workspace.root / result.base_root / "gui/gameface/bundle.js").read_text() == (
+        "formatted babel\n"
+    )
+    assert ("fixture-prettier", "1") in {(item.name, item.version) for item in result.tools}
+
+
+def test_prettier_formatter_checks_version_and_formats_stdin(tmp_path: Path) -> None:
+    executable = tmp_path / "prettier"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = --version ]; then\n'
+        "  echo 3.9.6\n"
+        "  exit 0\n"
+        "fi\n"
+        "cat >/dev/null\n"
+        "printf 'const value = 1;\\n'\n"
+    )
+    executable.chmod(0o755)
+    source = tmp_path / "bundle.js"
+    source.write_text("const value=1")
+    formatter = PrettierFormatter(ReadablePolicy(), executable)
+
+    output, diagnostics = formatter.format(source, "babel")
+
+    assert formatter.identity.name == "prettier"
+    assert output == b"const value = 1;\n"
+    assert diagnostics == ("parser=babel",)
 
 
 def test_readable_assembler_exports_only_canonical_swc_libraries(tmp_path: Path) -> None:
@@ -468,6 +554,7 @@ def test_readable_stage_module_commits_and_reuses_every_phase(
     source_data = {
         "scripts/example.pyc": PYTHON_27_MAGIC + b"fixture",
         "gui/flash/swc/base_app-1.0-SNAPSHOT.swc": _swc(),
+        "gui/gameface/bundle.js": b"const value={answer:42};",
         "assets/value.bin": b"asset",
     }
     materialized_files: list[MaterializedFile] = []
@@ -555,6 +642,7 @@ def test_readable_stage_module_commits_and_reuses_every_phase(
             ReadablePolicy(transform_workers=2),
             _FakePycTransformer(),
             _FakeActionScriptTransformer(),
+            _FakeWebFormatter(),
         )
     )
     pipeline = Pipeline(workspace, implementations)
@@ -579,20 +667,20 @@ def test_readable_stage_module_commits_and_reuses_every_phase(
     )
     statistics = {item.stage: item.statistics for item in report.stages}
     assert statistics[Stage.PLAN_READABLE] == {
-        "files": 4,
-        "transform_files": 1,
+        "files": 5,
+        "transform_files": 2,
         "actionscript_libraries": 1,
         "passthrough_files": 3,
     }
-    assert statistics[Stage.TRANSFORM_READABLE]["files"] == 1
+    assert statistics[Stage.TRANSFORM_READABLE]["files"] == 2
     assert statistics[Stage.DECOMPILE_ACTIONSCRIPT]["libraries"] == 1
     assert statistics[Stage.ASSEMBLE_READABLE] == {
-        "files": 4,
+        "files": 5,
         "actionscript_files": 1,
         "passthrough_files": 3,
     }
     assert statistics[Stage.GENERATE_ENGINE_STUBS]["typing_stubs"] == 1
-    assert statistics[Stage.FINALIZE_READABLE]["files"] == 4
+    assert statistics[Stage.FINALIZE_READABLE]["files"] == 5
     final_stage = workspace.stage_path(report.run_id, Stage.FINALIZE_READABLE)
     final_result = StageResult.model_validate_json(
         workspace.read_bytes(final_stage / "result.json")
@@ -616,6 +704,7 @@ def test_readable_stage_module_commits_and_reuses_every_phase(
     assert [item.path for item in readable.files] == [
         "assets/value.bin",
         "gui/flash/swc/base_app-1.0-SNAPSHOT.swc",
+        "gui/gameface/bundle.js",
         "scripts/example.py",
         "locale.xml",
     ]
