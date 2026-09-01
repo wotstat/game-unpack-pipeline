@@ -98,6 +98,7 @@ class DownloadPolicy(FrozenModel):
 
     max_workers: int = Field(default=6, ge=1, le=32)
     attempts_per_url: int = Field(default=4, ge=1, le=20)
+    parallel_range_retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
     chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024 * 1024)
     connect_timeout_seconds: float = Field(default=15.0, gt=0)
     read_timeout_seconds: float = Field(default=60.0, gt=0)
@@ -1198,6 +1199,26 @@ class ArtifactDownloader:
                         ):
                             continue
                         if response.status_code != 206:
+                            if (
+                                response.status_code == 200
+                                and attempts < self._policy.attempts_per_url
+                            ):
+                                response.close()
+                                self._progress_observer(
+                                    f"Artifact {artifact.artifact_id}: range "
+                                    f"{byte_range.index} from "
+                                    f"{urlsplit(str(response.url)).hostname or 'unknown'} "
+                                    "ignored a bounded request with HTTP 200; retrying "
+                                    f"({attempts}/{self._policy.attempts_per_url})"
+                                )
+                                retry_delay = min(
+                                    self._policy.parallel_range_retry_backoff_seconds
+                                    * (2 ** (attempts - 1)),
+                                    self._policy.read_timeout_seconds,
+                                )
+                                if retry_delay > 0:
+                                    time.sleep(retry_delay)
+                                continue
                             raise _parallel_range_unavailable(
                                 ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL,
                                 url,
@@ -1760,7 +1781,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v9",
+        implementation_version="resumable-download-v10",
         execute=execute,
         validate=validate,
         audit=audit,
