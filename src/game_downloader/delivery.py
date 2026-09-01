@@ -109,6 +109,8 @@ class DownloadPolicy(FrozenModel):
         ge=0,
     )
     minimum_throughput_window_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
+    minimum_throughput_tail_percent: float = Field(default=5.0, ge=0.0, le=100.0)
+    minimum_throughput_tail_grace_seconds: float = Field(default=20 * 60, ge=0.0)
     parallel_range_minimum_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     parallel_range_target_bytes: int = Field(default=128 * 1024 * 1024, ge=64 * 1024)
     parallel_range_max_segments: int = Field(default=16, ge=2, le=32)
@@ -188,6 +190,8 @@ class _DownloadProgress:
         percent_step: int,
         minimum_throughput_bytes_per_second: int = 0,
         minimum_throughput_window_seconds: float = 120.0,
+        minimum_throughput_tail_percent: float = 0.0,
+        minimum_throughput_tail_grace_seconds: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._artifact_sizes = dict(artifact_sizes)
@@ -200,6 +204,8 @@ class _DownloadProgress:
         self._percent_step = percent_step
         self._minimum_throughput_bytes_per_second = minimum_throughput_bytes_per_second
         self._minimum_throughput_window_seconds = minimum_throughput_window_seconds
+        self._minimum_throughput_tail_percent = minimum_throughput_tail_percent
+        self._minimum_throughput_tail_grace_seconds = minimum_throughput_tail_grace_seconds
         self._clock = clock
         self._lock = threading.Lock()
         started_at = clock()
@@ -209,7 +215,11 @@ class _DownloadProgress:
         self._total_transferred = 0
         self._throughput_samples: deque[tuple[float, int]] = deque([(started_at, 0)])
         self._too_slow_message: str | None = None
-        percentage = self._percentage(sum(self._current_bytes.values()))
+        downloaded = sum(self._current_bytes.values())
+        self._throughput_tail_started_at = (
+            started_at if self._in_minimum_throughput_tail(downloaded) else None
+        )
+        percentage = self._percentage(downloaded)
         self._next_percent = percent_step
         while self._next_percent <= percentage:
             self._next_percent += percent_step
@@ -289,6 +299,14 @@ class _DownloadProgress:
     def _percentage(self, downloaded: int) -> float:
         return 100.0 if self._total_bytes == 0 else downloaded * 100 / self._total_bytes
 
+    def _in_minimum_throughput_tail(self, downloaded: int) -> bool:
+        remaining = self._total_bytes - downloaded
+        return (
+            self._minimum_throughput_tail_percent > 0
+            and remaining > 0
+            and remaining * 100 <= self._total_bytes * self._minimum_throughput_tail_percent
+        )
+
     def _check_minimum_throughput(
         self,
         now: float,
@@ -305,6 +323,18 @@ class _DownloadProgress:
         cutoff = now - self._minimum_throughput_window_seconds
         while len(samples) > 1 and samples[1][0] <= cutoff:
             samples.popleft()
+        in_throughput_tail = self._in_minimum_throughput_tail(downloaded)
+        if not in_throughput_tail:
+            self._throughput_tail_started_at = None
+        elif self._throughput_tail_started_at is None:
+            self._throughput_tail_started_at = now
+        if (
+            in_throughput_tail
+            and self._throughput_tail_started_at is not None
+            and now - self._throughput_tail_started_at
+            <= self._minimum_throughput_tail_grace_seconds
+        ):
+            return
         window_started_at, window_started_bytes = samples[0]
         elapsed = now - window_started_at
         if elapsed < self._minimum_throughput_window_seconds:
@@ -586,6 +616,10 @@ class ArtifactDownloader:
             percent_step=self._policy.progress_percent_step,
             minimum_throughput_bytes_per_second=(self._policy.minimum_throughput_bytes_per_second),
             minimum_throughput_window_seconds=(self._policy.minimum_throughput_window_seconds),
+            minimum_throughput_tail_percent=self._policy.minimum_throughput_tail_percent,
+            minimum_throughput_tail_grace_seconds=(
+                self._policy.minimum_throughput_tail_grace_seconds
+            ),
         )
         progress.started(len(artifacts))
         remaining_required_bytes = max(

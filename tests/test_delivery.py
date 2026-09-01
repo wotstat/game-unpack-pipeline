@@ -53,6 +53,8 @@ def test_download_policy_detects_near_stalls_over_five_minutes() -> None:
     assert MINIMUM_DOWNLOAD_THROUGHPUT_BYTES_PER_SECOND == 1024 * 1024
     assert policy.minimum_throughput_bytes_per_second == 1024 * 1024
     assert policy.minimum_throughput_window_seconds == 300.0
+    assert policy.minimum_throughput_tail_percent == 5.0
+    assert policy.minimum_throughput_tail_grace_seconds == 20 * 60
 
 
 def test_default_progress_tolerates_five_mib_tail_for_five_minutes() -> None:
@@ -372,6 +374,77 @@ def test_download_progress_does_not_abort_at_or_above_minimum_throughput() -> No
     progress.update("artifact", 3_000, 3_000)
     now[0] = 120
     progress.update("artifact", 6_000, 3_000)
+
+
+def test_download_progress_allows_twenty_slow_minutes_in_final_five_percent() -> None:
+    now = [0.0]
+    progress = _DownloadProgress(
+        {"artifact": 1_000_000},
+        {"artifact": 950_000},
+        lambda _message: None,
+        interval_seconds=60,
+        percent_step=10,
+        minimum_throughput_bytes_per_second=50,
+        minimum_throughput_window_seconds=120,
+        minimum_throughput_tail_percent=5,
+        minimum_throughput_tail_grace_seconds=20 * 60,
+        clock=lambda: now[0],
+    )
+
+    for minute in range(2, 21, 2):
+        now[0] = minute * 60
+        progress.update("artifact", 950_000 + minute * 5 * 60, 600)
+
+    now[0] = 22 * 60
+    with pytest.raises(DownloadTooSlowError):
+        progress.update("artifact", 950_000 + 22 * 5 * 60, 600)
+
+
+def test_download_progress_starts_tail_grace_when_final_five_percent_is_reached() -> None:
+    now = [0.0]
+    progress = _DownloadProgress(
+        {"artifact": 1_000_000},
+        {},
+        lambda _message: None,
+        interval_seconds=60,
+        percent_step=10,
+        minimum_throughput_bytes_per_second=50,
+        minimum_throughput_window_seconds=120,
+        minimum_throughput_tail_percent=5,
+        minimum_throughput_tail_grace_seconds=20 * 60,
+        clock=lambda: now[0],
+    )
+
+    now[0] = 10 * 60
+    progress.update("artifact", 950_000, 950_000)
+    now[0] = 30 * 60
+    progress.update("artifact", 950_600, 600)
+
+    now[0] = 32 * 60
+    with pytest.raises(DownloadTooSlowError):
+        progress.update("artifact", 951_200, 600)
+
+
+def test_download_progress_stops_tail_grace_after_progress_rolls_back() -> None:
+    now = [0.0]
+    progress = _DownloadProgress(
+        {"artifact": 100_000},
+        {},
+        lambda _message: None,
+        interval_seconds=60,
+        percent_step=10,
+        minimum_throughput_bytes_per_second=50,
+        minimum_throughput_window_seconds=120,
+        minimum_throughput_tail_percent=5,
+        minimum_throughput_tail_grace_seconds=20 * 60,
+        clock=lambda: now[0],
+    )
+
+    now[0] = 120
+    progress.update("artifact", 95_000, 95_000)
+    now[0] = 240
+    with pytest.raises(DownloadTooSlowError):
+        progress.update("artifact", 0)
 
 
 def test_download_resumes_range_after_disconnect_and_reuses_cas(
