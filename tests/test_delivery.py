@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from urllib.parse import SplitResult
 from urllib.parse import urlsplit as standard_urlsplit
 
+import httpx
 import pytest
 
 from game_downloader.acquisition import ArtifactCorruptError, UnsafeArchiveError
@@ -600,6 +601,139 @@ def test_parallel_range_retries_transient_non_partial_response_without_single_st
         and "retrying (1/3)" in message
         for message in messages
     )
+
+
+@pytest.mark.parametrize(
+    "slow_attempts, expected_attempts, fast_prefix_chunks, range_chunks",
+    [
+        pytest.param(0, 1, 0, 16, id="fast-stream"),
+        pytest.param(1, 2, 0, 16, id="recovers-after-resume"),
+        pytest.param(99, 4, 0, 16, id="exhausted-retries-keep-progress"),
+        pytest.param(1, 2, 256, 272, id="slowdown-after-fast-window"),
+        pytest.param(1, 1, 0, 2, id="completed-range-needs-no-retry"),
+    ],
+)
+def test_parallel_range_resumes_slow_stream_with_bounded_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_attempts: int,
+    expected_attempts: int,
+    fast_prefix_chunks: int,
+    range_chunks: int,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    chunk_size = 64 * 1024
+    range_size = range_chunks * chunk_size
+    fast_prefix = fast_prefix_chunks * chunk_size
+    data = {
+        "/client.bin": b"".join(
+            index.to_bytes(4, "big") * (chunk_size // 4) for index in range(range_chunks * 2)
+        ),
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    clock = threading.local()
+    requests: list[tuple[int, int]] = []
+    streams: list[SlowStream] = []
+    messages: list[str] = []
+
+    class SlowStream(httpx.SyncByteStream):
+        def __init__(self, start: int, end: int, slow: bool) -> None:
+            self.start = start
+            self.end = end
+            self.slow = slow
+            self.closed = False
+            self.delivered = 0
+
+        def __iter__(self) -> Iterator[bytes]:
+            chunk_start = self.start
+            if chunk_start == 0 and fast_prefix:
+                clock.now = getattr(clock, "now", 0.0) + 120
+                self.delivered += fast_prefix
+                yield data["/client.bin"][:fast_prefix]
+                chunk_start = fast_prefix
+            for offset in range(chunk_start, self.end + 1, chunk_size):
+                clock.now = getattr(clock, "now", 0.0) + (60 if self.slow else 0.01)
+                chunk = data["/client.bin"][offset : min(offset + chunk_size, self.end + 1)]
+                self.delivered += len(chunk)
+                yield chunk
+
+        def close(self) -> None:
+            self.closed = True
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = data[request.url.path]
+        headers = {
+            "Content-Length": str(len(payload)),
+            "Accept-Ranges": "bytes",
+            "ETag": '"fixture-v1"',
+        }
+        if request.method == "HEAD":
+            return httpx.Response(200, headers=headers)
+        raw_range = request.headers.get("Range")
+        if raw_range is None:
+            assert request.url.path != "/client.bin", "must preserve parallel range progress"
+            return httpx.Response(200, headers=headers, stream=httpx.ByteStream(payload))
+        start, end = map(int, raw_range.removeprefix("bytes=").split("-"))
+        assert request.headers["If-Range"] == '"fixture-v1"'
+        headers.update(
+            {
+                "Content-Length": str(end - start + 1),
+                "Content-Range": f"bytes {start}-{end}/{len(payload)}",
+            }
+        )
+        requests.append((start, end))
+        if start >= range_size:
+            return httpx.Response(
+                206, headers=headers, stream=httpx.ByteStream(payload[start : end + 1])
+            )
+        if streams:
+            assert streams[-1].closed, "close the slow response before resuming"
+        stream = SlowStream(start, end, len(streams) < slow_attempts)
+        streams.append(stream)
+        return httpx.Response(206, headers=headers, stream=stream)
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(
+            delivery_module, "time", SimpleNamespace(monotonic=lambda: getattr(clock, "now", 0.0))
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                chunk_bytes=chunk_size,
+                parallel_range_minimum_bytes=range_size,
+                parallel_range_target_bytes=range_size,
+                parallel_range_max_segments=2,
+            ),
+            messages.append,
+        ).download(plan, workspace)
+
+    downloaded = next(item for item in result.artifacts if item.artifact.path.utf8 == "client.bin")
+    assert workspace.blobs.path_for(downloaded.blob_sha256).read_bytes() == data["/client.bin"]
+    assert downloaded.transport.parallel_segments == 2
+    assert downloaded.transport.parallel_range_fallbacks == ()
+    assert downloaded.transport.attempts == expected_attempts
+    assert sorted(requests) == [
+        (fast_prefix + index * 2 * chunk_size if index else 0, range_size - 1)
+        for index in range(expected_attempts)
+    ] + [(range_size, 2 * range_size - 1)]
+    assert all(stream.closed for stream in streams)
+    assert sum(stream.delivered for stream in streams) == range_size
+    assert (
+        len([message for message in messages if "slow range" in message and "resuming" in message])
+        == expected_attempts - 1
+    )
+    assert len([message for message in messages if "retry budget exhausted" in message]) == (
+        1 if slow_attempts == 99 else 0
+    )
+    assert not tuple(workspace.partial_root.rglob("range-state.json"))
 
 
 def test_parallel_range_falls_back_when_server_ignores_bounded_request(

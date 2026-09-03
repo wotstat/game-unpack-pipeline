@@ -115,6 +115,8 @@ class DownloadPolicy(FrozenModel):
     parallel_range_minimum_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     parallel_range_target_bytes: int = Field(default=128 * 1024 * 1024, ge=64 * 1024)
     parallel_range_max_segments: int = Field(default=16, ge=2, le=32)
+    parallel_range_minimum_throughput_bytes_per_second: int = Field(default=128 * 1024, ge=0)
+    parallel_range_throughput_window_seconds: float = Field(default=120.0, ge=10.0, le=900.0)
     aria2_executable: str = "aria2c"
     aria2_timeout_seconds: int = Field(default=24 * 60 * 60, ge=60)
 
@@ -1258,6 +1260,12 @@ class ArtifactDownloader:
                             )
                         source_host = urlsplit(str(response.url)).hostname
                         written = current_size
+                        window_started_at = time.monotonic()
+                        window_started_bytes = written
+                        minimum_speed = (
+                            self._policy.parallel_range_minimum_throughput_bytes_per_second
+                        )
+                        check_slow_range = minimum_speed > 0
                         for received in response.iter_raw():
                             for offset in range(0, len(received), self._policy.chunk_bytes):
                                 chunk = received[offset : offset + self._policy.chunk_bytes]
@@ -1284,6 +1292,37 @@ class ArtifactDownloader:
                                     len(chunk),
                                     source_host=source_host,
                                 )
+                            if not check_slow_range or written == byte_range.size:
+                                continue
+                            now = time.monotonic()
+                            elapsed = now - window_started_at
+                            if elapsed < self._policy.parallel_range_throughput_window_seconds:
+                                continue
+                            speed = (written - window_started_bytes) / elapsed
+                            window_started_at, window_started_bytes = now, written
+                            if speed >= minimum_speed:
+                                continue
+                            diagnostic = (
+                                f"Artifact {artifact.artifact_id}: slow range {byte_range.index} "
+                                f"from {source_host or 'unknown'} averaged {_format_rate(speed)} "
+                                f"over {elapsed:.1f}s, below {_format_rate(minimum_speed)}"
+                            )
+                            if attempts >= self._policy.attempts_per_url:
+                                self._progress_observer(
+                                    f"{diagnostic}; retry budget exhausted; "
+                                    "continuing current stream"
+                                )
+                                check_slow_range = False
+                                continue
+                            # Closing an unfinished response releases its connection. Keep the
+                            # written prefix and validate the resumed response as usual.
+                            response.close()
+                            progress.persist()
+                            self._progress_observer(
+                                f"{diagnostic}; resuming at byte {byte_range.start + written} "
+                                f"(attempt {attempts + 1}/{self._policy.attempts_per_url})"
+                            )
+                            break
                 except (httpx.HTTPError, OSError):
                     continue
                 current_size = progress.current(byte_range.index)
