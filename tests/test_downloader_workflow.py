@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -115,6 +116,17 @@ def test_every_completed_pipeline_records_status_in_default_branch() -> None:
     assert '--run-url "${RUN_URL}"' in update["run"]
     assert 'git add -- "status/${TARGET}.json"' in commit["run"]
     assert 'git push origin "HEAD:refs/heads/${DEFAULT_BRANCH}"' in commit["run"]
+
+    # Finalization still gates scheduling, but only processing jobs determine publication success.
+    assert set(re.findall(r"needs\.([\w-]+)\.result", update["env"]["PROCESSING_RESULTS"])) == {
+        "provision",
+        "download",
+        "publish-wot-src",
+        "publish-wot-gui-assets",
+        "publish-wotstat-assets",
+    }
+    assert "needs.*.result" not in update["env"]["PROCESSING_RESULTS"]
+    assert commit["env"]["PIPELINE_RESULT"] == "${{ steps.status.outputs.pipeline_result }}"
 
 
 def test_status_recording_and_telegram_notification_are_parallel_final_jobs() -> None:

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shlex
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,8 @@ GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
 EMERGENCY_SELF_DESTRUCT_AFTER = timedelta(hours=4)
 EMERGENCY_CREDENTIAL_RETRY_GRACE = timedelta(hours=1)
+SELECTEL_RETRY_DELAYS = (5, 15, 30)
+TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 UUID_RE = re.compile(
     r"^(?:[0-9a-fA-F]{32}|"
@@ -41,6 +44,10 @@ UUID_RE = re.compile(
 
 class LifecycleError(RuntimeError):
     """An expected, user-facing lifecycle failure."""
+
+
+class TransientLifecycleError(LifecycleError):
+    """An API failure with an unknown result; replay only safe operations."""
 
 
 def validate_repository(value: str) -> str:
@@ -290,13 +297,72 @@ def openstack(
     timeout: int = 180,
     sensitive_values: Iterable[str] = (),
 ) -> subprocess.CompletedProcess[str]:
-    return run_command(
-        ["openstack", *arguments],
-        environment=config.openstack_environment(),
-        check=check,
-        timeout=timeout,
-        sensitive_values=sensitive_values,
-    )
+    # Creation is not idempotent. Only reads and authentication can be replayed here.
+    safe_prefixes = {
+        ("token", "issue"),
+        ("image", "show"),
+        ("flavor", "show"),
+        ("server", "list"),
+        ("server", "show"),
+        ("port", "show"),
+        ("availability", "zone", "list"),
+        ("security", "group", "list"),
+        ("security", "group", "show"),
+        ("security", "group", "rule", "list"),
+        ("application", "credential", "list"),
+        ("application", "credential", "show"),
+    }
+    retry_safe = any(tuple(arguments[: len(prefix)]) == prefix for prefix in safe_prefixes)
+    retry_delays = SELECTEL_RETRY_DELAYS if retry_safe else ()
+    deadline = time.monotonic() + timeout
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            result = run_command(
+                ["openstack", *arguments],
+                environment=config.openstack_environment(),
+                check=False,
+                timeout=max(
+                    1, min(60 if retry_safe else timeout, int(deadline - time.monotonic()))
+                ),
+                sensitive_values=sensitive_values,
+            )
+        except LifecycleError as error:
+            if not isinstance(error.__cause__, subprocess.TimeoutExpired):
+                raise
+            failure: LifecycleError = TransientLifecycleError("OpenStack request timed out")
+        else:
+            if result.returncode == 0:
+                return result
+            details = sanitized(result.stderr.strip() or result.stdout.strip(), sensitive_values)
+            transient = bool(
+                re.search(
+                    r"HTTP(?:/\S+)?\s*[:(]?\s*(?:408|429|500|502|503|504)\b|"
+                    r"\b(?:RequestTimeout|TooManyRequests|InternalServerError|BadGateway|"
+                    r"ServiceUnavailable|GatewayTimeout)\b|"
+                    r"UNEXPECTED_EOF_WHILE_READING|EOF occurred in violation of protocol|"
+                    r"connection (?:reset|aborted|refused)|remote end closed connection|"
+                    r"(?:connect|read)\s*timed?\s*out|readtimeout|connecttimeout|"
+                    r"temporary failure in name resolution|failed to establish a new connection",
+                    details,
+                    re.IGNORECASE,
+                )
+            )
+            if not transient and not check:
+                return result
+            error_type = TransientLifecycleError if transient else LifecycleError
+            failure = error_type(
+                f"Command {shlex.join(['openstack', *arguments][:4])} "
+                f"failed with {result.returncode}: {details}"
+            )
+            if not transient:
+                raise failure
+        if attempt == len(retry_delays) or time.monotonic() + retry_delays[attempt] >= deadline:
+            # check=False must not turn an unavailable API into "resource absent".
+            raise failure
+        delay = retry_delays[attempt]
+        print(f"::warning::Temporary OpenStack API failure; retry {attempt + 1}/3 in {delay}s")
+        time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def parse_json_output(result: subprocess.CompletedProcess[str], operation: str) -> Any:
@@ -323,6 +389,7 @@ def http_json(
     expected_statuses: Sequence[int] = (200,),
     github_api: bool = False,
     timeout: int = 60,
+    retry_safe: bool = False,
 ) -> tuple[int, Any, Mapping[str, str]]:
     data = None
     headers = {"Accept": "application/json"}
@@ -338,7 +405,11 @@ def http_json(
         headers["Accept"] = "application/vnd.github+json"
         headers["X-GitHub-Api-Version"] = GITHUB_API_VERSION
 
-    retry_delays = (1, 3) if method in {"DELETE", "GET", "HEAD"} else ()
+    retry_delays = (
+        ((1, 3) if github_api else SELECTEL_RETRY_DELAYS)
+        if method in {"DELETE", "GET", "HEAD"} or retry_safe
+        else ()
+    )
     for attempt in range(len(retry_delays) + 1):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -352,15 +423,31 @@ def http_json(
             raw = error.read()
             response_headers = dict(error.headers.items()) if error.headers else {}
             if status not in expected_statuses:
+                transient = status in TRANSIENT_HTTP_STATUSES
+                if transient and not github_api and attempt < len(retry_delays):
+                    delay = retry_delays[attempt]
+                    print(
+                        f"::warning::Temporary Selectel HTTP {status}; "
+                        f"retry {attempt + 1}/3 in {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
                 details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
-                raise LifecycleError(f"{method} {url} returned HTTP {status}: {details}") from error
+                error_type = TransientLifecycleError if transient else LifecycleError
+                raise error_type(f"{method} {url} returned HTTP {status}: {details}") from error
             break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            if isinstance(getattr(error, "reason", error), ssl.SSLCertVerificationError):
+                raise LifecycleError(f"{method} {url} failed certificate verification") from error
             if attempt < len(retry_delays):
+                print(
+                    f"::warning::Temporary HTTP connection failure; "
+                    f"retry {attempt + 1} in {retry_delays[attempt]}s"
+                )
                 time.sleep(retry_delays[attempt])
                 continue
             reason = getattr(error, "reason", None) or str(error) or type(error).__name__
-            raise LifecycleError(f"{method} {url} failed: {reason}") from error
+            raise TransientLifecycleError(f"{method} {url} failed: {reason}") from error
 
     if status not in expected_statuses:
         details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
@@ -396,7 +483,9 @@ def selectel_token(config: SelectelConfig) -> str:
             "scope": {"project": {"id": config.project_id}},
         }
     }
-    _, _, headers = http_json("POST", endpoint, body=body, expected_statuses=(201,), timeout=60)
+    _, _, headers = http_json(
+        "POST", endpoint, body=body, expected_statuses=(201,), timeout=60, retry_safe=True
+    )
     token = next(
         (value for key, value in headers.items() if key.lower() == "x-subject-token"),
         "",
@@ -500,17 +589,53 @@ def create_public_port(
     config: SelectelConfig, identity: ResourceIdentity, security_group_id: str
 ) -> tuple[str, str]:
     token = selectel_token(config)
-    _, response, _ = http_json(
-        "POST",
-        public_network_url(config, "v1/public_ports"),
-        token=token,
-        body={
-            "description": identity.descriptor,
-            "admin_state_up": True,
-            "security_group_ids": [security_group_id],
-        },
-        expected_statuses=(201,),
-    )
+    try:
+        _, response, _ = http_json(
+            "POST",
+            public_network_url(config, "v1/public_ports"),
+            token=token,
+            body={
+                "description": identity.descriptor,
+                "admin_state_up": True,
+                "security_group_ids": [security_group_id],
+            },
+            expected_statuses=(201,),
+        )
+    except TransientLifecycleError as error:
+        # A 502 or lost connection may follow a successful create. Never replay POST:
+        # even an empty list can be stale. Recover the owned port as it becomes visible.
+        for delay in SELECTEL_RETRY_DELAYS:
+            print(
+                f"::warning::Public-port creation result unknown; checking owned ports in {delay}s"
+            )
+            time.sleep(delay)
+            candidates = find_public_port_ids(config, identity, token)
+            if len(candidates) > 1:
+                raise LifecycleError(
+                    "Multiple owned public ports found after creation failure"
+                ) from error
+            if not candidates:
+                continue
+            _, response, _ = http_json(
+                "GET",
+                public_network_url(config, f"v1/public_ports/{candidates[0]}"),
+                token=token,
+            )
+            recovered = response.get("port", {}) if isinstance(response, dict) else {}
+            if (
+                recovered.get("id") != candidates[0]
+                or recovered.get("description") != identity.descriptor
+                or normalized_uuid(str(recovered.get("project_id", "")))
+                != normalized_uuid(config.project_id)
+                or recovered.get("security_group_ids") != [security_group_id]
+            ):
+                raise LifecycleError(
+                    "Recovered public port does not match ownership or security group"
+                ) from error
+            print("Recovered public port after ambiguous creation failure")
+            break
+        else:
+            raise
     port = response.get("port", {}) if isinstance(response, dict) else {}
     port_id = str(port.get("id", ""))
     address = str(port.get("ip_address", ""))
@@ -943,7 +1068,11 @@ def show_console_log(
     sensitive_values: Iterable[str] = (),
     lines: int = 200,
 ) -> None:
-    result = openstack(config, ["console", "log", "show", server_id], check=False, timeout=60)
+    try:
+        result = openstack(config, ["console", "log", "show", server_id], check=False, timeout=60)
+    except LifecycleError:
+        print("Console diagnostics are unavailable")
+        return
     if result.returncode != 0:
         print("Console diagnostics are unavailable")
         return

@@ -31,8 +31,9 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     )
 
     page = (tmp_path / "index.html").read_text()
-    assert "1.44.0.0 #2262" in page
-    assert "2.3.1.3 #926" in page
+    for status in statuses.values():
+        if status.readable_version is not None:
+            assert status.readable_version in page
     assert "Общий тест WoT" in page
     assert "Общий тест МТ" in page  # noqa: RUF001
     current_run_ids = {

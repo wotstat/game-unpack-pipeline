@@ -202,6 +202,28 @@ def test_status_cli_reports_validation_failure_without_recreating_file(
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("results", "expected"),
+    [
+        (["success"] * 5, "success"),
+        (["failure", "skipped", "skipped", "skipped", "skipped"], "failure"),
+        (["success", "failure", "skipped", "skipped", "skipped"], "failure"),
+        (["success", "success", "failure", "success", "success"], "failure"),
+        (["success", "success", "success", "failure", "success"], "failure"),
+        (["success", "success", "success", "success", "failure"], "failure"),
+        (["success", "cancelled", "skipped", "skipped", "skipped"], "cancelled"),
+        (["success", "success", "success", "cancelled", "success"], "cancelled"),
+        (["success", "success", "skipped", "success", "success"], "failure"),
+        (["success", "success", "failure", "cancelled", "success"], "failure"),
+    ],
+)
+def test_processing_result_requires_every_enabled_job_to_succeed(
+    results: list[str], expected: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["processing-result", *results]) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
 def test_repository_contains_one_status_per_target() -> None:
     repository_root = Path(__file__).parents[1]
     status_dir = repository_root / "status"

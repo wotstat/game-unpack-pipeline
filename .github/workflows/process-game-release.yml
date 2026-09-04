@@ -583,7 +583,13 @@ jobs:
       - name: Update pipeline status
         id: status
         env:
-          PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          PROCESSING_RESULTS: >-
+            ${{ format('{0} {1} {2} {3} {4}',
+              needs.provision.result,
+              needs.download.result,
+              inputs.publish_wot_src && needs.publish-wot-src.result || 'success',
+              inputs.publish_wot_gui_assets && needs.publish-wot-gui-assets.result || 'success',
+              inputs.publish_wotstat_assets && needs.publish-wotstat-assets.result || 'success') }}
           READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
           RELEASE_NAME: ${{ needs.download.outputs.version_name || inputs.detected_release_name }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -593,6 +599,8 @@ jobs:
           TARGET: ${{ inputs.target }}
         run: |
           set -Eeuo pipefail
+          read -r -a processing_results <<<"${PROCESSING_RESULTS}"
+          PIPELINE_RESULT="$(python3 scripts/release_status.py processing-result "${processing_results[@]}")"
           completed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           result="$(python3 scripts/release_status.py record \
             --target "${TARGET}" \
@@ -605,13 +613,14 @@ jobs:
             --run-attempt "${RUN_ATTEMPT}" \
             --run-url "${RUN_URL}")"
           echo "result=${result}" >>"${GITHUB_OUTPUT}"
+          echo "pipeline_result=${PIPELINE_RESULT}" >>"${GITHUB_OUTPUT}"
           echo "${TARGET}: ${result} ${PIPELINE_RESULT} pipeline status"
 
       - name: Commit pipeline status
         if: steps.status.outputs.result == 'changed'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          PIPELINE_RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+          PIPELINE_RESULT: ${{ steps.status.outputs.pipeline_result }}
           READABLE_VERSION: ${{ needs.download.outputs.readable_version }}
           RELEASE_NAME: ${{ needs.download.outputs.version_name || inputs.detected_release_name }}
           TARGET: ${{ inputs.target }}

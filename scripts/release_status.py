@@ -363,6 +363,11 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--target", choices=TARGETS, required=True)
     compare.add_argument("--current-release-name", required=True)
 
+    processing_result = subparsers.add_parser(
+        "processing-result", help="Summarize required processing jobs, excluding finalization"
+    )
+    processing_result.add_argument("results", nargs="+", choices=(*PIPELINE_RESULTS, "skipped"))
+
     record = subparsers.add_parser("record", help="Record one completed pipeline run")
     record.add_argument("--target", choices=TARGETS, required=True)
     record.add_argument("--result", choices=PIPELINE_RESULTS, required=True)
@@ -389,6 +394,15 @@ def main(argv: list[str] | None = None) -> int:
                 current_release_name=arguments.current_release_name,
             )
             print(json.dumps(comparison.as_json(), ensure_ascii=False, separators=(",", ":")))
+        elif arguments.command == "processing-result":
+            results = arguments.results
+            if "failure" in results:
+                print("failure")
+            elif "cancelled" in results:
+                print("cancelled")
+            else:
+                # Disabled consumers are excluded by the caller. A skipped required job failed.
+                print("success" if all(result == "success" for result in results) else "failure")
         else:
             changed = record_run(
                 arguments.status_dir,

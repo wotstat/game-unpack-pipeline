@@ -74,7 +74,10 @@ workflow или отдельный репозиторий и не перенос
 - `status/<target>.json` содержит последнюю успешную пару `release_name`/`readable_version` либо
   bootstrap `null`, а также `last_run` с result, обеими версиями, timestamps, duration, Actions Run
   ID/attempt и URL. После cleanup status-job с `always()` коммитит каждый завершённый run; ошибка не
-  продвигает успешную пару. Checker сравнивает только `release_name`. Status-job сериализованы общей
+  продвигает успешную пару. Результат в status определяется provision, downloader и всеми включёнными
+  consumer; пропуск включённого consumer считается ошибкой. Ошибки cleanup, queue watchdog и
+  уведомлений не отменяют успех обработки в status и остаются видны в GitHub Actions.
+  Checker сравнивает только `release_name`. Status-job сериализованы общей
   non-cancelling concurrency-группой и выполняются параллельно Telegram.
 - `.github/workflows/deploy-status-page.yml` checkout'ит default branch с полной историей, строит
   `_site` из текущих status и предыдущих версий тех же файлов, создаёт Shields endpoint для каждого
