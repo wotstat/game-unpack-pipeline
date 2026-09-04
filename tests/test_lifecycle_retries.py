@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from email.message import Message
 from unittest.mock import Mock, patch
 
@@ -363,3 +364,136 @@ def test_cleanup_continues_when_console_diagnostics_api_fails() -> None:
     ):
         lifecycle.cleanup(arguments)
     assert deleted == ["server"]
+
+
+@pytest.mark.parametrize("kind", ["server", "credential", "group"])
+@pytest.mark.parametrize("already_deleted", [True, False])
+def test_cleanup_reconciles_ambiguous_delete_before_retry(kind: str, already_deleted: bool) -> None:
+    if kind == "server":
+        delete: Callable[..., None] = lifecycle.delete_servers
+        finder = "find_server_ids"
+        owned = {
+            "name": IDENTITY.server_name,
+            "properties": {
+                "gup_repository": IDENTITY.repository,
+                "gup_run_id": IDENTITY.run_id,
+                "gup_run_attempt": IDENTITY.run_attempt,
+                "gup_instance_key": IDENTITY.instance_key,
+            },
+        }
+    elif kind == "credential":
+        delete = lifecycle.delete_emergency_application_credentials
+        finder = "find_emergency_application_credential_ids"
+        owned = {
+            "name": IDENTITY.emergency_credential_name,
+            "description": IDENTITY.emergency_credential_description,
+        }
+    else:
+        delete = lifecycle.delete_security_groups
+        finder = "find_security_group_ids"
+        owned = {"name": IDENTITY.security_group_name, "description": IDENTITY.descriptor}
+    shown = subprocess.CompletedProcess([], 0, json.dumps(owned), "")
+    absent = subprocess.CompletedProcess([], 1, "", "Not found (HTTP 404)")
+    replies = [shown, subprocess.CompletedProcess([], 1, "", "SSL: UNEXPECTED_EOF_WHILE_READING")]
+    if already_deleted:
+        replies.append(absent)
+    else:
+        replies.extend([shown, subprocess.CompletedProcess([], 0, "", "")])
+        if kind == "server":
+            replies.append(absent)
+    deleted: list[str] = []
+    with (
+        patch.object(lifecycle, finder, return_value=[GROUP_ID]),
+        patch.object(time, "sleep"),
+        patch.object(subprocess, "run", side_effect=replies) as run,
+    ):
+        delete(CONFIG, IDENTITY, GROUP_ID, deleted_resources=deleted)
+    assert len(deleted) == (0 if already_deleted else 1)
+    commands = [call.args[0] for call in run.call_args_list]
+    assert sum("delete" in command for command in commands) == (1 if already_deleted else 2)
+
+
+@pytest.mark.parametrize("error", ["HTTP 403", "Certificate verify failed", "Unknown CLI failure"])
+def test_delete_recovery_does_not_treat_failed_lookup_as_absence(error: str) -> None:
+    with (
+        patch.object(
+            subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess([], 1, "", "SSL: UNEXPECTED_EOF_WHILE_READING"),
+                subprocess.CompletedProcess([], 1, "", error),
+            ],
+        ) as run,
+        pytest.raises(lifecycle.LifecycleError, match="Could not confirm resource state"),
+    ):
+        lifecycle.delete_openstack_resource(CONFIG, ["security", "group"], GROUP_ID)
+    assert run.call_count == 2
+
+
+def test_delete_retries_are_bounded_when_resource_survives() -> None:
+    replies = [
+        item
+        for _ in range(4)
+        for item in (
+            subprocess.CompletedProcess([], 1, "", "HTTP 503"),
+            subprocess.CompletedProcess([], 0, "{}", ""),
+        )
+    ]
+    with (
+        patch.object(time, "sleep") as sleep,
+        patch.object(subprocess, "run", side_effect=replies) as run,
+        pytest.raises(lifecycle.TransientLifecycleError),
+    ):
+        lifecycle.delete_openstack_resource(CONFIG, ["security", "group"], GROUP_ID)
+    assert run.call_count == 8
+    assert [call.args[0] for call in sleep.call_args_list] == [5, 15, 30]
+
+
+def test_delete_recovery_does_not_repeat_delete_when_lookup_api_stays_unavailable() -> None:
+    with (
+        patch.object(time, "sleep"),
+        patch.object(
+            subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "HTTP 503")
+        ) as run,
+        pytest.raises(lifecycle.TransientLifecycleError),
+    ):
+        lifecycle.delete_openstack_resource(CONFIG, ["server"], GROUP_ID)
+    assert sum("delete" in call.args[0] for call in run.call_args_list) == 1
+
+
+def test_delete_retry_budget_includes_verification() -> None:
+    with (
+        patch.object(time, "monotonic", side_effect=[0, 0, 180]),
+        patch.object(time, "sleep") as sleep,
+        patch.object(
+            lifecycle, "openstack", side_effect=lifecycle.TransientLifecycleError("timeout")
+        ) as command,
+        pytest.raises(lifecycle.TransientLifecycleError),
+    ):
+        lifecycle.delete_openstack_resource(CONFIG, ["server"], GROUP_ID)
+    assert command.call_count == 1
+    assert command.call_args.kwargs["timeout"] == 60
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "resource", [["server"], ["application", "credential"], ["security", "group"]]
+)
+@pytest.mark.parametrize("check", [True, False])
+def test_resource_can_disappear_between_verification_and_retried_delete(
+    resource: list[str], check: bool
+) -> None:
+    with (
+        patch.object(time, "sleep"),
+        patch.object(
+            subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess([], 1, "", "HTTP 503"),
+                subprocess.CompletedProcess([], 0, "{}", ""),
+                subprocess.CompletedProcess([], 1, "", "Not found (HTTP 404)"),
+                subprocess.CompletedProcess([], 1, "", "Not found (HTTP 404)"),
+            ],
+        ),
+    ):
+        assert lifecycle.delete_openstack_resource(CONFIG, resource, GROUP_ID, check=check) is None

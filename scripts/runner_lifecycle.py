@@ -372,6 +372,77 @@ def parse_json_output(result: subprocess.CompletedProcess[str], operation: str) 
         raise LifecycleError(f"{operation} returned invalid JSON") from error
 
 
+def openstack_resource_missing(details: str) -> bool:
+    return (
+        re.search(
+            r"\bHTTP(?:/\S+)?\s*[:(]?\s*404\b|"
+            r"\bNo (?:Server|SecurityGroup|Security Group|ApplicationCredential|"
+            r"Application Credential)\b[^\n]*(?:found|exists)\b",
+            details,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def delete_openstack_resource(
+    config: SelectelConfig,
+    resource: Sequence[str],
+    resource_id: str,
+    *,
+    check: bool = True,
+    timeout: int = 180,
+) -> subprocess.CompletedProcess[str] | None:
+    """Retry deletion of an ownership-checked UUID; None means confirmed absent after an error."""
+    deadline = time.monotonic() + timeout
+    for attempt in range(len(SELECTEL_RETRY_DELAYS) + 1):
+        remaining = max(1, min(60, int(deadline - time.monotonic())))
+        try:
+            result = openstack(
+                config, [*resource, "delete", resource_id], check=False, timeout=remaining
+            )
+            if result.returncode != 0:
+                details = sanitized(
+                    result.stderr.strip() or result.stdout.strip(), [config.password]
+                )
+                if openstack_resource_missing(details):
+                    # An asynchronous delete can finish during the retry backoff.
+                    return None
+                if check:
+                    raise LifecycleError(f"OpenStack resource deletion failed: {details}")
+            return result
+        except TransientLifecycleError as error:
+            # The DELETE may have succeeded before the connection broke. Check that exact UUID
+            # before replaying it; failure to read is never evidence that deletion succeeded.
+            if time.monotonic() >= deadline:
+                raise
+            shown = openstack(
+                config,
+                [*resource, "show", resource_id],
+                check=False,
+                timeout=max(1, min(60, int(deadline - time.monotonic()))),
+            )
+            if shown.returncode != 0:
+                details = shown.stderr.strip() or shown.stdout.strip()
+                if openstack_resource_missing(details):
+                    print("Resource confirmed absent after ambiguous OpenStack deletion")
+                    return None
+                raise LifecycleError(
+                    "Could not confirm resource state after failed deletion"
+                ) from error
+            if attempt == len(SELECTEL_RETRY_DELAYS):
+                raise
+            delay = SELECTEL_RETRY_DELAYS[attempt]
+            if time.monotonic() + delay >= deadline:
+                raise
+            print(
+                "::warning::Temporary OpenStack deletion failure; "
+                f"resource still exists, retry in {delay}s"
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def object_value(value: Mapping[str, Any], *names: str) -> Any:
     lowered = {str(key).lower(): item for key, item in value.items()}
     for name in names:
@@ -1159,7 +1230,8 @@ def delete_servers(
             raise LifecycleError(
                 f"Refusing to delete server {candidate}: ownership markers do not match"
             )
-        openstack(config, ["server", "delete", candidate], timeout=120)
+        if delete_openstack_resource(config, ["server"], candidate, timeout=120) is None:
+            continue
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
             if openstack(config, ["server", "show", candidate], check=False).returncode != 0:
@@ -1219,7 +1291,8 @@ def delete_emergency_application_credentials(
                 f"Refusing to delete application credential {candidate}: "
                 "ownership markers do not match"
             )
-        openstack(config, ["application", "credential", "delete", candidate])
+        if delete_openstack_resource(config, ["application", "credential"], candidate) is None:
+            continue
         print(f"Emergency application credential {candidate}: deleted")
         if deleted_resources is not None:
             deleted_resources.append(f"selectel-application-credential:{candidate}")
@@ -1357,7 +1430,15 @@ def delete_security_groups(
     for candidate in sorted(candidates):
         deadline = time.monotonic() + 180
         while True:
-            result = openstack(config, ["security", "group", "delete", candidate], check=False)
+            result = delete_openstack_resource(
+                config,
+                ["security", "group"],
+                candidate,
+                check=False,
+                timeout=max(1, int(deadline - time.monotonic())),
+            )
+            if result is None:
+                break
             if result.returncode == 0:
                 print(f"Security group {candidate}: deleted")
                 if deleted_resources is not None:
