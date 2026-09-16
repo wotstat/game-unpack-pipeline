@@ -311,7 +311,9 @@ def test_readable_assembler_transforms_required_formats_and_removes_compiled_sou
         "scripts/example.pyc": PYTHON_27_MAGIC + b"fixture",
         "text/catalog.mo": _build_mo(_messages()),
         "config.xml": _packed_xml_fixture(),
+        "config.def": _packed_xml_fixture(),
         "plain.xml": b'<?xml version="1.0"?><plain/>',
+        "plain.def": b'<?xml version="1.0"?><plain/>',
         "asset.bin": b"asset",
     }
     files: list[MaterializedFile] = []
@@ -343,7 +345,12 @@ def test_readable_assembler_transforms_required_formats_and_removes_compiled_sou
     assert (None, "scripts/example.pyc") not in paths
     assert paths[(None, "text/catalog.po")].representation.kind is RepresentationKind.MO_TO_PO
     assert paths[(None, "config.xml")].representation.kind is RepresentationKind.PACKED_XML_TO_XML
+    assert paths[(None, "config.def")].representation.kind is RepresentationKind.PACKED_XML_TO_XML
     assert paths[(None, "plain.xml")].representation.kind is RepresentationKind.PASSTHROUGH
+    assert paths[(None, "plain.def")].representation.kind is RepresentationKind.PASSTHROUGH
+    assert (workspace.root / result.base_root / "config.def").read_bytes() == (
+        workspace.root / result.base_root / "config.xml"
+    ).read_bytes()
     assert paths[("EN", "locale.po")].representation.tool == MO_TOOL.name
     assert not any(item.path.lower().endswith((".pyc", ".mo")) for item in result.files)
     assert (workspace.root / result.base_root / "scripts/example.py").read_text() == (

@@ -95,7 +95,7 @@ class ReadablePolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = "wot-readable"
-    version: str = "13"
+    version: str = "14"
     pyc_tool_name: str = "game-downloader-pyc"
     pyc_tool_version: str = "4+uncompyle6-3.9.3"
     pyc_tool_source: str = "https://github.com/rocky/python-uncompyle6"
@@ -1598,7 +1598,7 @@ class ReadableAssembler:
                     ),
                     diagnostics=(
                         ("content-sniff=text-xml",)
-                        if plan.source.path.lower().endswith(".xml")
+                        if plan.source.path.lower().endswith((".xml", ".def"))
                         else ()
                     ),
                 )
@@ -1740,7 +1740,7 @@ class ReadableAssembler:
                 raise TransformFailedError(f"MO catalogue exceeds policy: {item.path}")
             representation = RepresentationKind.MO_TO_PO
             output = item.path[:-3] + ".po"
-        elif lowered.endswith(".xml"):
+        elif lowered.endswith((".xml", ".def")):
             with source.open("rb") as stream:
                 head = stream.read(65536)
             if head.startswith(PACKED_SECTION_MAGIC):
@@ -2025,7 +2025,7 @@ def _audit_readable(result: ReadableResult, workspace: Workspace) -> None:
                 lowered = item.path.lower()
                 if lowered.endswith((".pyc", ".mo")):
                     raise ValueError("readable output retained a compiled source format")
-                if lowered.endswith(".xml"):
+                if lowered.endswith((".xml", ".def")):
                     with path.open("rb") as source:
                         if source.read(4) == PACKED_SECTION_MAGIC:
                             raise ValueError("readable output retained packed XML")
@@ -2184,7 +2184,9 @@ def _passthrough_file(entry: ReadablePlanEntry) -> ReadableFile:
             source_sha256=entry.source.sha256,
         ),
         diagnostics=(
-            ("content-sniff=text-xml",) if entry.source.path.lower().endswith(".xml") else ()
+            ("content-sniff=text-xml",)
+            if entry.source.path.lower().endswith((".xml", ".def"))
+            else ()
         ),
     )
 

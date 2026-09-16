@@ -1166,8 +1166,8 @@ class ReadableFile(FrozenModel):
             ):
                 raise ValueError("MO representation must map .mo to .po")
         elif self.representation.kind is RepresentationKind.PACKED_XML_TO_XML:
-            if self.path != self.source.path or not self.path.lower().endswith(".xml"):
-                raise ValueError("packed XML representation must preserve the .xml path")
+            if self.path != self.source.path or not self.path.lower().endswith((".xml", ".def")):
+                raise ValueError("packed XML representation must preserve the .xml or .def path")
         elif self.representation.kind is RepresentationKind.WEB_FORMAT:
             if self.path != self.source.path or not self.path.lower().endswith(
                 (".html", ".css", ".js")

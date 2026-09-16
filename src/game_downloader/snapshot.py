@@ -1320,7 +1320,7 @@ class SnapshotVerifier:
                             expected_size=metadata[0],
                             expected_sha256=metadata[1],
                             mismatch_message="payload file differs from its manifest",
-                            reject_packed_xml=relative.lower().endswith(".xml"),
+                            reject_packed_xml=relative.lower().endswith((".xml", ".def")),
                         )
             if actual != set(expected):
                 raise SnapshotVerificationError("files manifest references missing payload files")

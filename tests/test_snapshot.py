@@ -81,6 +81,19 @@ def _readable_fixture(workspace: Workspace) -> tuple[ReadableResult, VfsIndexRes
         precedence=1,
         uncompressed_size=len(loose_bytes),
     )
+    packed_def = b"EN\xa1bfixture"
+    decoded_def = b'<?xml version="1.0" encoding="utf-8"?>\n<root/>\n'
+    def_candidate = VfsCandidate(
+        source_kind=VfsSourceKind.LOOSE_FILE,
+        canonical_path="config/vehicle.def",
+        original_path="config/vehicle.def",
+        part=PartName.CLIENT,
+        part_version="1.0",
+        source_path="res/config/vehicle.def",
+        source_sha256=_digest(packed_def),
+        precedence=1,
+        uncompressed_size=len(packed_def),
+    )
     swc_bytes = b"fixture-swc"
     swc_candidate = VfsCandidate(
         source_kind=VfsSourceKind.GAME_PACKAGE,
@@ -115,7 +128,26 @@ def _readable_fixture(workspace: Workspace) -> tuple[ReadableResult, VfsIndexRes
         sha256=_digest(swc_bytes),
         source=swc_candidate,
     )
+    materialized_def = MaterializedFile(
+        path="config/vehicle.def",
+        size=len(packed_def),
+        sha256=_digest(packed_def),
+        source=def_candidate,
+    )
     readable_files = (
+        ReadableFile(
+            path="config/vehicle.def",
+            size=len(decoded_def),
+            sha256=_digest(decoded_def),
+            source=materialized_def,
+            representation=FileRepresentation(
+                kind=RepresentationKind.PACKED_XML_TO_XML,
+                source_path="config/vehicle.def",
+                source_sha256=_digest(packed_def),
+                tool="game-downloader-packed-section",
+                tool_version="2",
+            ),
+        ),
         ReadableFile(
             path="assets/value.bin",
             size=len(package_bytes),
@@ -177,16 +209,19 @@ def _readable_fixture(workspace: Workspace) -> tuple[ReadableResult, VfsIndexRes
     actionscript_root = workspace.root / "readable/sources-as3"
     stubs_root = workspace.root / "readable/stubs"
     (base_root / "assets").mkdir(parents=True)
+    (base_root / "config").mkdir(parents=True)
     (base_root / "gui/flash/swc").mkdir(parents=True)
     (locale_root / "text").mkdir(parents=True)
     (actionscript_root / "base_app/scripts/net/wg").mkdir(parents=True)
     stubs_root.mkdir(parents=True)
     (base_root / "assets/value.bin").write_bytes(package_bytes)
+    (base_root / "config/vehicle.def").write_bytes(decoded_def)
     (base_root / "gui/flash/swc/base_app-1.0-SNAPSHOT.swc").write_bytes(swc_bytes)
     (locale_root / "text/messages.po").write_bytes(b'msgid ""\nmsgstr ""\n')
     (actionscript_root / "base_app/scripts/net/wg/App.as").write_bytes(actionscript_bytes)
     (stubs_root / "BigWorld.pyi").write_bytes(stub_bytes)
     (base_root / "assets/value.bin").chmod(0o444)
+    (base_root / "config/vehicle.def").chmod(0o444)
     (base_root / "gui/flash/swc/base_app-1.0-SNAPSHOT.swc").chmod(0o444)
     (locale_root / "text/messages.po").chmod(0o444)
     (actionscript_root / "base_app/scripts/net/wg/App.as").chmod(0o444)
@@ -202,6 +237,7 @@ def _readable_fixture(workspace: Workspace) -> tuple[ReadableResult, VfsIndexRes
         stubs_root="readable/stubs",
         tools=(
             ToolIdentity(name="fixture-mo", version="1"),
+            ToolIdentity(name="game-downloader-packed-section", version="2"),
             ToolIdentity(name="fixture-ffdec", version="1"),
             ToolIdentity(name="game-downloader-readable", version="1"),
         ),
@@ -392,12 +428,13 @@ def test_snapshot_assembler_seals_and_independent_verifier_accepts_snapshot(
     opened = _build_snapshot(tmp_path)
 
     assert opened.descriptor.contract_version == "1.1.0"
-    assert opened.descriptor.manifests.files.records == 8
+    assert opened.descriptor.manifests.files.records == 9
     assert opened.descriptor.manifests.actionscript.records == 1
     assert opened.descriptor.manifests.stubs.records == 1
     assert opened.descriptor.manifests.packages.records == 1
     assert opened.descriptor.manifests.conflicts.records == 0
     assert (opened.path / "sources/base/res/assets/value.bin").read_bytes() == b"package-source"
+    assert (opened.path / "sources/base/res/config/vehicle.def").read_bytes().startswith(b"<?xml")
     assert (opened.path / "sources/base/paths.xml").is_file()
     assert (opened.path / "sources/base/version.xml").is_file()
     assert (opened.path / "sources/base/mods/1.0/readme.txt").is_file()
@@ -406,6 +443,24 @@ def test_snapshot_assembler_seals_and_independent_verifier_accepts_snapshot(
     assert (opened.path / "sources/locales/EN/res/text/messages.po").is_file()
     assert (opened.path / "sources-as3/base_app/scripts/net/wg/App.as").is_file()
     assert (opened.path / "stubs/BigWorld.pyi").read_bytes() == b"def time() -> float: ...\n"
+
+
+def test_snapshot_verifier_rejects_packed_def_even_with_matching_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    opened = _build_snapshot(tmp_path)
+    verifier = SnapshotVerifier()
+    packages = verifier._verify_packages(opened.path, opened.descriptor)
+    expected = verifier._verify_files_manifest(opened.path, opened.descriptor, packages)
+    path = opened.path / "sources/base/res/config/vehicle.def"
+    packed = b"EN\xa1bfixture"
+    path.chmod(0o644)
+    path.write_bytes(packed)
+    path.chmod(0o444)
+    expected[(None, "res/config/vehicle.def")] = (len(packed), _digest(packed))
+
+    with pytest.raises(SnapshotVerificationError, match="retained packed XML"):
+        verifier._verify_payload(opened.path, opened.descriptor, expected)
 
 
 def test_snapshot_assembler_reports_phase_timings(tmp_path: Path) -> None:

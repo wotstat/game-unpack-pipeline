@@ -29,7 +29,7 @@
 ## Результаты распаковки
 
 - [`wot-src`](https://github.com/wotstat/wot-src) содержит читаемые исходники и текстовые данные:
-  Python-скрипты, XML, переводы, ActionScript и Gameface.
+  Python-скрипты, XML и `.def` в текстовом виде, переводы, ActionScript и Gameface.
 - [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) содержит файлы графического
   интерфейса, изображения и другие ресурсы из `res/gui`.
 

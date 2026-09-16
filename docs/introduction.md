@@ -64,9 +64,9 @@ resolve → plan-acquisition → download → verify → assemble-client
 
 Стадии сохраняют атомарные checkpoints внутри run directory. Переход читает непосредственный
 checkpoint, проверяет его digest и завершает процесс полной независимой проверкой snapshot.
-Downloader преобразует Python 2.7 `.pyc`, packed XML, GNU `.mo` и ActionScript из SWC, а также
-форматирует HTML, CSS и JavaScript через pinned Prettier. Остальные assets сохраняются без
-изменений; для каждого преобразования provenance manifest фиксирует исходный digest, вид
+Downloader преобразует Python 2.7 `.pyc`, packed XML в `.xml` и `.def`, GNU `.mo` и ActionScript
+из SWC, а также форматирует HTML, CSS и JavaScript через pinned Prettier. Остальные assets
+сохраняются без изменений; для каждого преобразования provenance manifest фиксирует исходный digest, вид
 representation и точную версию инструмента. `READY` появляется последним.
 
 Формат результата закреплён схемами из [`contracts/v1`](../contracts/v1). Publisher получают только
