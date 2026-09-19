@@ -5,11 +5,11 @@
     "result": "failure",
     "release_name": "2.4.1.5448",
     "readable_version": "2.4.1.0 #953",
-    "started_at": "2026-09-18T16:33:13Z",
-    "completed_at": "2026-09-18T17:35:05Z",
-    "duration_seconds": 3712,
-    "run_id": 35369151588,
+    "started_at": "2026-09-19T05:32:53Z",
+    "completed_at": "2026-09-19T06:30:10Z",
+    "duration_seconds": 3437,
+    "run_id": 35424239484,
     "run_attempt": 1,
-    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/35369151588"
+    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/35424239484"
   }
 }
