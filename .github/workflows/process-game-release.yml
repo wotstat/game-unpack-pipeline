@@ -195,6 +195,8 @@ jobs:
           ffdec_root="${RUNNER_TEMP}/ffdec"
           ffdec_archive="${RUNNER_TEMP}/ffdec.zip"
           curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-max-time 900 \
+            --connect-timeout 20 --max-time 300 \
             "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version${FFDEC_VERSION}/ffdec_${FFDEC_VERSION}.zip" \
             --output "${ffdec_archive}"
           echo "${FFDEC_SHA256}  ${ffdec_archive}" | sha256sum --check --strict
