@@ -42,6 +42,7 @@ from game_downloader.models import (
     SplitSegment,
     TorrentDescriptorRecord,
 )
+from game_downloader.pipeline import StageExecutionError
 from game_downloader.torrent import bytes_path_from_text, parse_torrent
 from game_downloader.workspace import Workspace
 
@@ -510,6 +511,274 @@ def test_download_resumes_range_after_disconnect_and_reuses_cas(
     assert client_ranges[0] is None
     assert client_ranges[1] == f"bytes={len(data['/client.bin']) // 2}-"
     assert all(workspace.blobs.path_for(item.blob_sha256).exists() for item in first.artifacts)
+
+
+def test_single_stream_recovers_after_range_fallback_and_four_network_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    data = {
+        "/client.bin": b"client-payload-" * 40_000,
+        "/sd.bin": b"sd-payload",
+        "/locale.bin": b"locale-payload",
+    }
+    prefix_size = 64 * 1024
+    now = [0.0]
+    pauses: list[float] = []
+    requests: list[httpx.Request] = []
+    messages: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        pauses.append(seconds)
+        now[0] += seconds
+
+    class InterruptedStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield data["/client.bin"][:prefix_size]
+            raise httpx.ReadTimeout("fixture read timeout")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = data[request.url.path]
+        headers = {"ETag": '"current"', "Content-Length": str(len(payload))}
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={**headers, "Accept-Ranges": "bytes"})
+        raw_range = request.headers.get("Range", "")
+        if raw_range and not raw_range.endswith("-"):
+            start, end = map(int, raw_range.removeprefix("bytes=").split("-"))
+            return httpx.Response(
+                206,
+                headers={
+                    **headers,
+                    "ETag": '"different-cdn-validator"',
+                    "Content-Range": f"bytes {start}-{end}/{len(payload)}",
+                },
+            )
+        if request.url.path != "/client.bin":
+            return httpx.Response(200, headers=headers, stream=httpx.ByteStream(payload))
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, headers=headers, stream=InterruptedStream())
+        assert raw_range == f"bytes={prefix_size}-"
+        assert request.headers["If-Range"] == '"current"'
+        if len(requests) <= 4:
+            raise httpx.ConnectTimeout("fixture TLS handshake timeout", request=request)
+        return httpx.Response(
+            206,
+            headers={
+                **headers,
+                "Content-Range": f"bytes {prefix_size}-{len(payload) - 1}/{len(payload)}",
+                "Content-Length": str(len(payload) - prefix_size),
+            },
+            stream=httpx.ByteStream(payload[prefix_size:]),
+        )
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(
+            delivery_module, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        )
+        result = ArtifactDownloader(
+            DownloadPolicy(max_workers=1, parallel_range_minimum_bytes=256 * 1024),
+            messages.append,
+        ).download(plan, workspace)
+
+    downloaded = result.artifacts[0]
+    assert workspace.blobs.path_for(downloaded.blob_sha256).read_bytes() == data["/client.bin"]
+    assert downloaded.transport.attempts == 5
+    assert pauses == [1, 2, 4, 8]
+    assert [item.reason.value for item in downloaded.transport.parallel_range_fallbacks] == [
+        "validator-changed"
+    ]
+    assert any("ConnectTimeout" in message and "retrying" in message for message in messages)
+
+
+@pytest.mark.parametrize("failure", ["connect", "read", "mirrors", "status"])
+def test_single_stream_limits_attempts_and_recovery_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    data = {"/client.bin": b"client", "/sd.bin": b"sd", "/locale.bin": b"locale"}
+    now = [0.0]
+    pauses: list[float] = []
+    requests: list[httpx.Request] = []
+    messages: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        pauses.append(seconds)
+        now[0] += seconds
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if failure == "status":
+            return httpx.Response(503)
+        kind = "read" if failure == "read" else "connect"
+        now[0] += request.extensions["timeout"][kind]
+        if kind == "read":
+            raise httpx.ReadTimeout("fixture stalled socket", request=request)
+        raise httpx.ConnectTimeout("fixture TLS timeout", request=request)
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        part = plan.parts[0]
+        artifact = part.artifacts[0]
+        if failure == "mirrors":
+            artifact = artifact.model_copy(
+                update={"source_urls": (*artifact.source_urls, "https://mirror.test/client.bin")}
+            )
+        plan = plan.model_copy(
+            update={"parts": (part.model_copy(update={"artifacts": (artifact,)}),)}
+        )
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(
+            delivery_module, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        )
+        error = (
+            "HTTP recovery exceeded 300s" if failure in {"read", "mirrors"} else "after 8 attempts"
+        )
+        with pytest.raises(StageExecutionError, match=error):
+            ArtifactDownloader(DownloadPolicy(max_workers=1), messages.append).download(
+                plan, workspace
+            )
+
+    assert max(pauses) <= 10
+    assert now[0] <= (60 if failure == "read" else 15) + 300
+    if failure in {"connect", "status"}:
+        assert len(requests) == 8
+        assert pauses == [1, 2, 4, 8, 10, 10, 10]
+    if failure == "mirrors":
+        assert any(request.url.host == "mirror.test" for request in requests)
+    if failure == "status":
+        assert any("HTTP 503" in message for message in messages)
+
+
+@pytest.mark.parametrize("range_fallback", [False, True])
+def test_single_stream_recovery_deadline_stops_trickling_body_and_keeps_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    range_fallback: bool,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    chunk_size = 64 * 1024
+    data = {"/client.bin": b"x" * chunk_size * 8, "/sd.bin": b"sd", "/locale.bin": b"locale"}
+    now = [0.0]
+    attempts = [0]
+    closed = [False]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    class TrickleStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            for offset in range(0, len(data["/client.bin"]), chunk_size):
+                now[0] += 60
+                yield data["/client.bin"][offset : offset + chunk_size]
+
+        def close(self) -> None:
+            closed[0] = True
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            # A failed Range probe must also bound the very first fallback stream.
+            return httpx.Response(503)
+        attempts[0] += 1
+        if not range_fallback and attempts[0] == 1:
+            raise httpx.ConnectTimeout("fixture TLS timeout", request=request)
+        return httpx.Response(
+            200,
+            headers={"Content-Length": str(len(data["/client.bin"])), "ETag": '"stable"'},
+            stream=TrickleStream(),
+        )
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(
+            delivery_module, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        )
+        policy = DownloadPolicy(
+            max_workers=1,
+            parallel_range_minimum_bytes=256 * 1024 if range_fallback else 1024 * 1024,
+        )
+        with pytest.raises(StageExecutionError, match="HTTP recovery exceeded 300s"):
+            ArtifactDownloader(policy).download(plan, workspace)
+
+    assert attempts[0] == (1 if range_fallback else 2)
+    assert now[0] <= 301
+    assert closed[0]
+    partial = next(workspace.partial_root.rglob("payload.part"))
+    assert partial.read_bytes() == data["/client.bin"][: chunk_size * 4]
+    state = delivery_module.ArtifactDownloader._load_state(partial.parent / "state.json", workspace)
+    assert state is not None
+    assert state.bytes_written == partial.stat().st_size
+    assert state.etag == '"stable"'
+
+
+def test_failed_artifact_stops_active_and_queued_http_downloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {"/client.bin": b"client" * 100, "/sd.bin": b"sd" * 100, "/locale.bin": b"locale"}
+    streaming = threading.Event()
+    aborted = threading.Event()
+    closed = threading.Event()
+    requests: list[str] = []
+    original_fail = _DownloadProgress.fail
+
+    def observe_failure(progress: _DownloadProgress, error: StageExecutionError) -> None:
+        original_fail(progress, error)
+        aborted.set()
+
+    class ActiveStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            streaming.set()
+            yield data["/client.bin"][:1]
+            assert aborted.wait(5), "the failed worker must stop its peers promptly"
+            yield data["/client.bin"][1:2]
+            pytest.fail("an active stream kept downloading after another Artifact failed")
+
+        def close(self) -> None:
+            closed.set()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/client.bin":
+            return httpx.Response(200, headers={"ETag": '"stable"'}, stream=ActiveStream())
+        assert request.url.path == "/sd.bin", "a queued Artifact started after failure"
+        assert streaming.wait(5)
+        return httpx.Response(200, stream=httpx.ByteStream(b"invalid" * 100))
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr("game_downloader.delivery.urlsplit", urlsplit_https)
+        monkeypatch.setattr(_DownloadProgress, "fail", observe_failure)
+        with pytest.raises(StageExecutionError, match="web seed sent more bytes than declared"):
+            ArtifactDownloader(DownloadPolicy(max_workers=2)).download(plan, workspace)
+
+    assert set(requests) == {"/client.bin", "/sd.bin"}
+    assert closed.is_set()
 
 
 def test_download_stripes_large_artifact_across_validated_ranges(
@@ -1088,7 +1357,7 @@ def test_download_rejects_source_hash_mismatch(
             "game_downloader.delivery.urlsplit", lambda value: urlsplit_https(value)
         )
         with pytest.raises(ArtifactCorruptError, match="complete sources were corrupt"):
-            ArtifactDownloader(DownloadPolicy(max_workers=1, attempts_per_url=2)).download(
+            ArtifactDownloader(DownloadPolicy(max_workers=1, http_attempts_per_url=2)).download(
                 plan, workspace
             )
 

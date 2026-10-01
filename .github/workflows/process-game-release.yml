@@ -240,6 +240,7 @@ jobs:
         run: bash .github/scripts/run-stage.sh plan-acquisition
 
       - name: Download artifacts
+        timeout-minutes: 60
         shell: bash
         run: bash .github/scripts/run-stage.sh download
 

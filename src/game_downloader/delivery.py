@@ -99,6 +99,10 @@ class DownloadPolicy(FrozenModel):
     max_workers: int = Field(default=6, ge=1, le=32)
     attempts_per_url: int = Field(default=4, ge=1, le=20)
     parallel_range_retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
+    http_attempts_per_url: int = Field(default=8, ge=1, le=20)
+    http_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=30.0)
+    http_retry_max_backoff_seconds: float = Field(default=10.0, ge=0.0, le=30.0)
+    http_recovery_timeout_seconds: float = Field(default=300.0, gt=0, le=600.0)
     chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024 * 1024)
     connect_timeout_seconds: float = Field(default=15.0, gt=0)
     read_timeout_seconds: float = Field(default=60.0, gt=0)
@@ -119,6 +123,40 @@ class DownloadPolicy(FrozenModel):
     parallel_range_throughput_window_seconds: float = Field(default=120.0, ge=10.0, le=900.0)
     aria2_executable: str = "aria2c"
     aria2_timeout_seconds: int = Field(default=24 * 60 * 60, ge=60)
+
+
+class _HttpRecovery:
+    """One non-renewable recovery deadline shared by a file's HTTP sources."""
+
+    def __init__(self, artifact_id: str, policy: DownloadPolicy) -> None:
+        self._artifact_id = artifact_id
+        self._policy = policy
+        self._deadline: float | None = None
+
+    def start(self) -> None:
+        if self._deadline is None:
+            self._deadline = time.monotonic() + self._policy.http_recovery_timeout_seconds
+
+    def remaining(self) -> float:
+        if self._deadline is None:
+            return float("inf")
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise StageExecutionError(
+                "source_unavailable",
+                f"Artifact {self._artifact_id} HTTP recovery exceeded "
+                f"{self._policy.http_recovery_timeout_seconds:g}s",
+            )
+        return remaining
+
+    def timeout(self) -> httpx.Timeout:
+        remaining = self.remaining()
+        return httpx.Timeout(
+            connect=min(self._policy.connect_timeout_seconds, remaining),
+            read=min(self._policy.read_timeout_seconds, remaining),
+            write=min(self._policy.read_timeout_seconds, remaining),
+            pool=min(self._policy.connect_timeout_seconds, remaining),
+        )
 
 
 class VerificationPolicy(FrozenModel):
@@ -211,6 +249,7 @@ class _DownloadProgress:
         self._minimum_throughput_tail_grace_seconds = minimum_throughput_tail_grace_seconds
         self._clock = clock
         self._lock = threading.Lock()
+        self._failure: tuple[str, str] | None = None
         started_at = clock()
         self._last_report_at = started_at
         self._last_report_downloaded = -1
@@ -235,6 +274,16 @@ class _DownloadProgress:
                 f"{_format_bytes(downloaded)} / {_format_bytes(self._total_bytes)} available"
             )
 
+    def fail(self, error: StageExecutionError) -> None:
+        with self._lock:
+            if self._failure is None:
+                self._failure = (error.error.code, str(error))
+
+    def check_active(self) -> None:
+        with self._lock:
+            if self._failure is not None:
+                raise StageExecutionError(*self._failure)
+
     def update(
         self,
         artifact_id: str,
@@ -243,6 +292,7 @@ class _DownloadProgress:
         *,
         source_host: str | None = None,
     ) -> None:
+        self.check_active()
         expected_size = self._artifact_sizes[artifact_id]
         if not 0 <= current_bytes <= expected_size:
             raise ValueError(
@@ -423,6 +473,8 @@ class _ParallelArtifactProgress:
                 )
 
     def current(self, index: int) -> int:
+        if self._progress is not None:
+            self._progress.check_active()
         with self._lock:
             return self._current_bytes[index]
 
@@ -668,9 +720,11 @@ class ArtifactDownloader:
                 thread_name_prefix="artifact-range",
             ) as range_executor,
         ):
-            if self._policy.max_workers == 1:
-                scheduled_downloads = tuple(
-                    self._download_one(
+
+            def download_artifact(artifact: AcquisitionArtifact) -> DownloadedArtifact:
+                progress.check_active()
+                try:
+                    return self._download_one(
                         artifact,
                         plan,
                         workspace,
@@ -679,7 +733,13 @@ class ArtifactDownloader:
                         progress,
                         range_executor,
                     )
-                    for artifact in scheduled_artifacts
+                except StageExecutionError as exc:
+                    progress.fail(exc)
+                    raise
+
+            if self._policy.max_workers == 1:
+                scheduled_downloads = tuple(
+                    download_artifact(artifact) for artifact in scheduled_artifacts
                 )
             else:
                 with ThreadPoolExecutor(
@@ -687,18 +747,7 @@ class ArtifactDownloader:
                     thread_name_prefix="artifact-download",
                 ) as executor:
                     scheduled_downloads = tuple(
-                        executor.map(
-                            lambda artifact: self._download_one(
-                                artifact,
-                                plan,
-                                workspace,
-                                client,
-                                cached.get(artifact.artifact_id),
-                                progress,
-                                range_executor,
-                            ),
-                            scheduled_artifacts,
-                        )
+                        executor.map(download_artifact, scheduled_artifacts)
                     )
         downloads_by_id = {item.artifact.artifact_id: item for item in scheduled_downloads}
         downloaded = tuple(downloads_by_id[artifact.artifact_id] for artifact in artifacts)
@@ -850,6 +899,7 @@ class ArtifactDownloader:
         range_executor: ThreadPoolExecutor | None,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
         attempts = 0
+        recovery = _HttpRecovery(artifact.artifact_id, self._policy)
         range_state_path = payload_path.parent / "range-state.json"
         initial_size = payload_path.stat().st_size if payload_path.exists() else 0
         last_error = "no web seed was attempted"
@@ -951,9 +1001,28 @@ class ArtifactDownloader:
                     ),
                     range_integrity,
                 )
+        if parallel_fallbacks:
+            recovery.start()
         for url in artifact.source_urls:
             self._validate_web_seed_url(url)
-            for _attempt in range(self._policy.attempts_per_url):
+            for _attempt in range(self._policy.http_attempts_per_url):
+                if progress is not None:
+                    progress.check_active()
+                if attempts:
+                    delay = min(
+                        self._policy.http_retry_backoff_seconds * (2 ** min(attempts - 1, 10)),
+                        self._policy.http_retry_max_backoff_seconds,
+                        recovery.remaining(),
+                    )
+                    self._progress_observer(
+                        f"Artifact {artifact.artifact_id}: {last_error}; "
+                        f"retrying HTTP from {urlsplit(url).hostname} in {delay:g}s "
+                        f"(attempt {_attempt + 1}/{self._policy.http_attempts_per_url}); "
+                        f"recovery budget {recovery.remaining():.1f}s remains"
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                recovery.remaining()
                 attempts += 1
                 try:
                     complete, trace, integrity = self._http_attempt(
@@ -964,12 +1033,15 @@ class ArtifactDownloader:
                         payload_path,
                         state_path,
                         progress,
+                        recovery,
                     )
                 except (httpx.HTTPError, OSError) as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
+                    recovery.start()
                     continue
                 if not complete:
                     last_error = "web seed response ended before the declared Artifact size"
+                    recovery.start()
                     continue
                 assert integrity is not None
                 if artifact.source_hash is not None and not integrity.source_hash_verified:
@@ -979,6 +1051,7 @@ class ArtifactDownloader:
                     state_path.unlink(missing_ok=True)
                     if progress is not None:
                         progress.update(artifact.artifact_id, 0)
+                    recovery.start()
                     continue
                 return (
                     trace.model_copy(
@@ -1017,6 +1090,8 @@ class ArtifactDownloader:
         progress: _DownloadProgress | None,
         executor: ThreadPoolExecutor,
     ) -> tuple[DownloadTrace, _PayloadIntegrity] | None:
+        if progress is not None:
+            progress.check_active()
         try:
             probe = client.head(url)
         except (httpx.HTTPError, OSError):
@@ -1365,6 +1440,7 @@ class ArtifactDownloader:
         payload_path: Path,
         state_path: Path,
         progress: _DownloadProgress | None,
+        recovery: _HttpRecovery,
     ) -> tuple[bool, DownloadTrace, _PayloadIntegrity | None]:
         existing_size = payload_path.stat().st_size if payload_path.exists() else 0
         state = self._load_state(state_path, workspace)
@@ -1391,9 +1467,8 @@ class ArtifactDownloader:
             assert validator is not None
             headers["If-Range"] = validator
 
-        with client.stream("GET", url, headers=headers) as response:
-            if response.status_code in {404, 408, 425, 429} or response.status_code >= 500:
-                return False, self._trace(response, url), None
+        with client.stream("GET", url, headers=headers, timeout=recovery.timeout()) as response:
+            recovery.remaining()
             if response.status_code not in {200, 206}:
                 raise httpx.HTTPStatusError(
                     f"unexpected HTTP {response.status_code}",
@@ -1451,6 +1526,7 @@ class ArtifactDownloader:
             hasher = _PayloadHasher(artifact.source_hash)
             if existing_size:
                 hasher.update_file(payload_path)
+            recovery.remaining()
             try:
                 with payload_path.open(mode) as output:
                     self._stream_response(
@@ -1461,6 +1537,7 @@ class ArtifactDownloader:
                         artifact.artifact_id,
                         progress,
                         hasher,
+                        recovery,
                         source_host=urlsplit(str(response.url)).hostname,
                     )
             finally:
@@ -1488,11 +1565,13 @@ class ArtifactDownloader:
         artifact_id: str,
         progress: _DownloadProgress | None,
         hasher: _PayloadHasher,
+        recovery: _HttpRecovery,
         *,
         source_host: str | None,
     ) -> None:
         written = initial_size
         for received in response.iter_raw():
+            recovery.remaining()
             for offset in range(0, len(received), self._policy.chunk_bytes):
                 chunk = received[offset : offset + self._policy.chunk_bytes]
                 written += len(chunk)
@@ -1507,6 +1586,7 @@ class ArtifactDownloader:
                         len(chunk),
                         source_host=source_host,
                     )
+        recovery.remaining()
         output.flush()
         os.fsync(output.fileno())
 
@@ -1820,7 +1900,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v10",
+        implementation_version="resumable-download-v11",
         execute=execute,
         validate=validate,
         audit=audit,
