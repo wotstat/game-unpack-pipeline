@@ -102,7 +102,9 @@ class DownloadPolicy(FrozenModel):
     http_attempts_per_url: int = Field(default=8, ge=1, le=20)
     http_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=30.0)
     http_retry_max_backoff_seconds: float = Field(default=10.0, ge=0.0, le=30.0)
-    http_recovery_timeout_seconds: float = Field(default=300.0, gt=0, le=600.0)
+    http_no_progress_timeout_seconds: float = Field(default=300.0, gt=0, le=600.0)
+    http_minimum_throughput_bytes_per_second: int = Field(default=256 * 1024, ge=0)
+    http_throughput_window_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
     chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024 * 1024)
     connect_timeout_seconds: float = Field(default=15.0, gt=0)
     read_timeout_seconds: float = Field(default=60.0, gt=0)
@@ -125,27 +127,60 @@ class DownloadPolicy(FrozenModel):
     aria2_timeout_seconds: int = Field(default=24 * 60 * 60, ge=60)
 
 
-class _HttpRecovery:
-    """One non-renewable recovery deadline shared by a file's HTTP sources."""
+class _HttpTransferProgress:
+    """Track useful file progress across HTTP retries, restarts and source changes."""
 
-    def __init__(self, artifact_id: str, policy: DownloadPolicy) -> None:
+    def __init__(
+        self, artifact_id: str, size: int, initial_bytes: int, policy: DownloadPolicy
+    ) -> None:
         self._artifact_id = artifact_id
+        self._size = size
         self._policy = policy
-        self._deadline: float | None = None
+        self._current_bytes = initial_bytes
+        self._high_watermark = initial_bytes
+        now = time.monotonic()
+        self._last_progress_at = now
+        self._samples: deque[tuple[float, int]] = deque([(now, initial_bytes)])
 
-    def start(self) -> None:
-        if self._deadline is None:
-            self._deadline = time.monotonic() + self._policy.http_recovery_timeout_seconds
+    def update(self, current_bytes: int) -> None:
+        now = time.monotonic()
+        self._current_bytes = current_bytes
+        if current_bytes > self._high_watermark:
+            self._high_watermark = current_bytes
+            self._last_progress_at = now
+        self._check(now)
 
     def remaining(self) -> float:
-        if self._deadline is None:
-            return float("inf")
-        remaining = self._deadline - time.monotonic()
+        return self._check(time.monotonic())
+
+    def _check(self, now: float) -> float:
+        remaining = self._policy.http_no_progress_timeout_seconds - (now - self._last_progress_at)
+        detail = (
+            f"Artifact {self._artifact_id}: {_format_bytes(self._current_bytes)} / "
+            f"{_format_bytes(self._size)} available"
+        )
         if remaining <= 0:
             raise StageExecutionError(
                 "source_unavailable",
-                f"Artifact {self._artifact_id} HTTP recovery exceeded "
-                f"{self._policy.http_recovery_timeout_seconds:g}s",
+                f"{detail}; HTTP made no forward progress for "
+                f"{self._policy.http_no_progress_timeout_seconds:g}s",
+            )
+        self._samples.append((now, self._current_bytes))
+        cutoff = now - self._policy.http_throughput_window_seconds
+        while len(self._samples) > 1 and self._samples[1][0] <= cutoff:
+            self._samples.popleft()
+        started_at, started_bytes = self._samples[0]
+        elapsed = now - started_at
+        minimum_speed = self._policy.http_minimum_throughput_bytes_per_second
+        if (
+            self._current_bytes < self._size
+            and minimum_speed > 0
+            and elapsed >= self._policy.http_throughput_window_seconds
+            and (speed := max(0, self._current_bytes - started_bytes) / elapsed) < minimum_speed
+        ):
+            raise DownloadTooSlowError(
+                f"{detail}; HTTP forward progress averaged {_format_rate(speed)} over "
+                f"{elapsed:.1f}s, below the configured {_format_rate(minimum_speed)} minimum"
             )
         return remaining
 
@@ -899,7 +934,6 @@ class ArtifactDownloader:
         range_executor: ThreadPoolExecutor | None,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
         attempts = 0
-        recovery = _HttpRecovery(artifact.artifact_id, self._policy)
         range_state_path = payload_path.parent / "range-state.json"
         initial_size = payload_path.stat().st_size if payload_path.exists() else 0
         last_error = "no web seed was attempted"
@@ -1001,8 +1035,12 @@ class ArtifactDownloader:
                     ),
                     range_integrity,
                 )
-        if parallel_fallbacks:
-            recovery.start()
+        transfer = _HttpTransferProgress(
+            artifact.artifact_id,
+            artifact.size,
+            payload_path.stat().st_size if payload_path.exists() else 0,
+            self._policy,
+        )
         for url in artifact.source_urls:
             self._validate_web_seed_url(url)
             for _attempt in range(self._policy.http_attempts_per_url):
@@ -1012,17 +1050,17 @@ class ArtifactDownloader:
                     delay = min(
                         self._policy.http_retry_backoff_seconds * (2 ** min(attempts - 1, 10)),
                         self._policy.http_retry_max_backoff_seconds,
-                        recovery.remaining(),
+                        transfer.remaining(),
                     )
                     self._progress_observer(
                         f"Artifact {artifact.artifact_id}: {last_error}; "
                         f"retrying HTTP from {urlsplit(url).hostname} in {delay:g}s "
                         f"(attempt {_attempt + 1}/{self._policy.http_attempts_per_url}); "
-                        f"recovery budget {recovery.remaining():.1f}s remains"
+                        f"no-progress timeout in {transfer.remaining():.1f}s"
                     )
                     if delay > 0:
                         time.sleep(delay)
-                recovery.remaining()
+                transfer.remaining()
                 attempts += 1
                 try:
                     complete, trace, integrity = self._http_attempt(
@@ -1033,15 +1071,13 @@ class ArtifactDownloader:
                         payload_path,
                         state_path,
                         progress,
-                        recovery,
+                        transfer,
                     )
                 except (httpx.HTTPError, OSError) as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
-                    recovery.start()
                     continue
                 if not complete:
                     last_error = "web seed response ended before the declared Artifact size"
-                    recovery.start()
                     continue
                 assert integrity is not None
                 if artifact.source_hash is not None and not integrity.source_hash_verified:
@@ -1051,7 +1087,7 @@ class ArtifactDownloader:
                     state_path.unlink(missing_ok=True)
                     if progress is not None:
                         progress.update(artifact.artifact_id, 0)
-                    recovery.start()
+                    transfer.update(0)
                     continue
                 return (
                     trace.model_copy(
@@ -1440,7 +1476,7 @@ class ArtifactDownloader:
         payload_path: Path,
         state_path: Path,
         progress: _DownloadProgress | None,
-        recovery: _HttpRecovery,
+        transfer: _HttpTransferProgress,
     ) -> tuple[bool, DownloadTrace, _PayloadIntegrity | None]:
         existing_size = payload_path.stat().st_size if payload_path.exists() else 0
         state = self._load_state(state_path, workspace)
@@ -1459,6 +1495,7 @@ class ArtifactDownloader:
             state = None
         if progress is not None:
             progress.update(artifact.artifact_id, existing_size)
+        transfer.update(existing_size)
         headers: dict[str, str] = {}
         if existing_size:
             headers["Range"] = f"bytes={existing_size}-"
@@ -1467,8 +1504,8 @@ class ArtifactDownloader:
             assert validator is not None
             headers["If-Range"] = validator
 
-        with client.stream("GET", url, headers=headers, timeout=recovery.timeout()) as response:
-            recovery.remaining()
+        with client.stream("GET", url, headers=headers, timeout=transfer.timeout()) as response:
+            transfer.remaining()
             if response.status_code not in {200, 206}:
                 raise httpx.HTTPStatusError(
                     f"unexpected HTTP {response.status_code}",
@@ -1498,10 +1535,12 @@ class ArtifactDownloader:
                     state_path.unlink(missing_ok=True)
                     if progress is not None:
                         progress.update(artifact.artifact_id, 0)
+                    transfer.update(0)
                     return False, self._trace(response, url), None
                 mode = "ab"
             else:
                 existing_size = 0
+                transfer.update(0)
                 mode = "wb"
                 if response.status_code == 206:
                     raw_range = response.headers.get("content-range", "")
@@ -1526,7 +1565,7 @@ class ArtifactDownloader:
             hasher = _PayloadHasher(artifact.source_hash)
             if existing_size:
                 hasher.update_file(payload_path)
-            recovery.remaining()
+            transfer.remaining()
             try:
                 with payload_path.open(mode) as output:
                     self._stream_response(
@@ -1537,7 +1576,7 @@ class ArtifactDownloader:
                         artifact.artifact_id,
                         progress,
                         hasher,
-                        recovery,
+                        transfer,
                         source_host=urlsplit(str(response.url)).hostname,
                     )
             finally:
@@ -1565,13 +1604,12 @@ class ArtifactDownloader:
         artifact_id: str,
         progress: _DownloadProgress | None,
         hasher: _PayloadHasher,
-        recovery: _HttpRecovery,
+        transfer: _HttpTransferProgress,
         *,
         source_host: str | None,
     ) -> None:
         written = initial_size
         for received in response.iter_raw():
-            recovery.remaining()
             for offset in range(0, len(received), self._policy.chunk_bytes):
                 chunk = received[offset : offset + self._policy.chunk_bytes]
                 written += len(chunk)
@@ -1579,6 +1617,7 @@ class ArtifactDownloader:
                     raise ArtifactCorruptError("web seed sent more bytes than declared")
                 output.write(chunk)
                 hasher.update(chunk)
+                transfer.update(written)
                 if progress is not None:
                     progress.update(
                         artifact_id,
@@ -1586,7 +1625,7 @@ class ArtifactDownloader:
                         len(chunk),
                         source_host=source_host,
                     )
-        recovery.remaining()
+        transfer.remaining()
         output.flush()
         os.fsync(output.fileno())
 
@@ -1900,7 +1939,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v11",
+        implementation_version="resumable-download-v12",
         execute=execute,
         validate=validate,
         audit=audit,
