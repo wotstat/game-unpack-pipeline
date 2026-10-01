@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -107,7 +108,7 @@ def test_failed_run_preserves_last_successful_version(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
-def test_release_comparison_blocks_automatic_retry_of_failed_release(
+def test_release_comparison_delays_retry_but_allows_new_release(
     tmp_path: Path,
     result: str,
 ) -> None:
@@ -129,6 +130,7 @@ def test_release_comparison_blocks_automatic_retry_of_failed_release(
         tmp_path,
         target="wot-eu",
         current_release_name="2.3.2.5500",
+        now=datetime(2026, 8, 30, 10, tzinfo=UTC),
     )
     newer = compare_release(
         tmp_path,
@@ -143,10 +145,170 @@ def test_release_comparison_blocks_automatic_retry_of_failed_release(
 
     assert failed.mismatch is True
     assert failed.retry_blocked is True
+    assert failed.next_retry_at == "2026-08-30T21:12:03Z"
     assert newer.mismatch is True
     assert newer.retry_blocked is False
+    assert newer.next_retry_at is None
     assert published.mismatch is False
     assert published.retry_blocked is False
+    assert published.next_retry_at is None
+
+
+def record_attempt(
+    status_dir: Path,
+    completed_at: datetime,
+    *,
+    release: str | None = "2.3.2.5500",
+    result: str = "failure",
+    run_id: int = 101,
+) -> bool:
+    return record_run(
+        status_dir,
+        target="wot-eu",
+        result=result,
+        release_name=release,
+        readable_version="2.3.2.0 #930" if result == "success" else None,
+        started_at=(completed_at - timedelta(minutes=10)).isoformat(),
+        completed_at=completed_at.isoformat(),
+        run_id=run_id,
+        run_attempt=1,
+        run_url=f"https://github.com/wotstat/game-unpack-pipeline/actions/runs/{run_id}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("age", "interval"),
+    [
+        (timedelta(), timedelta(hours=12)),
+        (timedelta(days=3, seconds=-1), timedelta(hours=12)),
+        (timedelta(days=3), timedelta(days=1)),
+        (timedelta(days=10, seconds=-1), timedelta(days=1)),
+        (timedelta(days=10), timedelta(days=7)),
+        (timedelta(days=100), timedelta(days=7)),
+    ],
+)
+def test_retry_schedule_boundaries_use_first_failure_and_last_attempt(
+    tmp_path: Path, age: timedelta, interval: timedelta
+) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    first = datetime(2026, 8, 30, 10, tzinfo=UTC)
+    record_attempt(tmp_path, first)
+    last = first + age
+    record_attempt(tmp_path, last, run_id=102)
+
+    due = last + interval
+    for now, blocked in (
+        (due - timedelta(seconds=1), True),
+        (due, False),
+        (due + timedelta(days=30), False),
+    ):
+        result = compare_release(
+            tmp_path, target="wot-eu", current_release_name="2.3.2.5500", now=now
+        )
+        assert result.retry_blocked is blocked
+        assert result.next_retry_at == due.isoformat().replace("+00:00", "Z")
+    retry = load_status(tmp_path, "wot-eu").retry
+    assert retry is not None
+    assert retry.first_failed_at == "2026-08-30T10:00:00Z"
+    # Reads, including overdue checks, must not consume a retry or move its deadline.
+    assert record_attempt(tmp_path, last, run_id=102) is False
+
+
+def test_success_clears_retry_and_new_release_starts_new_schedule(tmp_path: Path) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    first = datetime(2026, 8, 30, 10, tzinfo=UTC)
+    record_attempt(tmp_path, first)
+    record_attempt(tmp_path, first + timedelta(days=20), release="2.3.3.5600", run_id=102)
+
+    result = compare_release(
+        tmp_path,
+        target="wot-eu",
+        current_release_name="2.3.3.5600",
+        now=first + timedelta(days=20),
+    )
+    assert result.next_retry_at == "2026-09-19T22:00:00Z"
+
+    record_attempt(
+        tmp_path,
+        first + timedelta(days=21),
+        release="2.3.3.5600",
+        result="success",
+        run_id=103,
+    )
+    assert load_status(tmp_path, "wot-eu").retry is None
+    assert "retry" not in json.loads((tmp_path / "wot-eu.json").read_text())
+    assert not compare_release(
+        tmp_path, target="wot-eu", current_release_name="2.3.3.5600"
+    ).mismatch
+
+
+def test_unknown_or_published_release_failure_preserves_pending_retry(tmp_path: Path) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    first = datetime(2026, 8, 30, 10, tzinfo=UTC)
+    record_attempt(tmp_path, first)
+    pending = load_status(tmp_path, "wot-eu").retry
+
+    for run_id, release in enumerate((None, "2.3.1.5400"), 102):
+        record_attempt(tmp_path, first + timedelta(hours=1), release=release, run_id=run_id)
+        assert load_status(tmp_path, "wot-eu").retry == pending
+
+
+def test_old_status_uses_last_failure_as_initial_retry_anchor(tmp_path: Path) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    first = datetime(2026, 8, 30, 10, tzinfo=UTC)
+    record_attempt(tmp_path, first)
+    path = tmp_path / "wot-eu.json"
+    legacy = json.loads(path.read_text())
+    del legacy["retry"]
+    write_document(tmp_path, "wot-eu", legacy)
+
+    result = compare_release(
+        tmp_path, target="wot-eu", current_release_name="2.3.2.5500", now=first
+    )
+    assert result.next_retry_at == "2026-08-30T22:00:00Z"
+    record_attempt(tmp_path, first + timedelta(days=1), run_id=102)
+    retry = load_status(tmp_path, "wot-eu").retry
+    assert retry is not None
+    assert retry.first_failed_at == "2026-08-30T10:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "retry",
+    [
+        {},
+        {"release_name": "2.3.2.5500", "first_failed_at": "invalid", "last_failed_at": "invalid"},
+        {
+            "release_name": "2.3.2.5500",
+            "first_failed_at": "2026-08-31T10:00:00Z",
+            "last_failed_at": "2026-08-30T10:00:00Z",
+        },
+        {
+            "release_name": "2.3.1.5400",
+            "first_failed_at": "2026-08-30T10:00:00Z",
+            "last_failed_at": "2026-08-30T10:00:00Z",
+        },
+        {
+            "release_name": "2.3.3.5600",
+            "first_failed_at": "2026-08-30T10:00:00Z",
+            "last_failed_at": "2026-08-30T10:00:00Z",
+        },
+        {
+            "release_name": "2.3.2.5500",
+            "first_failed_at": "2026-08-30T10:00:00Z",
+            "last_failed_at": "2026-08-31T10:00:00Z",
+        },
+    ],
+)
+def test_retry_state_is_validated_before_dispatch(tmp_path: Path, retry: object) -> None:
+    write_document(tmp_path, "wot-eu", successful_status())
+    record_attempt(tmp_path, datetime(2026, 8, 30, 10, tzinfo=UTC))
+    path = tmp_path / "wot-eu.json"
+    payload = json.loads(path.read_text())
+    payload["retry"] = retry
+    write_document(tmp_path, "wot-eu", payload)
+
+    with pytest.raises(ReleaseStatusError, match="retry"):
+        compare_release(tmp_path, target="wot-eu", current_release_name="2.3.2.5500")
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,7 @@ def _write_result(
     current_release_name: str | None,
     state: str,
     action: str,
+    next_retry_at: str | None = None,
 ) -> None:
     (results_dir / f"{target}.json").write_text(
         json.dumps(
@@ -23,6 +24,7 @@ def _write_result(
                 "current_release_name": current_release_name,
                 "state": state,
                 "action": action,
+                "next_retry_at": next_retry_at,
             }
         ),
         encoding="utf-8",
@@ -108,14 +110,15 @@ def test_report_handles_failed_plan_and_empty_selection(tmp_path: Path) -> None:
     )
 
 
-def test_report_marks_failed_release_as_requiring_manual_retry(tmp_path: Path) -> None:
+def test_report_shows_when_failed_release_can_retry(tmp_path: Path) -> None:
     _write_result(
         tmp_path,
         target="wot-eu",
         stored_release_name="2.3.1.5412",
         current_release_name="2.4.0.5500",
         state="update_available",
-        action="manual_retry_required",
+        action="retry_wait",
+        next_retry_at="2026-09-01T10:00:00Z",
     )
 
     report = render_report(
@@ -124,4 +127,4 @@ def test_report_marks_failed_release_as_requiring_manual_retry(tmp_path: Path) -
         dispatch_pipelines=True,
     )
 
-    assert "🛑 Manual retry required" in report
+    assert "⏳ Waiting for retry · <code>2026-09-01T10:00:00Z</code>" in report

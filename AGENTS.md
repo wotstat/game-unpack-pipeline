@@ -79,6 +79,13 @@ workflow или отдельный репозиторий и не перенос
   уведомлений не отменяют успех обработки в status и остаются видны в GitHub Actions.
   Checker сравнивает только `release_name`. Status-job сериализованы общей
   non-cancelling concurrency-группой и выполняются параллельно Telegram.
+- После `failure`/`cancelled` неопубликованная версия повторяется существующим checker: через
+  12 часов первые три дня, через 24 часа следующие семь дней, далее через семь дней. Объект `retry`
+  в status хранит `release_name`, `first_failed_at` и `last_failed_at`; интервал выбирается по
+  возрасту цикла на момент последнего сбоя и отсчитывается от его завершения. До `next_retry_at`
+  checker показывает `retry_wait`; активный pipeline того же target исключает повторный dispatch.
+  Новая версия запускается сразу и при ошибке начинает новый цикл, успех очищает retry state.
+  Прямой ручной запуск не ограничен расписанием; ошибка с известной версией учитывается в нём.
 - `.github/workflows/deploy-status-page.yml` checkout'ит default branch с полной историей, строит
   `_site` из текущих status и предыдущих версий тех же файлов, создаёт Shields endpoint для каждого
   target и публикует GitHub Pages artifact. Бейдж показывает последнюю успешную `readable_version`,
@@ -167,7 +174,7 @@ workflow или отдельный репозиторий и не перенос
 ## Что не входит в систему
 
 - отдельная telemetry задержек scheduled checker;
-- отдельная release identity и retry policy сверх status и подавления дубликата активного run;
+- отдельная release identity сверх `release_name` и внешний планировщик повторов;
 - внешний status store или история запусков вне Git-истории региональных status-файлов;
 - долгоживущие self-hosted runners и постоянная инфраструктура.
 - внешний watchdog или отдельный TTL-reaper вне GitHub Actions и временной VM.

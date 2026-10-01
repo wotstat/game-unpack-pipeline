@@ -169,12 +169,16 @@ jobs:
             <<<"${comparison_json}")" >>"${GITHUB_OUTPUT}"
           mismatch="$(jq -r '.mismatch' <<<"${comparison_json}")"
           retry_blocked="$(jq -r '.retry_blocked' <<<"${comparison_json}")"
-          echo "mismatch=${mismatch}" >>"${GITHUB_OUTPUT}"
-          echo "retry_blocked=${retry_blocked}" >>"${GITHUB_OUTPUT}"
+          next_retry_at="$(jq -r '.next_retry_at // ""' <<<"${comparison_json}")"
+          {
+            echo "mismatch=${mismatch}"
+            echo "retry_blocked=${retry_blocked}"
+            echo "next_retry_at=${next_retry_at}"
+          } >>"${GITHUB_OUTPUT}"
           if [[ "${mismatch}" == false ]]; then
             echo "${TARGET}: stored=${stored}, current=${current}, action=none"
           elif [[ "${retry_blocked}" == true ]]; then
-            echo "${TARGET}: stored=${stored}, current=${current}, action=manual-retry-required"
+            echo "${TARGET}: stored=${stored}, current=${current}, action=retry-wait, next=${next_retry_at}"
           else
             echo "${TARGET}: stored=${stored}, current=${current}, action=would-dispatch"
           fi
@@ -250,6 +254,7 @@ jobs:
           DISPATCH_PIPELINES: >-
             ${{ github.event_name == 'schedule' || inputs.dispatch_pipelines }}
           MISMATCH: ${{ steps.compare.outputs.mismatch }}
+          NEXT_RETRY_AT: ${{ steps.compare.outputs.next_retry_at }}
           RETRY_BLOCKED: ${{ steps.compare.outputs.retry_blocked }}
           STORED_RELEASE_NAME: ${{ steps.compare.outputs.stored_release_name }}
           STORED_RELEASE_NAME_IS_NULL: ${{ steps.compare.outputs.stored_release_name_is_null }}
@@ -269,7 +274,7 @@ jobs:
               action=none
             elif [[ "${RETRY_BLOCKED}" == true ]]; then
               state=update_available
-              action=manual_retry_required
+              action=retry_wait
             elif [[ "${MISMATCH}" == true && "${DISPATCH_PIPELINES}" != true ]]; then
               state=update_available
               action=dry_run
@@ -291,6 +296,7 @@ jobs:
             --arg stored_release_name "${STORED_RELEASE_NAME}" \
             --argjson stored_release_name_is_null "${stored_release_name_is_null}" \
             --arg current_release_name "${CURRENT_RELEASE_NAME}" \
+            --arg next_retry_at "${NEXT_RETRY_AT}" \
             --arg state "${state}" \
             --arg action "${action}" \
             '{
@@ -305,7 +311,10 @@ jobs:
                 if $current_release_name == "" then null else $current_release_name end
               ),
               state: $state,
-              action: $action
+              action: $action,
+              next_retry_at: (
+                if $next_retry_at == "" then null else $next_retry_at end
+              )
             }' >"${CHECK_RESULT_PATH}"
 
       - name: Upload check result

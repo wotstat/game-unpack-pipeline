@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -65,17 +65,47 @@ class PipelineRun:
 
 
 @dataclass(frozen=True)
+class ReleaseRetry:
+    release_name: str
+    first_failed_at: str
+    last_failed_at: str
+
+    def as_json(self) -> dict[str, str]:
+        return {
+            "release_name": self.release_name,
+            "first_failed_at": self.first_failed_at,
+            "last_failed_at": self.last_failed_at,
+        }
+
+    def next_retry(self) -> datetime:
+        first = datetime.fromisoformat(self.first_failed_at)
+        last = datetime.fromisoformat(self.last_failed_at)
+        age = last - first
+        if age < timedelta(days=3):
+            interval = timedelta(hours=12)
+        elif age < timedelta(days=10):
+            interval = timedelta(days=1)
+        else:
+            interval = timedelta(days=7)
+        return last + interval
+
+
+@dataclass(frozen=True)
 class ReleaseStatus:
     release_name: str | None
     readable_version: str | None
     last_run: PipelineRun | None
+    retry: ReleaseRetry | None = None
 
     def as_json(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "release_name": self.release_name,
             "readable_version": self.readable_version,
             "last_run": self.last_run.as_json() if self.last_run is not None else None,
         }
+        if self.retry is not None:
+            payload["retry"] = self.retry.as_json()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -84,6 +114,7 @@ class ReleaseComparison:
     current_release_name: str
     mismatch: bool
     retry_blocked: bool
+    next_retry_at: str | None
 
     def as_json(self) -> dict[str, str | bool | None]:
         return {
@@ -91,6 +122,7 @@ class ReleaseComparison:
             "current_release_name": self.current_release_name,
             "mismatch": self.mismatch,
             "retry_blocked": self.retry_blocked,
+            "next_retry_at": self.next_retry_at,
         }
 
 
@@ -215,11 +247,8 @@ def status_path(status_dir: Path, target: str) -> Path:
 
 
 def parse_status_document(payload: object, source: object = "status document") -> ReleaseStatus:
-    if not isinstance(payload, dict) or set(payload) != {
-        "release_name",
-        "readable_version",
-        "last_run",
-    }:
+    fields = {"release_name", "readable_version", "last_run"}
+    if not isinstance(payload, dict) or not fields <= set(payload) <= fields | {"retry"}:
         raise ReleaseStatusError(f"status document has invalid fields: {source}")
 
     release_name = _optional(payload["release_name"], _valid_release_name, "release_name")
@@ -235,11 +264,53 @@ def parse_status_document(payload: object, source: object = "status document") -
         and (last_run.release_name, last_run.readable_version) != (release_name, readable_version)
     ):
         raise ReleaseStatusError("a successful last_run must match the current version")
+    retry = _load_retry(payload.get("retry"), release_name, last_run)
     return ReleaseStatus(
         release_name=release_name,
         readable_version=readable_version,
         last_run=last_run,
+        retry=retry,
     )
+
+
+def _load_retry(
+    payload: object, published_release: str | None, last_run: PipelineRun | None
+) -> ReleaseRetry | None:
+    if payload is None:
+        # Old status documents have only the most recent attempt as a time anchor.
+        if (
+            last_run is not None
+            and last_run.result != "success"
+            and last_run.release_name is not None
+            and last_run.release_name != published_release
+        ):
+            return ReleaseRetry(last_run.release_name, last_run.completed_at, last_run.completed_at)
+        return None
+    if not isinstance(payload, dict) or set(payload) != {
+        "release_name",
+        "first_failed_at",
+        "last_failed_at",
+    }:
+        raise ReleaseStatusError("retry has invalid fields")
+    release = payload["release_name"]
+    if not _valid_release_name(release) or release == published_release:
+        raise ReleaseStatusError("retry.release_name must identify an unpublished release")
+    first_at, first = _timestamp(payload["first_failed_at"], "retry.first_failed_at")
+    last_at, last = _timestamp(payload["last_failed_at"], "retry.last_failed_at")
+    if first > last:
+        raise ReleaseStatusError("retry.last_failed_at precedes retry.first_failed_at")
+    if (
+        last_run is None
+        or last_run.result == "success"
+        or last > datetime.fromisoformat(last_run.completed_at)
+        or (
+            last_run.release_name is not None
+            and last_run.release_name != published_release
+            and (release, last_at) != (last_run.release_name, last_run.completed_at)
+        )
+    ):
+        raise ReleaseStatusError("retry does not match last_run")
+    return ReleaseRetry(release, first_at, last_at)
 
 
 def load_status(status_dir: Path, target: str) -> ReleaseStatus:
@@ -275,22 +346,26 @@ def compare_release(
     *,
     target: str,
     current_release_name: str,
+    now: datetime | None = None,
 ) -> ReleaseComparison:
     if not _valid_release_name(current_release_name):
         raise ReleaseStatusError("current_release_name has an invalid value")
     current = load_status(status_dir, target)
     mismatch = current.release_name != current_release_name
-    retry_blocked = bool(
-        mismatch
-        and current.last_run is not None
-        and current.last_run.result != "success"
-        and current.last_run.release_name == current_release_name
+    _, checked_at = _timestamp((now or datetime.now(UTC)).isoformat(), "now")
+    next_retry = (
+        current.retry.next_retry()
+        if mismatch
+        and current.retry is not None
+        and current.retry.release_name == current_release_name
+        else None
     )
     return ReleaseComparison(
         stored_release_name=current.release_name,
         current_release_name=current_release_name,
         mismatch=mismatch,
-        retry_blocked=retry_blocked,
+        retry_blocked=next_retry is not None and checked_at < next_retry,
+        next_retry_at=next_retry.isoformat().replace("+00:00", "Z") if next_retry else None,
     )
 
 
@@ -335,13 +410,23 @@ def record_run(
     if run.result == "success":
         next_release_name = run.release_name
         next_readable_version = run.readable_version
+        retry = None
     else:
         next_release_name = current.release_name
         next_readable_version = current.readable_version
+        retry = current.retry
+        if run.release_name is not None and run.release_name != current.release_name:
+            first_failed_at = (
+                min(retry.first_failed_at, run.completed_at)
+                if retry is not None and retry.release_name == run.release_name
+                else run.completed_at
+            )
+            retry = ReleaseRetry(run.release_name, first_failed_at, run.completed_at)
     updated = ReleaseStatus(
         release_name=next_release_name,
         readable_version=next_readable_version,
         last_run=run,
+        retry=retry,
     )
     if updated == current:
         return False

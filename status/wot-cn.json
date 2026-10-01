@@ -11,5 +11,10 @@
     "run_id": 36804863561,
     "run_attempt": 1,
     "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/36804863561"
+  },
+  "retry": {
+    "release_name": "2.4.0.5461",
+    "first_failed_at": "2026-09-30T20:31:54Z",
+    "last_failed_at": "2026-10-01T02:25:14Z"
   }
 }

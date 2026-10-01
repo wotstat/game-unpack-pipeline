@@ -25,6 +25,7 @@ ACTION_LABELS = {
     "dry_run": "🧪 Dry run",
     "already_running": "⏳ Already running",
     "manual_retry_required": "🛑 Manual retry required",
+    "retry_wait": "⏳ Waiting for retry",
     "dispatched": "🚀 Dispatched",
     "check_failed": "—",
     "active_check_failed": "❌ Active-run check failed",
@@ -40,6 +41,7 @@ class TargetResult:
     current_release_name: str | None
     state: str
     action: str
+    next_retry_at: str | None = None
 
 
 def _optional_string(value: object) -> str | None:
@@ -75,6 +77,7 @@ def _read_result(results_dir: Path, target: str) -> TargetResult:
             current_release_name=_optional_string(raw.get("current_release_name")),
             state=state,
             action=action,
+            next_retry_at=_optional_string(raw.get("next_retry_at")),
         )
     except (OSError, json.JSONDecodeError, ValueError):
         return _unavailable_result(target)
@@ -126,6 +129,9 @@ def render_report(
     )
     for result in results:
         target_label = html.escape(TARGET_LABELS.get(result.target, result.target), quote=True)
+        action_label = ACTION_LABELS[result.action]
+        if result.action == "retry_wait" and result.next_retry_at is not None:
+            action_label += f" · {_release_name(result.next_retry_at)}"
         lines.append(
             "| "
             + " | ".join(
@@ -134,7 +140,7 @@ def render_report(
                     _release_name(result.stored_release_name),
                     _release_name(result.current_release_name),
                     STATE_LABELS[result.state],
-                    ACTION_LABELS[result.action],
+                    action_label,
                 )
             )
             + " |"
