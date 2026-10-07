@@ -131,11 +131,19 @@ class _HttpTransferProgress:
     """Track useful file progress across HTTP retries, restarts and source changes."""
 
     def __init__(
-        self, artifact_id: str, size: int, initial_bytes: int, policy: DownloadPolicy
+        self,
+        artifact_id: str,
+        size: int,
+        initial_bytes: int,
+        policy: DownloadPolicy,
+        *,
+        observer: Callable[[str], None] | None = None,
     ) -> None:
         self._artifact_id = artifact_id
         self._size = size
         self._policy = policy
+        self._observer = observer or (lambda _message: None)
+        self._slow_warning_active = False
         self._current_bytes = initial_bytes
         self._high_watermark = initial_bytes
         now = time.monotonic()
@@ -178,10 +186,15 @@ class _HttpTransferProgress:
             and elapsed >= self._policy.http_throughput_window_seconds
             and (speed := max(0, self._current_bytes - started_bytes) / elapsed) < minimum_speed
         ):
-            raise DownloadTooSlowError(
-                f"{detail}; HTTP forward progress averaged {_format_rate(speed)} over "
-                f"{elapsed:.1f}s, below the configured {_format_rate(minimum_speed)} minimum"
-            )
+            if not self._slow_warning_active:
+                self._observer(
+                    f"Warning: {detail}; HTTP forward progress averaged {_format_rate(speed)} over "
+                    f"{elapsed:.1f}s, below the configured {_format_rate(minimum_speed)} "
+                    "warning threshold; continuing current stream"
+                )
+                self._slow_warning_active = True
+        else:
+            self._slow_warning_active = False
         return remaining
 
     def timeout(self) -> httpx.Timeout:
@@ -1040,6 +1053,7 @@ class ArtifactDownloader:
             artifact.size,
             payload_path.stat().st_size if payload_path.exists() else 0,
             self._policy,
+            observer=self._progress_observer,
         )
         for url in artifact.source_urls:
             self._validate_web_seed_url(url)
