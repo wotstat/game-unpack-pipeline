@@ -31,13 +31,14 @@ on:
         default: ALL
         type: string
       selectel_location:
-        description: Selectel pool segment (ru-3b is the manual fallback)
+        description: Selectel pool segment (ru-9a uses HighFreq without dedicated cores)
         required: true
         default: ru-7b
         type: choice
         options:
           - ru-7b
           - ru-3b
+          - ru-9a
       detected_release_name:
         description: Optional release detected by Check game releases
         required: false
@@ -63,12 +64,18 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
-  SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"
+  SELECTEL_FLAVOR_ID: >-
+    ${{ inputs.selectel_location == 'ru-9a'
+        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}
   SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}
-  SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-3b' && 'ru-3' || 'ru-7' }}
+  SELECTEL_OS_REGION_NAME: >-
+    ${{ inputs.selectel_location == 'ru-3b' && 'ru-3'
+        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7' }}
   SELECTEL_PUBLIC_NETWORK_API_URL: >-
     ${{ inputs.selectel_location == 'ru-3b'
         && 'https://ru-3.cloud.api.selcloud.ru/public-network'
+        || inputs.selectel_location == 'ru-9a'
+        && 'https://ru-9.cloud.api.selcloud.ru/public-network'
         || 'https://ru-7.cloud.api.selcloud.ru/public-network' }}
 
 jobs:
@@ -127,6 +134,8 @@ jobs:
           SELECTEL_IMAGE_ID: >-
             ${{ inputs.selectel_location == 'ru-3b'
                 && (vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit')
+                || inputs.selectel_location == 'ru-9a'
+                && (vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit')
                 || vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}

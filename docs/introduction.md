@@ -143,7 +143,7 @@ snapshot до стадии `snapshot` и предоставляет только
 | `target` | `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`, `mt-public-test` |
 | `client_type` | `sd` или `hd` |
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `ALL` |
-| `selectel_location` | `ru-7b` по умолчанию или ручной резерв `ru-3b` |
+| `selectel_location` | `ru-7b` по умолчанию; ручной резерв `ru-3b` или `ru-9a` |
 | `detected_release_name` | Необязательная подсказка checker; в прямом ручном запуске остаётся пустой |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
@@ -153,8 +153,10 @@ snapshot до стадии `snapshot` и предоставляет только
 соберёт и проверит snapshot, после чего удалит VM. Production-конфигурация зафиксирована как
 HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`: 16 vCPU, 32 ГБ RAM и
 256 ГБ локального диска. По умолчанию используется `ru-7b`; при ручном запуске можно выбрать
-`ru-3b` в другом регионе с тем же flavor. Checker продолжает использовать `ru-7b`, автоматического
-переключения пулов нет. Standard, обычный HighFreq и выбор flavor не поддерживаются.
+`ru-3b` в другом регионе с тем же flavor. Ручной резерв `ru-9a` использует обычный HighFreq без
+выделенных ядер `HFL1.16-32768-240`: 16 vCPU, 32 ГБ RAM и 240 ГБ локального диска. Число workers
+автоматически соответствует доступным CPU. Checker продолжает использовать `ru-7b`, автоматического
+переключения пулов нет. Standard и произвольный выбор flavor не поддерживаются.
 
 ## Проверка новых версий
 
@@ -276,7 +278,7 @@ ID. Затем GitHub Git Database API создаёт один final version com
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
-  идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7`, `ru-3` и legacy `ru-9`.
+  идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7`, `ru-3` и `ru-9`.
 - До установки runner cloud-init вооружает systemd timer с абсолютным дедлайном через четыре часа.
   В дедлайн VM аутентифицируется отдельным истекающим OpenStack application credential, которому
   разрешён только `DELETE` точного UUID этой VM, и запрашивает собственное удаление. Пароль

@@ -97,9 +97,10 @@ workflow или отдельный репозиторий и не перенос
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
-  позволяет вручную выбрать `ru-7b` (по умолчанию) или резервный `ru-3b`; checker всегда использует
-  default `ru-7b`. Автоматического переключения пулов нет. Для `ru-3` образ берётся из optional
-  variable `SELECTEL_IMAGE_ID_RU_3` либо по уникальному имени `Ubuntu 24.04 LTS 64-bit` в этом region.
+  позволяет вручную выбрать `ru-7b` (по умолчанию), резервный `ru-3b` или `ru-9a`; checker всегда
+  использует default `ru-7b`. Автоматического переключения пулов нет. Для `ru-3`/`ru-9` образ берётся
+  из optional variable `SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_9` либо по уникальному имени
+  `Ubuntu 24.04 LTS 64-bit` в выбранном region.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
@@ -127,10 +128,12 @@ workflow или отдельный репозиторий и не перенос
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
-- Production flavor зафиксирован как HighFreq с выделенными ядрами
-  `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
+- Production flavor в `ru-7b` и `ru-3b` зафиксирован как HighFreq с выделенными ядрами
+  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk). Ручной резерв `ru-9a` использует
+  обычный HighFreq без выделенных ядер `HFL1.16-32768-240` (16 vCPU, 32 ГБ RAM, 240 ГБ local disk).
+  Flavor определяется только выбранным сегментом; Standard и произвольный выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
-  точным ownership-маркерам и проверяет `ru-7`, `ru-3` и legacy `ru-9`. Перед удалением общего
+  точным ownership-маркерам и проверяет `ru-7`, `ru-3` и `ru-9`. Перед удалением общего
   emergency credential reconciler подтверждает отсутствие VM во всех трёх region; отсутствие
   только в текущем region не разрешает удалить credential ещё живой VM в другом пуле.
 - При статусе VM `ERROR` provision до cleanup выводит только `fault.code` и очищенный

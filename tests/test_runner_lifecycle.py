@@ -784,27 +784,35 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT", workflow)
         self.assertIn(
             "      selectel_location:\n"
-            "        description: Selectel pool segment (ru-3b is the manual fallback)\n"
+            "        description: Selectel pool segment "
+            "(ru-9a uses HighFreq without dedicated cores)\n"
             "        required: true\n"
             "        default: ru-7b\n"
             "        type: choice\n"
             "        options:\n"
             "          - ru-7b\n"
-            "          - ru-3b",
+            "          - ru-3b\n"
+            "          - ru-9a",
             workflow,
         )
         self.assertNotIn("ru-7a", workflow)
-        self.assertNotIn("ru-9a", workflow)
         self.assertIn(
             "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}", workflow
         )
         self.assertIn(
-            "SELECTEL_OS_REGION_NAME: "
-            "${{ inputs.selectel_location == 'ru-3b' && 'ru-3' || 'ru-7' }}",
+            "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
+            "        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7'",
             workflow,
         )
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn('SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"', workflow)
+        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
+        self.assertIn("https://ru-9.cloud.api.selcloud.ru/public-network", workflow)
+        self.assertIn(
+            "SELECTEL_FLAVOR_ID: >-\n"
+            "    ${{ inputs.selectel_location == 'ru-9a'\n"
+            "        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}",
+            workflow,
+        )
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
             "  download:\n"
