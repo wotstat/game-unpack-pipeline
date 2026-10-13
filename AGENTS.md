@@ -25,7 +25,7 @@ manual workflow_dispatch
   → cleanup с always()
   → параллельно запись результата run в status и итоговый Telegram-отчёт
   → после status commit сборка и deployment GitHub Pages
-  → workflow_run reconciler в ru-7 и ru-9
+  → workflow_run reconciler в ru-7, ru-3 и ru-9
   → recovery alert только при deleted_count > 0
 ```
 
@@ -35,8 +35,8 @@ targets, сравнивает `release_name` с `status/<target>.json` и в dis
 работает в dispatch-режиме. Ручной запуск по умолчанию также проверяет все семь targets и работает в
 dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
-Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет только
-target, client type, languages и три независимых переключателя `publish_wot_src`,
+Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет
+target, client type, languages, ручной выбор `selectel_location` и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
 ## Границы компонентов
@@ -96,8 +96,10 @@ workflow или отдельный репозиторий и не перенос
 - Download job реализован прямо в основном workflow и последовательно выполняет все стадии от
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
-  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. Production location
-  зафиксирована как `ru-7b` и не вынесена в dispatch input.
+  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
+  позволяет вручную выбрать `ru-7b` (по умолчанию) или резервный `ru-3b`; checker всегда использует
+  default `ru-7b`. Автоматического переключения пулов нет. Для `ru-3` образ берётся из optional
+  variable `SELECTEL_IMAGE_ID_RU_3` либо по уникальному имени `Ubuntu 24.04 LTS 64-bit` в этом region.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
@@ -128,7 +130,13 @@ workflow или отдельный репозиторий и не перенос
 - Production flavor зафиксирован как HighFreq с выделенными ядрами
   `HFL2.16-32768-256-AMD`; Standard, обычный HighFreq и выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
-  точным ownership-маркерам и проверяет обе region.
+  точным ownership-маркерам и проверяет `ru-7`, `ru-3` и legacy `ru-9`. Перед удалением общего
+  emergency credential reconciler подтверждает отсутствие VM во всех трёх region; отсутствие
+  только в текущем region не разрешает удалить credential ещё живой VM в другом пуле.
+- При статусе VM `ERROR` provision до cleanup выводит только `fault.code` и очищенный
+  `fault.message`. Из сообщения удаляются известные secrets/JIT-конфигурации, credentials по
+  именованным полям и account/project identifiers; control characters экранируются. `fault.details`,
+  user data и полный server payload не выводятся.
 - До bootstrap runner cloud-init вооружает абсолютный systemd timer на четыре часа. Для VM создаётся
   отдельный restricted OpenStack application credential, разрешающий только `DELETE` точного UUID
   этой VM; credential истекает через час после дедлайна для повторных попыток. Штатный cleanup и

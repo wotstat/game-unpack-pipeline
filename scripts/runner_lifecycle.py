@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1035,7 +1035,62 @@ def set_server_emergency_credentials(
     )
 
 
-def wait_for_server_active(config: SelectelConfig, server_id: str, timeout_seconds: int) -> None:
+def server_error_message(
+    config: SelectelConfig,
+    server: Mapping[str, Any],
+    sensitive_values: Iterable[str],
+) -> str:
+    # Whitelist fault fields: details/user_data/metadata can contain credentials.
+    fault = server.get("fault")
+    if not isinstance(fault, Mapping):
+        fault = {}
+    code = fault.get("code")
+    safe_code = str(code) if isinstance(code, int) and not isinstance(code, bool) else "unavailable"
+    message = fault.get("message")
+    if not isinstance(message, str):
+        message = "unavailable"
+    message = sanitized(
+        message,
+        (
+            config.password,
+            config.username,
+            config.user_domain_name,
+            config.project_id,
+            normalized_uuid(config.project_id),
+            *sensitive_values,
+        ),
+    )
+    message = re.sub(
+        r"(?i)(\b(?:authorization|x-auth-token)\s*:\s*)(?:Bearer\s+|Basic\s+)?[^\s,;]+",
+        r"\1***",
+        message,
+    )
+    message = re.sub(
+        r"""(?i)(["']?\b[\w-]*(?:password|token|secret|authorization|"""
+        r"""private[_-]?key|user[_-]?data)"""
+        r"""\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+        r"\1***",
+        message,
+    )
+    message = re.sub(
+        r"\b(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b",
+        "***",
+        message,
+    )
+    # JSON quoting escapes line breaks/control characters before Actions sees the annotation.
+    safe_message = json.dumps(message[:4096], ensure_ascii=True)
+    return (
+        f"Selectel server entered ERROR state; fault.code={safe_code}; fault.message={safe_message}"
+    )
+
+
+def wait_for_server_active(
+    config: SelectelConfig,
+    server_id: str,
+    timeout_seconds: int,
+    *,
+    sensitive_values: Iterable[str] = (),
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         result = openstack(config, ["server", "show", server_id, "-f", "json"], check=False)
@@ -1047,7 +1102,7 @@ def wait_for_server_active(config: SelectelConfig, server_id: str, timeout_secon
                 append_summary("- VM status: `ACTIVE`")
                 return
             if status == "ERROR":
-                raise LifecycleError("Selectel server entered ERROR state")
+                raise LifecycleError(server_error_message(config, server, sensitive_values))
         time.sleep(5)
     raise LifecycleError("Timed out waiting for Selectel server to become ACTIVE")
 
@@ -1267,8 +1322,17 @@ def delete_emergency_application_credentials(
     identity: ResourceIdentity,
     credential_id: str = "",
     *,
+    credential_check_regions: Sequence[str] = (),
     deleted_resources: list[str] | None = None,
 ) -> None:
+    # Identity credentials are global: absence in this region alone is insufficient
+    # when the reconciler is scanning regions that can still contain the live VM.
+    for region in credential_check_regions:
+        if find_server_ids(replace(config, region_name=region), identity):
+            print(
+                f"Emergency application credential retained because the VM still exists in {region}"
+            )
+            return
     candidates = set(find_emergency_application_credential_ids(config, identity))
     if UUID_RE.fullmatch(credential_id):
         candidates.add(credential_id)
@@ -1574,7 +1638,12 @@ def provision(arguments: argparse.Namespace) -> None:
         server_id = create_server(config, identity, port_id, cloud_config_path)
         write_output("server_id", server_id)
         print(f"Server created: {server_id}")
-        wait_for_server_active(config, server_id, timeout_seconds=300)
+        wait_for_server_active(
+            config,
+            server_id,
+            timeout_seconds=300,
+            sensitive_values=(app_token, public_token, *jit_configs.values()),
+        )
         emergency_credential_id, emergency_credential_secret = (
             create_emergency_application_credential(
                 config,
@@ -1751,6 +1820,7 @@ def cleanup(arguments: argparse.Namespace) -> None:
                 config,
                 identity,
                 arguments.emergency_credential_id,
+                credential_check_regions=arguments.credential_check_regions,
                 deleted_resources=deleted_resources,
             )
         except Exception as error:
@@ -1835,6 +1905,13 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--port-id", default="")
     cleanup_parser.add_argument("--security-group-id", default="")
     cleanup_parser.add_argument("--emergency-credential-id", default="")
+    cleanup_parser.add_argument(
+        "--credential-check-regions",
+        nargs="+",
+        choices=("ru-7", "ru-3", "ru-9"),
+        default=(),
+        help="Require VM absence in every listed region before deleting its global credential",
+    )
     cleanup_parser.add_argument("--diagnostics", action="store_true")
     cleanup_parser.set_defaults(handler=cleanup)
 

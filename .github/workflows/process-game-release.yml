@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ru-7b · @${{ github.actor }}
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location || 'ru-7b' }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -30,6 +30,14 @@ on:
         required: true
         default: ALL
         type: string
+      selectel_location:
+        description: Selectel pool segment (ru-3b is the manual fallback)
+        required: true
+        default: ru-7b
+        type: choice
+        options:
+          - ru-7b
+          - ru-3b
       detected_release_name:
         description: Optional release detected by Check game releases
         required: false
@@ -56,9 +64,12 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"
-  SELECTEL_AVAILABILITY_ZONE: "ru-7b"
-  SELECTEL_OS_REGION_NAME: "ru-7"
-  SELECTEL_PUBLIC_NETWORK_API_URL: "https://ru-7.cloud.api.selcloud.ru/public-network"
+  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}
+  SELECTEL_OS_REGION_NAME: ${{ inputs.selectel_location == 'ru-3b' && 'ru-3' || 'ru-7' }}
+  SELECTEL_PUBLIC_NETWORK_API_URL: >-
+    ${{ inputs.selectel_location == 'ru-3b'
+        && 'https://ru-3.cloud.api.selcloud.ru/public-network'
+        || 'https://ru-7.cloud.api.selcloud.ru/public-network' }}
 
 jobs:
   provision:
@@ -113,7 +124,10 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
-          SELECTEL_IMAGE_ID: ${{ vars.SELECTEL_IMAGE_ID }}
+          SELECTEL_IMAGE_ID: >-
+            ${{ inputs.selectel_location == 'ru-3b'
+                && (vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit')
+                || vars.SELECTEL_IMAGE_ID }}
           SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
           SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
           SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}

@@ -35,16 +35,23 @@ vCPU и `32 × N` ГБ RAM. Оркестратор не отменяет пре�
 Локальный диск обязателен для текущей архитектуры: snapshot читают четыре runner на одной VM, а после
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
-Так как Selectel не поддерживает выделенные ядра в `ru-9a`, production location зафиксирована
-в workflow и не вынесена в dispatch input:
+Input `selectel_location` позволяет вручную выбрать сегмент пула. По умолчанию и для всех
+запусков checker используется `ru-7b`; `ru-3b` — ручной резерв в другом регионе:
 
 | Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
 | `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
+| `ru-3b` | `ru-3` | `https://ru-3.cloud.api.selcloud.ru/public-network` |
+
+В `ru-3b` (Санкт-Петербург) доступны те же HighFreq-конфигурации с выделенными ядрами, что и
+в `ru-7b` (Москва). Перед резервным запуском проверить квоты проекта в `ru-3` на VM, CPU/RAM
+и direct public IP. Preflight выбранного региона проверяет доступность образа, flavor, сегмента
+и свободного direct-IP slot до создания ресурсов. Автоматического переключения пулов нет.
+`ru-9a` не поддерживает требуемые выделенные ядра и не предлагается для новых запусков.
 
 Flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соответствует включённой в панели
 опции **Выделенные ядра**; Hyper-Threading (SMT) остаётся включённым по умолчанию. Standard,
-обычный HighFreq, выбор flavor и location не поддерживаются.
+обычный HighFreq и выбор flavor не поддерживаются.
 
 ## 2. Repository-level GitHub App
 
@@ -148,9 +155,13 @@ caller, включая техническую доступность `GH_APP_PRI
 | `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
 | `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
 | `SELECTEL_IMAGE_ID` | Уникальное имя или UUID выбранного Ubuntu 24.04 x64 image |
+| `SELECTEL_IMAGE_ID_RU_3` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-3` |
 
 `SELECTEL_OS_PROJECT_ID` может быть UUID с дефисами или 32 шестнадцатеричными символами. Image и
-фиксированный HighFreq flavor с выделенными ядрами разрешаются OpenStack CLI в `ru-7`. До создания
+фиксированный HighFreq flavor с выделенными ядрами разрешаются OpenStack CLI в выбранном регионе.
+Для `ru-7` используется `SELECTEL_IMAGE_ID`. Для `ru-3` — `SELECTEL_IMAGE_ID_RU_3`, если задана,
+иначе уникальное имя публичного образа `Ubuntu 24.04 LTS 64-bit` в `ru-3`. UUID образа из `ru-7`
+в резервный регион не переносится. До создания
 ресурсов preflight проверяет authentication, image, flavor, availability zone и наличие свободного
 direct-public-IP slot; при отсутствующем или неоднозначном имени run завершается на этом этапе.
 
@@ -243,6 +254,7 @@ patches chain для default language, не создавая workspace и не �
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
+| `selectel_location` | `ru-7b`; для ручного обхода сбоя пула выбрать `ru-3b` |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
@@ -326,7 +338,7 @@ Consumer можно включать независимо для каждого 
     заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 14. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
-    `ru-7` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
+    `ru-7`, `ru-3` и legacy `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
     явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
     приходит отдельный recovery alert.
@@ -353,10 +365,15 @@ job ограничены 60 минутами, uploader — 120 минутами;
 4. Передать `source_run_id` и `source_run_attempt`.
 5. Повторять manual reconciler безопасно, если Selectel или GitHub API временно недоступны.
 
-Reconciler проверяет обе region и удаляет только ресурсы с детерминированными именами и совпавшими
+Reconciler проверяет `ru-7`, `ru-3` и legacy `ru-9` и удаляет только ресурсы с детерминированными именами и совпавшими
 repository/run/attempt ownership-маркерами. Уже отсутствующий ресурс считается очищенным. При
 ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
 перечнем незавершённых действий.
+
+Emergency application credential относится к общему Identity API. Перед его удалением reconciler
+с `--credential-check-regions ru-7 ru-3 ru-9` подтверждает отсутствие VM во всех трёх region.
+Если VM ещё существует в другом регионе или API не позволяет проверить её отсутствие, credential
+сохраняется для systemd kill switch. Штатный cleanup проверяет регион своего run.
 
 Внутри provision, cleanup и reconciler временные ошибки Selectel повторяются с паузами
 5, 15 и 30 секунд. Для HTTP это GET/HEAD/DELETE и получение identity token: сетевые обрывы,
@@ -381,6 +398,14 @@ ownership-маркерам, проверяет project и security group и пр
 [Public Network API](https://docs.selectel.ru/api/cloud-public-network/).
 
 ## 11. Диагностика без утечки секретов
+
+Если VM переходит в `ERROR`, provision до cleanup выводит `fault.code` и `fault.message`
+из ответа `openstack server show`. Например: `fault.code=500; fault.message="No valid host was found."`.
+Числовой код и причина будут видны в ошибке шага `Create VM and wait for runner`; при отсутствии
+полей выводится `unavailable`. Сообщение очищается от известных passwords, tokens, JIT-конфигураций,
+account/project identifiers и именованных credential/user-data значений. Переводы строк и control
+characters экранируются, длина ограничена 4096 символами после очистки. `fault.details`, metadata,
+cloud-init user data и полный server payload в эту диагностику не попадают.
 
 При ошибке cleanup запрашивает serial console и выводит только очищенный хвост. Из него удаляются
 JIT-конфигурации, известные tokens/passwords и распространённые GitHub token formats. Полный console

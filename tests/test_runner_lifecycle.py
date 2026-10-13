@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import http.client
+import io
 import json
 import os
 import re
@@ -391,7 +392,7 @@ class ProvisionOrderingTests(unittest.TestCase):
                 lifecycle,
                 "wait_for_server_active",
                 side_effect=mark_server_active,
-            ),
+            ) as wait_active,
             patch.object(
                 lifecycle,
                 "set_server_emergency_credentials",
@@ -401,6 +402,20 @@ class ProvisionOrderingTests(unittest.TestCase):
             patch.object(lifecycle, "show_console_log"),
         ):
             lifecycle.provision(arguments)
+
+        wait_active.assert_called_once_with(
+            config,
+            server_id,
+            timeout_seconds=300,
+            sensitive_values=(
+                "test-app-token",
+                "test-public-token",
+                "downloader-jit",
+                "gui-assets-jit",
+                "source-jit",
+                "uploader-jit",
+            ),
+        )
 
 
 class SanitizerTests(unittest.TestCase):
@@ -422,6 +437,119 @@ class SanitizerTests(unittest.TestCase):
         self.assertNotIn("very-secret", result)
         self.assertNotIn("also-secret", result)
         self.assertNotIn("known-value", result)
+
+
+class ServerStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = lifecycle.SelectelConfig(
+            auth_url="https://api.example.test/identity/v3",
+            username="test-user",
+            password="test-password",
+            user_domain_name="test-domain",
+            project_id="00000000-0000-0000-0000-000000000001",
+            region_name="ru-7",
+            availability_zone="ru-7b",
+            image_id="test-image",
+            flavor_id="test-flavor",
+            public_network_api_url="https://api.example.test/public-network",
+        )
+
+    def test_error_reports_fault_code_and_message(self) -> None:
+        result = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {"status": "ERROR", "fault": {"code": 500, "message": "No valid host was found."}}
+            ),
+        )
+        with (
+            patch.object(lifecycle, "openstack", return_value=result),
+            self.assertRaises(lifecycle.LifecycleError) as raised,
+        ):
+            lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
+
+        self.assertIn("fault.code=500", str(raised.exception))
+        self.assertIn('fault.message="No valid host was found."', str(raised.exception))
+
+    def test_fault_redacts_secrets_and_identifiers_and_cannot_inject_log_commands(self) -> None:
+        project_id = self.config.project_id
+        known_values = [
+            self.config.password,
+            self.config.username,
+            self.config.user_domain_name,
+            project_id,
+            project_id.replace("-", ""),
+            "test-app-value",
+            "test-public-value",
+            "test-jit-value",
+        ]
+        unknown_values = [
+            "unrecognized-value",
+            "test-authorization",
+            "test-quoted-auth",
+            "encoded-bootstrap",
+        ]
+        fault = {
+            "code": 500,
+            "message": (
+                "No valid host: "
+                + " ".join(known_values)
+                + '; token="unrecognized-value"; Authorization: Bearer test-authorization; '
+                + "'Authorization': 'Bearer test-quoted-auth'; "
+                + "user_data='encoded-bootstrap'\n::warning::injected\r\x1b[31m"
+            ),
+            "details": "private diagnostic details must not be logged",
+        }
+        result = Mock(returncode=0, stdout=json.dumps({"status": "ERROR", "fault": fault}))
+        output = io.StringIO()
+        with (
+            patch.object(lifecycle, "openstack", return_value=result),
+            patch("sys.stderr", output),
+            patch("sys.stdout", output),
+            self.assertRaises(lifecycle.LifecycleError) as raised,
+        ):
+            lifecycle.wait_for_server_active(
+                self.config,
+                "test-server",
+                timeout_seconds=10,
+                sensitive_values=known_values[5:],
+            )
+
+        diagnostic = str(raised.exception) + output.getvalue()
+        self.assertIn("fault.code=500", diagnostic)
+        self.assertIn("No valid host", diagnostic)
+        for value in [*known_values, *unknown_values, fault["details"]]:
+            self.assertNotIn(value, diagnostic)
+        self.assertNotIn("\n", diagnostic)
+        self.assertNotIn("\r", diagnostic)
+        self.assertNotIn("\x1b", diagnostic)
+
+    def test_missing_or_malformed_fault_preserves_the_vm_error(self) -> None:
+        for fault in (None, {}, "invalid", {"code": "secret-code", "message": ["secret"]}):
+            with self.subTest(fault=fault):
+                result = Mock(
+                    returncode=0,
+                    stdout=json.dumps({"status": "ERROR", "fault": fault}),
+                )
+                with (
+                    patch.object(lifecycle, "openstack", return_value=result),
+                    self.assertRaises(lifecycle.LifecycleError) as raised,
+                ):
+                    lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
+
+                self.assertIn("Selectel server entered ERROR state", str(raised.exception))
+                self.assertIn("fault.code=unavailable", str(raised.exception))
+                self.assertIn('fault.message="unavailable"', str(raised.exception))
+                self.assertNotIn("secret", str(raised.exception))
+
+    def test_active_server_does_not_report_fault(self) -> None:
+        result = Mock(returncode=0, stdout='{"status":"ACTIVE"}')
+        with (
+            patch.object(lifecycle, "openstack", return_value=result) as openstack,
+            patch.object(lifecycle, "append_summary"),
+        ):
+            lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
+
+        openstack.assert_called_once()
 
 
 class SelectelConfigTests(unittest.TestCase):
@@ -654,11 +782,28 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
         self.assertIn("WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT", workflow)
-        self.assertNotIn("selectel_location", workflow)
+        self.assertIn(
+            "      selectel_location:\n"
+            "        description: Selectel pool segment (ru-3b is the manual fallback)\n"
+            "        required: true\n"
+            "        default: ru-7b\n"
+            "        type: choice\n"
+            "        options:\n"
+            "          - ru-7b\n"
+            "          - ru-3b",
+            workflow,
+        )
         self.assertNotIn("ru-7a", workflow)
         self.assertNotIn("ru-9a", workflow)
-        self.assertIn('SELECTEL_AVAILABILITY_ZONE: "ru-7b"', workflow)
-        self.assertIn('SELECTEL_OS_REGION_NAME: "ru-7"', workflow)
+        self.assertIn(
+            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}", workflow
+        )
+        self.assertIn(
+            "SELECTEL_OS_REGION_NAME: "
+            "${{ inputs.selectel_location == 'ru-3b' && 'ru-3' || 'ru-7' }}",
+            workflow,
+        )
+        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
         self.assertIn('SELECTEL_FLAVOR_ID: "HFL2.16-32768-256-AMD"', workflow)
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
         self.assertIn(
@@ -730,7 +875,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
         self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)
-        self.assertIn("for selectel_region in ru-7 ru-9", reconciler)
+        self.assertIn("for selectel_region in ru-7 ru-3 ru-9", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
 

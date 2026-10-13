@@ -35,6 +35,68 @@ CONFIG = lifecycle.SelectelConfig(
 )
 
 
+def test_reconciler_retains_credential_while_vm_exists_in_another_region() -> None:
+    with (
+        patch.object(lifecycle, "find_server_ids", side_effect=[[], [PORT_ID]]) as find_servers,
+        patch.object(lifecycle, "find_emergency_application_credential_ids") as find_credentials,
+        patch.object(lifecycle, "delete_openstack_resource") as delete,
+    ):
+        lifecycle.delete_emergency_application_credentials(
+            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9")
+        )
+
+    assert [call.args[0].region_name for call in find_servers.call_args_list] == ["ru-7", "ru-3"]
+    find_credentials.assert_not_called()
+    delete.assert_not_called()
+
+
+def test_reconciler_deletes_credential_only_after_all_regions_confirm_vm_absent() -> None:
+    credential = {
+        "name": IDENTITY.emergency_credential_name,
+        "description": IDENTITY.emergency_credential_description,
+    }
+    deleted: list[str] = []
+    with (
+        patch.object(lifecycle, "find_server_ids", return_value=[]) as find_servers,
+        patch.object(
+            lifecycle, "find_emergency_application_credential_ids", return_value=[GROUP_ID]
+        ),
+        patch.object(
+            lifecycle, "openstack", return_value=Mock(returncode=0, stdout=json.dumps(credential))
+        ),
+        patch.object(lifecycle, "delete_openstack_resource", return_value=True) as delete,
+    ):
+        lifecycle.delete_emergency_application_credentials(
+            CONFIG,
+            IDENTITY,
+            credential_check_regions=("ru-7", "ru-3", "ru-9"),
+            deleted_resources=deleted,
+        )
+
+    assert [call.args[0].region_name for call in find_servers.call_args_list] == [
+        "ru-7",
+        "ru-3",
+        "ru-9",
+    ]
+    delete.assert_called_once_with(CONFIG, ["application", "credential"], GROUP_ID)
+    assert deleted == [f"selectel-application-credential:{GROUP_ID}"]
+
+
+def test_reconciler_does_not_delete_credential_if_a_region_cannot_be_checked() -> None:
+    with (
+        patch.object(
+            lifecycle, "find_server_ids", side_effect=lifecycle.LifecycleError("API unavailable")
+        ),
+        patch.object(lifecycle, "delete_openstack_resource") as delete,
+        pytest.raises(lifecycle.LifecycleError, match="API unavailable"),
+    ):
+        lifecycle.delete_emergency_application_credentials(
+            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9")
+        )
+
+    delete.assert_not_called()
+
+
 def response(payload: object, status: int = 200) -> Mock:
     result = Mock(status=status)
     result.read.return_value = json.dumps(payload).encode()
