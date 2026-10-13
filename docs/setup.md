@@ -407,6 +407,12 @@ ownership-маркерам, проверяет project и security group и пр
 
 ## 11. Диагностика без утечки секретов
 
+Ошибки загрузки torrent descriptor в `plan-acquisition` содержат исходный URL и, если известен,
+адрес фактически неудачного запроса после редиректа. HTTP-ошибки также показывают конечный URL
+ответа. Scheme, host, port и path сохраняются; userinfo, query и fragment удаляются, в том числе
+из URL внутри текста транспортной ошибки. Control characters экранируются. Это позволяет найти
+недоступный CDN без вывода параметров авторизации в логи.
+
 Если VM переходит в `ERROR`, provision до cleanup выводит `fault.code` и `fault.message`
 из ответа `openstack server show`. Например: `fault.code=500; fault.message="No valid host was found."`.
 Числовой код и причина будут видны в ошибке шага `Create VM and wait for runner`; при отсутствии

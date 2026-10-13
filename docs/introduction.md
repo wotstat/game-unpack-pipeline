@@ -227,6 +227,10 @@ run через GitHub Actions API. На странице время послед
 последнего обновления — на изменивший status pipeline. Общий endpoint `badges/release-check.json`
 показывает время проверки в МСК и также не требует Git-коммита.
 
+Чтение списка checker runs и его jobs повторяется при HTTP 502: не более четырёх попыток
+на запрос с паузами 5, 15 и 30 секунд. После исчерпания попыток сборка завершается ошибкой;
+остальные HTTP-ошибки не повторяются. Переданные checker metadata не требуют этих API-запросов.
+
 Основной pipeline вызывает reusable Pages workflow только после успешного status commit. Это
 работает и для runs, созданных checker через repository `GITHUB_TOKEN`, для которых новый
 `workflow_run` или `push` workflow автоматически не возник бы. Отдельные `push` и

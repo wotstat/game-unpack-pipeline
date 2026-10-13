@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import stat
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from typing import Protocol, cast
 from urllib.parse import quote_from_bytes, urljoin, urlsplit, urlunsplit
 
@@ -105,6 +107,33 @@ class DescriptorTransport(Protocol):
     def get(self, url: str) -> TransportResponse: ...
 
 
+def _descriptor_url_for_error(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            return '"[invalid URL]"'
+        safe_url = urlunsplit(
+            (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
+        )
+    except ValueError:
+        return '"[invalid URL]"'
+    return json.dumps(safe_url, ensure_ascii=True)
+
+
+def _descriptor_failure_detail(message: str) -> str:
+    cleaned = re.sub(
+        r"https?://[^\s<>\"']+",
+        lambda match: _descriptor_url_for_error(match.group())[1:-1],
+        message,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"[\x00-\x1f\x7f-\x9f\u2028\u2029]",
+        lambda match: json.dumps(match.group(), ensure_ascii=True)[1:-1],
+        cleaned,
+    )
+
+
 class HttpxDescriptorTransport:
     def __init__(self, policy: AcquisitionPolicy) -> None:
         self._policy = policy
@@ -143,8 +172,13 @@ class HttpxDescriptorTransport:
                     redirect_urls=redirects,
                 )
         except (httpx.HTTPError, OSError) as exc:
+            failed_url = url
+            if isinstance(exc, httpx.HTTPError):
+                with suppress(RuntimeError):
+                    failed_url = str(exc.request.url)
             raise TransportFailure(
-                f"torrent descriptor request failed: {type(exc).__name__}: {exc}"
+                f"torrent descriptor request failed for {_descriptor_url_for_error(failed_url)}: "
+                f"{type(exc).__name__}: {_descriptor_failure_detail(str(exc))}"
             ) from exc
 
 
@@ -578,37 +612,44 @@ class AcquisitionPlanner:
             return cached
         last_error = "no descriptor URL was attempted"
         for source_url in validated_urls:
+            source_context = f"torrent descriptor URL={_descriptor_url_for_error(source_url)}"
             for _attempt in range(self._policy.http_attempts):
                 try:
                     response = self._descriptor_transport.get(source_url)
                 except ResponseLimitExceeded as exc:
-                    raise ArtifactCorruptError(str(exc)) from exc
+                    raise ArtifactCorruptError(
+                        f"{source_context}: {_descriptor_failure_detail(str(exc))}"
+                    ) from exc
                 except TransportFailure as exc:
-                    last_error = str(exc)
+                    last_error = f"{source_context}: {_descriptor_failure_detail(str(exc))}"
                     continue
-                if response.status_code in {404, 429} or response.status_code >= 500:
-                    last_error = f"descriptor source returned HTTP {response.status_code}"
-                    continue
+                response_context = source_context
+                if response.final_url != source_url:
+                    response_context += (
+                        f"; final URL={_descriptor_url_for_error(response.final_url)}"
+                    )
                 if response.status_code < 200 or response.status_code >= 300:
-                    last_error = f"descriptor source returned HTTP {response.status_code}"
+                    last_error = f"{response_context}: source returned HTTP {response.status_code}"
+                    if response.status_code in {404, 429} or response.status_code >= 500:
+                        continue
                     break
                 if len(response.body) > self._policy.max_torrent_bytes:
-                    raise ArtifactCorruptError("torrent descriptor exceeds the byte limit")
+                    raise ArtifactCorruptError(f"{response_context}: exceeds the byte limit")
                 if len(response.redirect_urls) > self._policy.max_http_redirects + 1:
-                    raise SourceUnavailableError("torrent descriptor exceeded redirect limit")
+                    raise SourceUnavailableError(f"{response_context}: exceeded redirect limit")
                 final = urlsplit(response.final_url)
                 if final.scheme == "http" and not self._target.allow_http:
                     raise ProtocolIncompatibleError(
-                        "torrent descriptor redirected HTTPS traffic to HTTP"
+                        f"{response_context}: redirected HTTPS traffic to HTTP"
                     )
                 if final.scheme not in {"http", "https"}:
                     raise ProtocolIncompatibleError(
-                        "torrent descriptor redirected to a non-HTTP URL"
+                        f"{response_context}: redirected to a non-HTTP URL"
                     )
                 actual_sha256 = hashlib.sha256(response.body).hexdigest()
                 if actual_sha256 != expected_sha256:
                     raise ArtifactCorruptError(
-                        "torrent descriptor SHA-256 does not match integrity metadata"
+                        f"{response_context}: SHA-256 does not match integrity metadata"
                     )
                 try:
                     metainfo = parse_torrent(response.body, self._policy.torrent_limits())
@@ -618,9 +659,13 @@ class AcquisitionPlanner:
                         expected_size=len(response.body),
                     )
                 except UnsafeTorrentPathError as exc:
-                    raise UnsafeArchiveError(str(exc)) from exc
+                    raise UnsafeArchiveError(
+                        f"{response_context}: {_descriptor_failure_detail(str(exc))}"
+                    ) from exc
                 except (TorrentFormatError, BlobValidationError, CasCorruptionError) as exc:
-                    raise ArtifactCorruptError(str(exc)) from exc
+                    raise ArtifactCorruptError(
+                        f"{response_context}: {_descriptor_failure_detail(str(exc))}"
+                    ) from exc
                 descriptor = TorrentDescriptorRecord(
                     descriptor_sha256=expected_sha256,
                     source_urls=validated_urls,

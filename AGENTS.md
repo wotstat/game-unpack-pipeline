@@ -93,6 +93,8 @@ workflow или отдельный репозиторий и не перенос
   включая token-originated runs;
   `push` и `workflow_dispatch` используются для изменений страницы и ручной пересборки. История не
   дублируется в накопительном JSON или отдельных run-файлах.
+- При чтении checker runs/jobs для Pages HTTP 502 допускает не более четырёх попыток на запрос
+  с паузами 5/15/30 секунд; остальные ошибки не повторяются.
 - Download job реализован прямо в основном workflow и последовательно выполняет все стадии от
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
@@ -140,6 +142,8 @@ workflow или отдельный репозиторий и не перенос
   `fault.message`. Из сообщения удаляются известные secrets/JIT-конфигурации, credentials по
   именованным полям и account/project identifiers; control characters экранируются. `fault.details`,
   user data и полный server payload не выводятся.
+- Ошибки torrent descriptor содержат исходный и известный конечный URL. Userinfo, query и fragment
+  удаляются, включая URL в транспортной ошибке; control characters экранируются.
 - До bootstrap runner cloud-init вооружает абсолютный systemd timer на четыре часа. Для VM создаётся
   отдельный restricted OpenStack application credential, разрешающий только `DELETE` точного UUID
   этой VM; credential истекает через час после дедлайна для повторных попыток. Штатный cleanup и

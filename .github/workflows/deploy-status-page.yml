@@ -62,6 +62,30 @@ jobs:
           PROVIDED_RUN_URL: ${{ inputs.release_check_run_url }}
         run: |
           set -Eeuo pipefail
+          github_api_get() {
+            local error_file response exit_code attempt=1 delay
+            error_file="$(mktemp)"
+            for delay in 0 5 15 30; do
+              if ((delay > 0)); then
+                echo "::warning::GitHub API returned HTTP 502; retry ${attempt}/4 in ${delay}s" >&2
+                sleep "${delay}"
+              fi
+              if response="$(gh api --method GET "$@" 2>"${error_file}")"; then
+                rm -f "${error_file}"
+                printf '%s\n' "${response}"
+                return 0
+              else
+                exit_code=$?
+              fi
+              if ! grep -q '(HTTP 502)' "${error_file}" || ((attempt == 4)); then
+                cat "${error_file}" >&2
+                rm -f "${error_file}"
+                return "${exit_code}"
+              fi
+              ((attempt += 1))
+            done
+          }
+
           completed_at="${PROVIDED_COMPLETED_AT}"
           conclusion="${PROVIDED_CONCLUSION}"
           run_url="${PROVIDED_RUN_URL}"
@@ -75,14 +99,14 @@ jobs:
           fi
 
           if ((provided == 0)); then
-            runs="$(gh api --method GET \
+            runs="$(github_api_get \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/check-game-releases.yml/runs" \
               -f status=completed \
               -f per_page=1)"
             run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"${runs}")"
             if [[ -n "${run_id}" ]]; then
               run_url="$(jq -r '.workflow_runs[0].html_url // empty' <<<"${runs}")"
-              jobs="$(gh api --method GET \
+              jobs="$(github_api_get \
                 "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
                 -f filter=latest \
                 -f per_page=100)"

@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
+import httpx
 import pytest
 
 from game_downloader.acquisition import (
     AcquisitionPolicy,
     ArtifactCorruptError,
+    DescriptorTransport,
+    HttpxDescriptorTransport,
     create_acquisition_implementation,
 )
 from game_downloader.models import (
@@ -29,6 +32,7 @@ from game_downloader.torrent import bytes_path_from_text
 from game_downloader.wgus import (
     ResolvePolicy,
     TargetRegistry,
+    TransportFailure,
     TransportResponse,
     create_resolve_implementation,
 )
@@ -407,3 +411,111 @@ def test_descriptor_hash_mismatch_is_artifact_corrupt(tmp_path: Path) -> None:
 
     assert raised.value.error.code == "artifact_corrupt"
     assert raised.value.error.exception_type == ArtifactCorruptError.__name__
+
+
+def descriptor_failure(
+    tmp_path: Path, transport: DescriptorTransport, *, attempts: int = 2
+) -> StageFailedError:
+    host = "https://wgus-woteu.wargaming.net"
+    protocol = ScriptedProtocolTransport(
+        [
+            ExpectedProtocolResponse(
+                host, "/api/v1/metadata/", xml_fixture("wargaming/metadata.xml")
+            ),
+            ExpectedProtocolResponse(
+                host, "/api/v1/patches_chain/", xml_fixture("wargaming/patches_en.xml")
+            ),
+            ExpectedProtocolResponse(
+                host,
+                "/api/v2/integrity_check/",
+                xml_fixture("wargaming/integrity_client.xml").replace(
+                    b"client.torrent</file>", b"client.torrent?token=private-query</file>"
+                ),
+            ),
+        ]
+    )
+    target = TargetRegistry.load().get("wot-eu")
+    pipeline = Pipeline(
+        Workspace(tmp_path),
+        {
+            Stage.RESOLVE: create_resolve_implementation(
+                target, transport=protocol, policy=ResolvePolicy(http_attempts=1)
+            ),
+            Stage.PLAN_ACQUISITION: create_acquisition_implementation(
+                target,
+                protocol_transport=protocol,
+                descriptor_transport=transport,
+                policy=AcquisitionPolicy(http_attempts=attempts),
+            ),
+        },
+    )
+    with pytest.raises(StageFailedError) as raised:
+        pipeline.start(
+            RunRequest(target="wot-eu", client_type=ClientType.SD, languages=("EN",)),
+            Stage.PLAN_ACQUISITION,
+        )
+    assert raised.value.error.code == "source_unavailable"
+    return raised.value
+
+
+@pytest.mark.parametrize("status", [None, 403, 503])
+def test_descriptor_failure_reports_source_without_query_secrets(
+    tmp_path: Path, status: int | None
+) -> None:
+    calls: list[str] = []
+
+    class FailingTransport:
+        def get(self, url: str) -> TransportResponse:
+            calls.append(url)
+            if status is None:
+                raise TransportFailure(f"ConnectError: [Errno 101] Network is unreachable: {url}")
+            return TransportResponse(
+                status_code=status,
+                body=b"",
+                request_url=url,
+                final_url="https://mirror.example.test:8443/asia/client.torrent?key=mirror-query",
+            )
+
+    failure = descriptor_failure(tmp_path, FailingTransport())
+    message = failure.error.message
+    assert "https://cdn.example.test/reference/client.torrent" in message
+    assert "private-query" not in message
+    assert "mirror-query" not in message
+    assert "token=" not in message
+    if status is None:
+        assert "[Errno 101] Network is unreachable" in message
+    else:
+        assert f"HTTP {status}" in message
+        assert "https://mirror.example.test:8443/asia/client.torrent" in message
+    assert len(calls) == (1 if status == 403 else 2)
+
+
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.HTTPError, OSError])
+def test_httpx_descriptor_connection_failure_reports_actual_request_safely(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    source_url = "https://cdn.example.test/reference/client.torrent?token=private-query"
+    redirect_url = "https://user:private-password@mirror.example.test:8443/client.torrent?key=mirror-query#private-fragment"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cdn.example.test":
+            return httpx.Response(302, headers={"Location": redirect_url})
+        detail = f"[Errno 101] Network is unreachable: {redirect_url}\n::error::injected"
+        if error_type is httpx.ConnectError:
+            raise httpx.ConnectError(detail, request=request)
+        raise error_type(detail)
+
+    client = httpx.Client(transport=httpx.MockTransport(respond), follow_redirects=True)
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+    with pytest.raises(TransportFailure) as raised:
+        HttpxDescriptorTransport(AcquisitionPolicy()).get(source_url)
+
+    message = str(raised.value)
+    expected_host = (
+        "mirror.example.test:8443" if error_type is httpx.ConnectError else "cdn.example.test"
+    )
+    assert f'request failed for "https://{expected_host}/' in message
+    assert f"{error_type.__name__}: [Errno 101] Network is unreachable" in message
+    for secret in ["private-query", "private-password", "mirror-query", "private-fragment"]:
+        assert secret not in message
+    assert "\n" not in message
