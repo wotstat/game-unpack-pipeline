@@ -51,6 +51,11 @@ on:
         required: true
         default: true
         type: boolean
+      force_retry:
+        description: Ignore retry delay for all mismatched releases
+        required: true
+        default: false
+        type: boolean
       selectel_location:
         description: Selectel pool segment (ru-9a uses HighFreq without dedicated cores)
         required: true
@@ -157,6 +162,7 @@ jobs:
       - name: Probe and compare release
         id: compare
         env:
+          FORCE_RETRY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_retry }}
           TARGET: ${{ matrix.target }}
         run: |
           set -Eeuo pipefail
@@ -179,6 +185,11 @@ jobs:
           mismatch="$(jq -r '.mismatch' <<<"${comparison_json}")"
           retry_blocked="$(jq -r '.retry_blocked' <<<"${comparison_json}")"
           next_retry_at="$(jq -r '.next_retry_at // ""' <<<"${comparison_json}")"
+          if [[ "${FORCE_RETRY}" == true && "${mismatch}" == true && "${retry_blocked}" == true ]]; then
+            echo "${TARGET}: stored=${stored}, current=${current}, action=force-retry"
+            retry_blocked=false
+            next_retry_at=""
+          fi
           {
             echo "mismatch=${mismatch}"
             echo "retry_blocked=${retry_blocked}"

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
@@ -29,10 +33,11 @@ def test_release_checker_runs_hourly_and_dispatches_all_targets_by_default() -> 
         "check_mt_ru",
         "check_mt_public_test",
         "dispatch_pipelines",
+        "force_retry",
         "selectel_location",
     }
     boolean_inputs = {name: item for name, item in inputs.items() if name != "selectel_location"}
-    assert all(item["default"] is True for item in boolean_inputs.values())
+    assert all(item["default"] is (name != "force_retry") for name, item in boolean_inputs.items())
     assert all(item["type"] == "boolean" for item in boolean_inputs.values())
     pipeline = yaml.safe_load(
         (REPOSITORY_ROOT / ".github/workflows/process-game-release.yml").read_text()
@@ -100,6 +105,73 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]
     assert "--field publish_wotstat_assets=true" in dispatch["run"]
+
+
+@pytest.mark.parametrize(
+    ("force_retry", "mismatch", "retry_blocked", "dispatch_enabled", "active", "expected_action"),
+    [
+        (False, True, True, True, False, "retry_wait"),
+        (True, True, True, True, False, "dispatched"),
+        (True, True, True, False, False, "dry_run"),
+        (True, True, True, True, True, "already_running"),
+        (True, False, False, True, False, "none"),
+        (False, True, False, True, False, "dispatched"),
+    ],
+)
+def test_manual_force_retry_preserves_other_dispatch_guards(
+    tmp_path: Path,
+    force_retry: bool,
+    mismatch: bool,
+    retry_blocked: bool,
+    dispatch_enabled: bool,
+    active: bool,
+    expected_action: str,
+) -> None:
+    steps = workflow()["jobs"]["check"]["steps"]
+    compare = next(step for step in steps if step.get("id") == "compare")
+    record = next(step for step in steps if step["name"] == "Record check result")
+    assert compare["env"]["FORCE_RETRY"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.force_retry }}"
+    )
+    output = tmp_path / "outputs"
+    result_path = tmp_path / "result.json"
+    env = dict(
+        os.environ,
+        TARGET="wot-eu",
+        FORCE_RETRY=str(force_retry).lower(),
+        GITHUB_OUTPUT=str(output),
+        COMPARISON_JSON=json.dumps(
+            {
+                "stored_release_name": "old" if mismatch else "current",
+                "mismatch": mismatch,
+                "retry_blocked": retry_blocked,
+                "next_retry_at": "2099-01-01T00:00:00Z" if retry_blocked else None,
+            }
+        ),
+    )
+    # Stub only external commands; execute the workflow's comparison and result scripts.
+    stubs = """
+uv() { echo '{"release_name":"current"}'; }
+python3() { printf '%s\\n' "$COMPARISON_JSON"; }
+"""
+    subprocess.run(["bash", "-c", stubs + compare["run"]], env=env, check=True, capture_output=True)
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    env.update({name.upper(): value for name, value in outputs.items()})
+    env.update(
+        CHECK_RESULT_PATH=str(result_path),
+        COMPARE_OUTCOME="success",
+        CURRENT_RELEASE_NAME=outputs["release_name"],
+        DISPATCH_PIPELINES=str(dispatch_enabled).lower(),
+        ACTIVE_OUTCOME="success" if dispatch_enabled else "skipped",
+        ACTIVE_FOUND=str(active).lower(),
+        DISPATCH_OUTCOME="success" if dispatch_enabled and not active else "skipped",
+    )
+    subprocess.run(["bash", "-c", record["run"]], env=env, check=True, capture_output=True)
+    result = json.loads(result_path.read_text())
+    assert result["action"] == expected_action
+    assert outputs["retry_blocked"] == str(retry_blocked and not force_retry).lower()
+    if force_retry:
+        assert result["next_retry_at"] is None
 
 
 def test_release_checker_serializes_checks_without_cancelling_running_work() -> None:
