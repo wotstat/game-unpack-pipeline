@@ -791,11 +791,11 @@ class WorkflowContractTests(unittest.TestCase):
             "        type: choice\n"
             "        options:\n"
             "          - ru-7b\n"
+            "          - ru-7a\n"
             "          - ru-3b\n"
             "          - ru-9a",
             workflow,
         )
-        self.assertNotIn("ru-7a", workflow)
         self.assertIn(
             "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}", workflow
         )

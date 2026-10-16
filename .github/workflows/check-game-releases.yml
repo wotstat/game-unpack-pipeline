@@ -63,6 +63,7 @@ on:
         type: choice
         options:
           - ru-7b
+          - ru-7a
           - ru-3b
           - ru-9a
 
