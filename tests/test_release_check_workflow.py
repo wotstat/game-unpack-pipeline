@@ -29,9 +29,18 @@ def test_release_checker_runs_hourly_and_dispatches_all_targets_by_default() -> 
         "check_mt_ru",
         "check_mt_public_test",
         "dispatch_pipelines",
+        "selectel_location",
     }
-    assert all(item["default"] is True for item in inputs.values())
-    assert all(item["type"] == "boolean" for item in inputs.values())
+    boolean_inputs = {name: item for name, item in inputs.items() if name != "selectel_location"}
+    assert all(item["default"] is True for item in boolean_inputs.values())
+    assert all(item["type"] == "boolean" for item in boolean_inputs.values())
+    pipeline = yaml.safe_load(
+        (REPOSITORY_ROOT / ".github/workflows/process-game-release.yml").read_text()
+    )
+    assert (
+        inputs["selectel_location"]
+        == pipeline[True]["workflow_dispatch"]["inputs"]["selectel_location"]
+    )
 
 
 def test_release_checker_builds_a_parallel_fail_slow_matrix() -> None:
@@ -85,6 +94,8 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert '--ref "${DEFAULT_BRANCH}"' in dispatch["run"]
     assert "--field client_type=sd" in dispatch["run"]
     assert "--field languages=ALL" in dispatch["run"]
+    assert '--field selectel_location="${SELECTEL_LOCATION}"' in dispatch["run"]
+    assert dispatch["env"]["SELECTEL_LOCATION"] == "${{ inputs.selectel_location || 'ru-7b' }}"
     assert '--field detected_release_name="${RELEASE_NAME}"' in dispatch["run"]
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]

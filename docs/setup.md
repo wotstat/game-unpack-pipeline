@@ -39,8 +39,8 @@ production pipeline для найденных новых версий; тако�
 Локальный диск обязателен для текущей архитектуры: snapshot читают четыре runner на одной VM, а после
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
-Input `selectel_location` позволяет вручную выбрать сегмент пула. По умолчанию и для всех
-запусков checker используется `ru-7b`; `ru-3b` и `ru-9a` — ручные резервные варианты:
+Input `selectel_location` в основном workflow и ручном checker позволяет выбрать сегмент пула.
+По умолчанию и для cron checker используется `ru-7b`; `ru-3b` и `ru-9a` — ручные резервные варианты:
 
 | Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
@@ -227,6 +227,8 @@ Workflow автоматически запускается каждый час �
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
+В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-7b` (по умолчанию),
+`ru-3b` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
 Для dry-run нужно снять `dispatch_pipelines`. В логе появится одно из состояний:
 
 - `action=none` — release name совпадает со status;

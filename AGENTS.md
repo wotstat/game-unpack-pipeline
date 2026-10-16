@@ -67,7 +67,8 @@ workflow или отдельный репозиторий и не перенос
 - `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
-  использует default branch, `sd`, `ALL` и все три snapshot consumer.
+  использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной input `selectel_location`
+  задаёт общий пул для всех запускаемых targets; cron использует `ru-7b`.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
@@ -99,8 +100,9 @@ workflow или отдельный репозиторий и не перенос
   `resolve` до `snapshot`; внешнего downloader workflow contract нет.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
-  позволяет вручную выбрать `ru-7b` (по умолчанию), резервный `ru-3b` или `ru-9a`; checker всегда
-  использует default `ru-7b`. Автоматического переключения пулов нет. Для `ru-3`/`ru-9` образ берётся
+  позволяет вручную выбрать `ru-7b` (по умолчанию), резервный `ru-3b` или `ru-9a` в основном workflow
+  и checker; cron checker использует default `ru-7b`. Автоматического переключения пулов нет.
+  Для `ru-3`/`ru-9` образ берётся
   из optional variable `SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_9` либо по уникальному имени
   `Ubuntu 24.04 LTS 64-bit` в выбранном region.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
