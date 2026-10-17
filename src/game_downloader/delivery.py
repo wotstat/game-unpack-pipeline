@@ -61,11 +61,6 @@ class InsufficientDiskError(StageExecutionError):
         super().__init__("insufficient_disk", message)
 
 
-class DownloadTooSlowError(StageExecutionError):
-    def __init__(self, message: str) -> None:
-        super().__init__("download_too_slow", message)
-
-
 class _ParallelRangeUnavailable(Exception):
     def __init__(self, fallback: ParallelRangeFallback) -> None:
         self.fallback = fallback
@@ -304,7 +299,7 @@ class _DownloadProgress:
         self._interval_transferred = 0
         self._total_transferred = 0
         self._throughput_samples: deque[tuple[float, int]] = deque([(started_at, 0)])
-        self._too_slow_message: str | None = None
+        self._slow_warning_active = False
         downloaded = sum(self._current_bytes.values())
         self._throughput_tail_started_at = (
             started_at if self._in_minimum_throughput_tail(downloaded) else None
@@ -350,8 +345,6 @@ class _DownloadProgress:
         if transferred_bytes < 0:
             raise ValueError("transferred progress cannot be negative")
         with self._lock:
-            if self._too_slow_message is not None:
-                raise DownloadTooSlowError(self._too_slow_message)
             self._current_bytes[artifact_id] = current_bytes
             self._interval_transferred += transferred_bytes
             self._total_transferred += transferred_bytes
@@ -442,15 +435,19 @@ class _DownloadProgress:
             return
         speed = (self._total_transferred - window_started_bytes) / elapsed
         if speed >= minimum:
+            self._slow_warning_active = False
+            return
+        if self._slow_warning_active:
             return
         remaining = self._total_bytes - downloaded
         source = f" from {source_host}" if source_host is not None else ""
-        self._too_slow_message = (
-            f"aggregate download throughput averaged {_format_rate(speed)} over "
-            f"{elapsed:.1f}s, below the configured {_format_rate(minimum)} minimum; "
-            f"{_format_bytes(remaining)} remain; current Artifact {artifact_id}{source}"
+        self._observer(
+            f"Warning: aggregate download throughput averaged {_format_rate(speed)} over "
+            f"{elapsed:.1f}s, below the configured {_format_rate(minimum)} warning threshold; "
+            f"{_format_bytes(remaining)} remain; current Artifact {artifact_id}{source}; "
+            "continuing download"
         )
-        raise DownloadTooSlowError(self._too_slow_message)
+        self._slow_warning_active = True
 
 
 def _split_byte_ranges(
@@ -1953,7 +1950,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v12",
+        implementation_version="resumable-download-v13",
         execute=execute,
         validate=validate,
         audit=audit,
@@ -2020,7 +2017,6 @@ __all__ = [
     "ArtifactDownloader",
     "ArtifactVerifier",
     "DownloadPolicy",
-    "DownloadTooSlowError",
     "InsufficientDiskError",
     "VerificationPolicy",
     "create_download_implementation",

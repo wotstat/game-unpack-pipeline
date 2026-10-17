@@ -23,7 +23,6 @@ from game_downloader.delivery import (
     ArtifactDownloader,
     ArtifactVerifier,
     DownloadPolicy,
-    DownloadTooSlowError,
     VerificationPolicy,
     _DownloadProgress,
     _HttpTransferProgress,
@@ -330,7 +329,7 @@ def test_download_progress_reports_by_time_and_percentage() -> None:
     ]
 
 
-def test_download_progress_aborts_below_minimum_aggregate_throughput() -> None:
+def test_download_progress_warns_once_below_minimum_aggregate_throughput() -> None:
     now = [0.0]
     messages: list[str] = []
     progress = _DownloadProgress(
@@ -348,23 +347,31 @@ def test_download_progress_aborts_below_minimum_aggregate_throughput() -> None:
     now[0] = 60
     progress.update("artifact", 2_400, 2_400, source_host="cdn.example.test")
     now[0] = 120
-    with pytest.raises(DownloadTooSlowError) as caught:
-        progress.update("artifact", 4_800, 2_400, source_host="cdn.example.test")
+    progress.update("artifact", 4_800, 2_400, source_host="cdn.example.test")
 
-    assert caught.value.error.code == "download_too_slow"
-    assert "40.000 B/s" in caught.value.error.message
-    assert "50.000 B/s minimum" in caught.value.error.message
-    assert "93.0 KiB remain" in caught.value.error.message
-    assert "current Artifact artifact from cdn.example.test" in caught.value.error.message
+    warning = messages[-1]
+    assert warning.startswith("Warning: aggregate download throughput")
+    assert "40.000 B/s" in warning
+    assert "50.000 B/s warning threshold" in warning
+    assert "93.0 KiB remain" in warning
+    assert "current Artifact artifact from cdn.example.test" in warning
+    assert warning.endswith("continuing download")
+    now[0] = 180
+    progress.update("artifact", 7_200, 2_400, source_host="cdn.example.test")
+    assert sum("aggregate download throughput" in message for message in messages) == 1
     assert messages[-1].endswith("(40 B/s)")
+    now[0] = 240
+    progress.update("artifact", 100_000, 92_800)
+    progress.completed()
 
 
-def test_download_progress_aborts_when_throughput_drops_later() -> None:
+def test_download_progress_warns_again_after_throughput_recovers() -> None:
     now = [0.0]
+    messages: list[str] = []
     progress = _DownloadProgress(
         {"artifact": 100_000},
         {},
-        lambda _message: None,
+        messages.append,
         interval_seconds=60,
         percent_step=10,
         minimum_throughput_bytes_per_second=50,
@@ -379,16 +386,24 @@ def test_download_progress_aborts_when_throughput_drops_later() -> None:
     now[0] = 180
     progress.update("artifact", 12_600, 600)
     now[0] = 240
-    with pytest.raises(DownloadTooSlowError):
-        progress.update("artifact", 13_200, 600)
+    progress.update("artifact", 13_200, 600)
+    assert sum("aggregate download throughput" in message for message in messages) == 1
+    now[0] = 300
+    progress.update("artifact", 25_200, 12_000)
+    now[0] = 360
+    progress.update("artifact", 25_800, 600)
+    now[0] = 420
+    progress.update("artifact", 26_400, 600)
+    assert sum("aggregate download throughput" in message for message in messages) == 2
 
 
 def test_download_progress_does_not_abort_at_or_above_minimum_throughput() -> None:
     now = [0.0]
+    messages: list[str] = []
     progress = _DownloadProgress(
         {"artifact": 100_000},
         {},
-        lambda _message: None,
+        messages.append,
         interval_seconds=60,
         percent_step=10,
         minimum_throughput_bytes_per_second=50,
@@ -400,14 +415,16 @@ def test_download_progress_does_not_abort_at_or_above_minimum_throughput() -> No
     progress.update("artifact", 3_000, 3_000)
     now[0] = 120
     progress.update("artifact", 6_000, 3_000)
+    assert not any("aggregate download throughput" in message for message in messages)
 
 
-def test_download_progress_allows_twenty_slow_minutes_in_final_five_percent() -> None:
+def test_download_progress_warns_after_twenty_slow_minutes_in_final_five_percent() -> None:
     now = [0.0]
+    messages: list[str] = []
     progress = _DownloadProgress(
         {"artifact": 1_000_000},
         {"artifact": 950_000},
-        lambda _message: None,
+        messages.append,
         interval_seconds=60,
         percent_step=10,
         minimum_throughput_bytes_per_second=50,
@@ -420,18 +437,23 @@ def test_download_progress_allows_twenty_slow_minutes_in_final_five_percent() ->
     for minute in range(2, 21, 2):
         now[0] = minute * 60
         progress.update("artifact", 950_000 + minute * 5 * 60, 600)
+    assert not any("aggregate download throughput" in message for message in messages)
 
     now[0] = 22 * 60
-    with pytest.raises(DownloadTooSlowError):
-        progress.update("artifact", 950_000 + 22 * 5 * 60, 600)
+    progress.update("artifact", 950_000 + 22 * 5 * 60, 600)
+    assert sum("aggregate download throughput" in message for message in messages) == 1
+    now[0] = 24 * 60
+    progress.update("artifact", 1_000_000, 43_400)
+    progress.completed()
 
 
 def test_download_progress_starts_tail_grace_when_final_five_percent_is_reached() -> None:
     now = [0.0]
+    messages: list[str] = []
     progress = _DownloadProgress(
         {"artifact": 1_000_000},
         {},
-        lambda _message: None,
+        messages.append,
         interval_seconds=60,
         percent_step=10,
         minimum_throughput_bytes_per_second=50,
@@ -445,18 +467,20 @@ def test_download_progress_starts_tail_grace_when_final_five_percent_is_reached(
     progress.update("artifact", 950_000, 950_000)
     now[0] = 30 * 60
     progress.update("artifact", 950_600, 600)
+    assert not any("aggregate download throughput" in message for message in messages)
 
     now[0] = 32 * 60
-    with pytest.raises(DownloadTooSlowError):
-        progress.update("artifact", 951_200, 600)
+    progress.update("artifact", 951_200, 600)
+    assert sum("aggregate download throughput" in message for message in messages) == 1
 
 
 def test_download_progress_stops_tail_grace_after_progress_rolls_back() -> None:
     now = [0.0]
+    messages: list[str] = []
     progress = _DownloadProgress(
         {"artifact": 100_000},
         {},
-        lambda _message: None,
+        messages.append,
         interval_seconds=60,
         percent_step=10,
         minimum_throughput_bytes_per_second=50,
@@ -468,9 +492,10 @@ def test_download_progress_stops_tail_grace_after_progress_rolls_back() -> None:
 
     now[0] = 120
     progress.update("artifact", 95_000, 95_000)
+    assert not any("aggregate download throughput" in message for message in messages)
     now[0] = 240
-    with pytest.raises(DownloadTooSlowError):
-        progress.update("artifact", 0)
+    progress.update("artifact", 0)
+    assert sum("aggregate download throughput" in message for message in messages) == 1
 
 
 def test_download_resumes_range_after_disconnect_and_reuses_cas(
@@ -733,18 +758,18 @@ def test_single_stream_keeps_healthy_download_running_past_five_minutes(
 
 
 @pytest.mark.parametrize("range_fallback", [False, True])
-@pytest.mark.parametrize("aggregate_guard", ["disabled", "enabled", "tail"])
-def test_single_stream_warns_on_low_throughput_and_obeys_aggregate_watchdog(
+@pytest.mark.parametrize("aggregate_warning", ["disabled", "enabled", "tail"])
+def test_single_stream_finishes_despite_http_and_aggregate_throughput_warnings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     range_fallback: bool,
-    aggregate_guard: str,
+    aggregate_warning: str,
 ) -> None:
     import game_downloader.delivery as delivery_module
 
     chunk_size = 64 * 1024
     data = {"/client.bin": b"x" * chunk_size * 8, "/sd.bin": b"sd", "/locale.bin": b"locale"}
-    if aggregate_guard == "tail":
+    if aggregate_warning == "tail":
         data["/sd.bin"] = b"sd" * 6 * 1024 * 1024
     now = [0.0]
     attempts = [0]
@@ -757,7 +782,7 @@ def test_single_stream_warns_on_low_throughput_and_obeys_aggregate_watchdog(
     class TrickleStream(httpx.SyncByteStream):
         def __iter__(self) -> Iterator[bytes]:
             for offset in range(0, len(data["/client.bin"]), chunk_size):
-                now[0] += 60
+                now[0] += 180
                 yield data["/client.bin"][offset : offset + chunk_size]
 
         def close(self) -> None:
@@ -797,35 +822,27 @@ def test_single_stream_warns_on_low_throughput_and_obeys_aggregate_watchdog(
             max_workers=1,
             parallel_range_minimum_bytes=256 * 1024 if range_fallback else 1024 * 1024,
             minimum_throughput_bytes_per_second=(
-                0 if aggregate_guard == "disabled" else 1024 * 1024
+                0 if aggregate_warning == "disabled" else 1024 * 1024
             ),
         )
         downloader = ArtifactDownloader(policy, messages.append)
-        if aggregate_guard == "enabled":
-            with pytest.raises(DownloadTooSlowError, match="aggregate download throughput"):
-                downloader.download(plan, workspace)
-        else:
-            result = downloader.download(plan, workspace)
-            downloaded = result.artifacts[0]
-            assert (
-                workspace.blobs.path_for(downloaded.blob_sha256).read_bytes() == data["/client.bin"]
-            )
+        result = downloader.download(plan, workspace)
+        downloaded = result.artifacts[0]
+        assert downloaded.source_hash_verified
+        assert workspace.blobs.path_for(downloaded.blob_sha256).read_bytes() == data["/client.bin"]
 
     assert attempts[0] == (1 if range_fallback else 2)
-    assert now[0] <= 301 if aggregate_guard == "enabled" else now[0] >= 480
+    assert now[0] >= 24 * 60
     assert closed[0]
     warnings = [message for message in messages if "HTTP forward progress averaged" in message]
     assert len(warnings) == 1
     assert "continuing current stream" in warnings[0]
-    if aggregate_guard == "enabled":
-        partial = next(workspace.partial_root.rglob("payload.part"))
-        assert partial.read_bytes() == data["/client.bin"][: chunk_size * 5]
-        state = delivery_module.ArtifactDownloader._load_state(
-            partial.parent / "state.json", workspace
-        )
-        assert state is not None
-        assert state.bytes_written == partial.stat().st_size
-        assert state.etag == '"stable"'
+    aggregate_warnings = [
+        message for message in messages if "aggregate download throughput" in message
+    ]
+    assert len(aggregate_warnings) == (0 if aggregate_warning == "disabled" else 1)
+    if aggregate_warnings:
+        assert "continuing download" in aggregate_warnings[0]
 
 
 def test_http_transfer_progress_does_not_renew_idle_timeout_for_replayed_prefix(
