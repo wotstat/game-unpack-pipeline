@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location || 'ru-7b' }} · @${{ github.actor }}
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location || 'ru-7a' }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -33,11 +33,11 @@ on:
       selectel_location:
         description: Selectel pool segment (ru-9a uses HighFreq without dedicated cores)
         required: true
-        default: ru-7b
+        default: ru-7a
         type: choice
         options:
-          - ru-7b
           - ru-7a
+          - ru-7b
           - ru-3b
           - ru-9a
       detected_release_name:
@@ -68,7 +68,7 @@ env:
   SELECTEL_FLAVOR_ID: >-
     ${{ inputs.selectel_location == 'ru-9a'
         && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}
-  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}
+  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7a' }}
   SELECTEL_OS_REGION_NAME: >-
     ${{ inputs.selectel_location == 'ru-3b' && 'ru-3'
         || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7' }}

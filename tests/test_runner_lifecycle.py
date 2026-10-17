@@ -787,17 +787,17 @@ class WorkflowContractTests(unittest.TestCase):
             "        description: Selectel pool segment "
             "(ru-9a uses HighFreq without dedicated cores)\n"
             "        required: true\n"
-            "        default: ru-7b\n"
+            "        default: ru-7a\n"
             "        type: choice\n"
             "        options:\n"
-            "          - ru-7b\n"
             "          - ru-7a\n"
+            "          - ru-7b\n"
             "          - ru-3b\n"
             "          - ru-9a",
             workflow,
         )
         self.assertIn(
-            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7b' }}", workflow
+            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7a' }}", workflow
         )
         self.assertIn(
             "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"

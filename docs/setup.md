@@ -40,23 +40,23 @@ production pipeline для найденных новых версий; тако�
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
 Input `selectel_location` в основном workflow и ручном checker позволяет выбрать сегмент пула.
-По умолчанию и для cron checker используется `ru-7b`; `ru-7a`, `ru-3b` и `ru-9a` — ручные резервные варианты:
+По умолчанию и для cron checker используется `ru-7a`; `ru-7b`, `ru-3b` и `ru-9a` — ручные резервные варианты:
 
 | Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
-| `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 | `ru-7a` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
+| `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 | `ru-3b` | `ru-3` | `https://ru-3.cloud.api.selcloud.ru/public-network` |
 | `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
 В `ru-3b` (Санкт-Петербург) доступны те же HighFreq-конфигурации с выделенными ядрами, что и
-в `ru-7b` и `ru-7a` (Москва). Оба московских сегмента используют один `SELECTEL_IMAGE_ID` региона `ru-7`.
+в `ru-7a` и `ru-7b` (Москва). Оба московских сегмента используют один `SELECTEL_IMAGE_ID` региона `ru-7`.
 `ru-9a` (Санкт-Петербург) использует обычный HighFreq без выделенных ядер.
 Перед резервным запуском проверить квоты проекта в выбранном регионе на CPU/RAM, локальный диск
 и direct public IP. Preflight выбранного региона проверяет доступность образа, flavor, сегмента
 и свободного direct-IP slot до создания ресурсов. Автоматического переключения пулов нет.
 
-В `ru-7b`/`ru-7a`/`ru-3b` flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соответствует включённой
+В `ru-7a`/`ru-7b`/`ru-3b` flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соответствует включённой
 в панели опции **Выделенные ядра**; Hyper-Threading (SMT) остаётся включённым по умолчанию.
 В `ru-9a` зафиксирован `HFL1.16-32768-240` без выделенных ядер. Standard и произвольный выбор
 flavor не поддерживаются.
@@ -229,8 +229,8 @@ Workflow автоматически запускается каждый час �
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
-В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-7b` (по умолчанию),
-`ru-7a`, `ru-3b` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
+В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-7a` (по умолчанию),
+`ru-7b`, `ru-3b` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
 Чтобы сразу повторить найденные неопубликованные версии после ошибок, включить `force_retry`:
 галочка обходит ожидание retry для всех выбранных targets. По умолчанию она выключена. Для запуска
 оставить `dispatch_pipelines` включённым; уже работающие targets и опубликованные версии пропускаются.
@@ -270,7 +270,7 @@ patches chain для default language, не создавая workspace и не �
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
-| `selectel_location` | `ru-7b`; для ручного обхода сбоя пула выбрать `ru-7a`, `ru-3b` или `ru-9a` |
+| `selectel_location` | `ru-7a`; для ручного обхода сбоя пула выбрать `ru-7b`, `ru-3b` или `ru-9a` |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |

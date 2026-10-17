@@ -4,7 +4,7 @@ run-name: >-
   ${{ github.event_name == 'schedule' && 'scheduled dispatch'
       || inputs.dispatch_pipelines && 'manual dispatch'
       || 'dry-run' }}
-  · ${{ inputs.selectel_location || 'ru-7b' }} · @${{ github.actor }}
+  · ${{ inputs.selectel_location || 'ru-7a' }} · @${{ github.actor }}
 
 on:
   schedule:
@@ -59,11 +59,11 @@ on:
       selectel_location:
         description: Selectel pool segment (ru-9a uses HighFreq without dedicated cores)
         required: true
-        default: ru-7b
+        default: ru-7a
         type: choice
         options:
-          - ru-7b
           - ru-7a
+          - ru-7b
           - ru-3b
           - ru-9a
 
@@ -249,7 +249,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_NAME: ${{ steps.compare.outputs.release_name }}
-          SELECTEL_LOCATION: ${{ inputs.selectel_location || 'ru-7b' }}
+          SELECTEL_LOCATION: ${{ inputs.selectel_location || 'ru-7a' }}
           TARGET: ${{ matrix.target }}
         run: |
           set -Eeuo pipefail
