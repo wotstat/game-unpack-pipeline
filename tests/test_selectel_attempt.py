@@ -384,6 +384,7 @@ def test_workflows_keep_retry_after_cleanup_and_support_token_originated_reruns(
         (ROOT / ".github/workflows/reconcile-release-resources.yml").read_text()
     )
     inputs = main[True]["workflow_dispatch"]["inputs"]
+    assert inputs["selectel_location"]["default"] == "ru-9a"
     assert inputs["preemptible"]["default"] is True
     assert checker[True]["workflow_dispatch"]["inputs"]["preemptible"] == inputs["preemptible"]
     assert (

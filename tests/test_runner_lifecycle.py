@@ -790,7 +790,7 @@ class WorkflowContractTests(unittest.TestCase):
             "        description: Selectel pool segment "
             "(ru-2c/ru-8a/ru-9a use HighFreq without dedicated cores)\n"
             "        required: true\n"
-            "        default: ru-2c\n"
+            "        default: ru-9a\n"
             "        type: choice\n"
             "        options:\n"
             "          - ru-7a\n"
@@ -805,14 +805,14 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-2c' }}", workflow
+            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-9a' }}", workflow
         )
         self.assertIn(
             "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
-            "        || (inputs.selectel_location || 'ru-2c') == 'ru-2c' && 'ru-2'\n"
+            "        || inputs.selectel_location == 'ru-2c' && 'ru-2'\n"
             "        || startsWith(inputs.selectel_location, 'ru-6') && 'ru-6'\n"
             "        || inputs.selectel_location == 'ru-8a' && 'ru-8'\n"
-            "        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7'",
+            "        || (inputs.selectel_location || 'ru-9a') == 'ru-9a' && 'ru-9' || 'ru-7'",
             workflow,
         )
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_2 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
@@ -826,9 +826,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("https://ru-9.cloud.api.selcloud.ru/public-network", workflow)
         self.assertIn(
             "SELECTEL_FLAVOR_ID: >-\n"
-            "    ${{ (inputs.selectel_location == 'ru-8a' || inputs.selectel_location == 'ru-9a')\n"
+            "    ${{ (inputs.selectel_location == 'ru-8a' || "
+            "(inputs.selectel_location || 'ru-9a') == 'ru-9a')\n"
             "        && 'HFL1.16-32768-240'\n"
-            "        || (inputs.selectel_location || 'ru-2c') == 'ru-2c' && 'HFL1.8-16384-240'\n"
+            "        || inputs.selectel_location == 'ru-2c' && 'HFL1.8-16384-240'\n"
             "        || inputs.selectel_location == 'ru-6a' && 'HFL2.8-32768-256-AMD'\n"
             "        || inputs.selectel_location == 'ru-6b' && 'HFL2.8-32768-256-INTEL'\n"
             "        || 'HFL2.16-32768-256-AMD' }}",
