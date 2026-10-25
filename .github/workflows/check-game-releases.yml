@@ -57,7 +57,7 @@ on:
         default: false
         type: boolean
       selectel_location:
-        description: Selectel pool segment (ru-9a uses HighFreq without dedicated cores)
+        description: Selectel pool segment (ru-8a/ru-9a use HighFreq without dedicated cores)
         required: true
         default: ru-7a
         type: choice
@@ -65,7 +65,10 @@ on:
           - ru-7a
           - ru-7b
           - ru-3b
+          - ru-6a
+          - ru-6b
           - ru-6c
+          - ru-8a
           - ru-9a
 
 permissions:

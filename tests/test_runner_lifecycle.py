@@ -785,7 +785,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "      selectel_location:\n"
             "        description: Selectel pool segment "
-            "(ru-9a uses HighFreq without dedicated cores)\n"
+            "(ru-8a/ru-9a use HighFreq without dedicated cores)\n"
             "        required: true\n"
             "        default: ru-7a\n"
             "        type: choice\n"
@@ -793,7 +793,10 @@ class WorkflowContractTests(unittest.TestCase):
             "          - ru-7a\n"
             "          - ru-7b\n"
             "          - ru-3b\n"
+            "          - ru-6a\n"
+            "          - ru-6b\n"
             "          - ru-6c\n"
+            "          - ru-8a\n"
             "          - ru-9a",
             workflow,
         )
@@ -802,18 +805,21 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
-            "        || inputs.selectel_location == 'ru-6c' && 'ru-6'\n"
+            "        || startsWith(inputs.selectel_location, 'ru-6') && 'ru-6'\n"
+            "        || inputs.selectel_location == 'ru-8a' && 'ru-8'\n"
             "        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7'",
             workflow,
         )
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_6 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
+        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_8 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
         self.assertIn("https://ru-6.cloud.api.selcloud.ru/public-network", workflow)
+        self.assertIn("https://ru-8.cloud.api.selcloud.ru/public-network", workflow)
         self.assertIn("https://ru-9.cloud.api.selcloud.ru/public-network", workflow)
         self.assertIn(
             "SELECTEL_FLAVOR_ID: >-\n"
-            "    ${{ inputs.selectel_location == 'ru-9a'\n"
+            "    ${{ (inputs.selectel_location == 'ru-8a' || inputs.selectel_location == 'ru-9a')\n"
             "        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}",
             workflow,
         )
@@ -887,8 +893,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
         self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)
-        self.assertIn("for selectel_region in ru-7 ru-3 ru-9 ru-6; do", reconciler)
-        self.assertIn("--credential-check-regions ru-7 ru-3 ru-9 ru-6", reconciler)
+        self.assertIn("for selectel_region in ru-7 ru-3 ru-9 ru-6 ru-8; do", reconciler)
+        self.assertIn("--credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
 

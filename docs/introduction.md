@@ -22,7 +22,7 @@ workflow_dispatch
   → cleanup с always() удаляет runner registrations и ресурсы Selectel
   → результат run записывается в status параллельно с Telegram-отчётом
   → из status и его Git-истории собирается и публикуется GitHub Pages
-  → workflow_run reconciler повторно проверяет ru-7, ru-3, ru-9 и ru-6
+  → workflow_run reconciler повторно проверяет ru-7, ru-3, ru-9, ru-6 и ru-8
 ```
 
 Snapshot не загружается в Actions artifact. Downloader и три consumer читают один абсолютный путь
@@ -145,7 +145,7 @@ snapshot до стадии `snapshot` и предоставляет только
 | `target` | `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`, `mt-public-test` |
 | `client_type` | `sd` или `hd` |
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `ALL` |
-| `selectel_location` | `ru-7a` по умолчанию; ручной резерв `ru-7b`, `ru-3b`, `ru-6c` или `ru-9a` |
+| `selectel_location` | `ru-7a` по умолчанию; ручной резерв `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a` |
 | `detected_release_name` | Необязательная подсказка checker; в прямом ручном запуске остаётся пустой |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
@@ -155,10 +155,10 @@ snapshot до стадии `snapshot` и предоставляет только
 соберёт и проверит snapshot, после чего удалит VM. Production-конфигурация зафиксирована как
 HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`: 16 vCPU, 32 ГБ RAM и
 256 ГБ локального диска. По умолчанию используется `ru-7a`; при ручном запуске можно выбрать
-`ru-7b` в том же регионе или `ru-3b` в другом регионе с тем же flavor. Ручной резерв `ru-6c`
-использует AMD HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`:
-16 vCPU, 32 ГБ RAM и 256 ГБ локального диска. Ручной резерв `ru-9a`
-использует обычный HighFreq без выделенных ядер `HFL1.16-32768-240`: 16 vCPU, 32 ГБ RAM и
+`ru-7b` в том же регионе или `ru-3b` в другом регионе с тем же flavor. Ручные резервы `ru-6a`/`ru-6b`/`ru-6c`
+используют AMD HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`:
+16 vCPU, 32 ГБ RAM и 256 ГБ локального диска. Ручные резервы `ru-8a`/`ru-9a`
+используют обычный HighFreq без выделенных ядер `HFL1.16-32768-240`: 16 vCPU, 32 ГБ RAM и
 240 ГБ локального диска. Число workers
 автоматически соответствует доступным CPU. Ручной checker также позволяет выбрать пул; cron
 использует `ru-7a`. Автоматического переключения пулов нет. Standard и произвольный выбор flavor
@@ -175,7 +175,7 @@ Scheduled run каждый час проверяет все семь targets и 
 pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов; по
 умолчанию включены все семь targets и `dispatch_pipelines`, поэтому найденные новые версии сразу
 запускают production pipeline. Input `selectel_location` выбирает общий пул Selectel для всех
-запускаемых targets: `ru-7a` по умолчанию, `ru-7b`, `ru-3b`, `ru-6c` или `ru-9a`. Scheduled run использует `ru-7a`.
+запускаемых targets: `ru-7a` по умолчанию, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a`. Scheduled run использует `ru-7a`.
 Для dry-run нужно явно выключить `dispatch_pipelines`.
 
 При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же
@@ -293,7 +293,7 @@ ID. Затем GitHub Git Database API создаёт один final version com
 - У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
   и проверяется по SHA-256.
 - Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
-  идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7`, `ru-3`, `ru-9` и `ru-6`.
+  идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7`, `ru-3`, `ru-9`, `ru-6` и `ru-8`.
 - До установки runner cloud-init вооружает systemd timer с абсолютным дедлайном через четыре часа.
   В дедлайн VM аутентифицируется отдельным истекающим OpenStack application credential, которому
   разрешён только `DELETE` точного UUID этой VM, и запрашивает собственное удаление. Пароль
