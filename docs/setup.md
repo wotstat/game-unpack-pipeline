@@ -17,18 +17,20 @@ production pipeline для найденных новых версий; тако�
 4. Сохранить пароль service user в менеджере секретов: после создания его нельзя будет прочитать
    повторно.
 5. Пополнить баланс и проверить квоты проекта.
-6. Выбрать образ Ubuntu 24.04 x64 для `SELECTEL_IMAGE_ID` в region `ru-7`. По умолчанию
-   flavor зафиксирован в workflow как HighFreq с выделенными ядрами
-   `HFL2.16-32768-256-AMD`.
+6. Для основного region `ru-2` используется уникальный публичный образ
+   `Ubuntu 24.04 LTS 64-bit`; при необходимости задать `SELECTEL_IMAGE_ID_RU_2`.
+   Flavor по умолчанию — HighFreq без выделенных ядер `HFL1.8-16384-240`.
+   `SELECTEL_IMAGE_ID` требуется для ручных резервов в region `ru-7`.
 
 Один параллельный pipeline run требует:
 
 - 1 cloud server;
 - 1 direct public IP;
-- 16 vCPU и 32 ГБ RAM для основного профиля;
-- 256 ГБ local disk HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`.
+- 8 vCPU и 16 ГБ RAM для основного профиля;
+- 240 ГБ local disk HighFreq без выделенных ядер `HFL1.8-16384-240`.
 
-Ручной резерв `ru-6c` использует тот же `HFL2.16-32768-256-AMD`.
+Ручные резервы `ru-7a`/`ru-7b`/`ru-3b`/`ru-6c` используют выделенный HighFreq
+`HFL2.16-32768-256-AMD`: 16 vCPU, 32 ГБ RAM и 256 ГБ локального диска.
 В `ru-6a` выбран `HFL2.8-32768-256-AMD`, в `ru-6b` — `HFL2.8-32768-256-INTEL`:
 оба используют выделенные ядра, 8 vCPU, 32 ГБ RAM и 256 ГБ локального диска.
 Квоты на CPU, RAM, локальный диск и direct public IP
@@ -38,19 +40,25 @@ production pipeline для найденных новых версий; тако�
 `HFL1.16-32768-240`: на один run нужны свободные 16 vCPU, 32 ГБ RAM, 240 ГБ локального диска
 и один direct public IP. Pipeline подбирает число workers по фактическим CPU.
 
-Для `ru-2c` выбран `HFL1.8-16384-240` без выделенных ядер: 8 vCPU, 16 ГБ RAM,
-240 ГБ локального диска и один direct public IP. Это меньший профиль для проверки
-независимого пула; время полного pipeline нужно подтвердить контрольным запуском.
+Основной пул `ru-2c` использует `HFL1.8-16384-240` без выделенных ядер: 8 vCPU,
+16 ГБ RAM, 240 ГБ локального диска и один direct public IP. Полный контрольный
+`wot-na` с тремя consumer завершился успешно; замеры и ограничения приведены в
+[отчёте о выборе HighFreq](research/selectel-highfreq-alternatives-2026-10-25.md).
 
 Для `N` одновременно работающих runs нужно умножить потребление выбранного flavor на `N`,
 включая CPU, RAM, локальный диск и direct public IP. Оркестратор не отменяет предыдущий ручной run,
 поэтому лимит реального параллелизма определяется квотами Selectel и балансом аккаунта.
+Подтверждённый 25 октября 2026 лимит локального SSD в `ru-2c` — 320 ГБ: хватает
+только на одну такую VM. Для двух одновременных runs нужно минимум 480 ГБ,
+для семи — 1680 ГБ, а также соответствующие CPU/RAM/IP. Checker dispatch'ит
+разные targets параллельно; текущий лимит диска нужно увеличить для такого запуска.
 
 Локальный диск обязателен для текущей архитектуры: snapshot читают четыре runner на одной VM, а после
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
 Input `selectel_location` в основном workflow и ручном checker позволяет выбрать сегмент пула.
-По умолчанию и для cron checker используется `ru-7a`; `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`/`ru-6b`/`ru-6c`, `ru-8a` и `ru-9a` — ручные резервные варианты:
+По умолчанию и для cron checker используется `ru-2c`; `ru-7a`, `ru-7b`, `ru-3b`,
+`ru-6a`/`ru-6b`/`ru-6c`, `ru-8a` и `ru-9a` — ручные резервные варианты:
 
 | Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
@@ -188,7 +196,7 @@ caller, включая техническую доступность `GH_APP_PRI
 | `SELECTEL_OS_USERNAME` | Имя Selectel service user |
 | `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
 | `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
-| `SELECTEL_IMAGE_ID` | Уникальное имя или UUID выбранного Ubuntu 24.04 x64 image |
+| `SELECTEL_IMAGE_ID` | Уникальное имя или UUID Ubuntu 24.04 x64 image для ручных резервов в `ru-7` |
 | `SELECTEL_IMAGE_ID_RU_3` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-3` |
 | `SELECTEL_IMAGE_ID_RU_2` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-2` |
 | `SELECTEL_IMAGE_ID_RU_6` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-6` |
@@ -259,8 +267,8 @@ Workflow автоматически запускается каждый час �
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
-В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-7a` (по умолчанию),
-`ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
+В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-2c` (по умолчанию),
+`ru-7a`, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
 Чтобы сразу повторить найденные неопубликованные версии после ошибок, включить `force_retry`:
 галочка обходит ожидание retry для всех выбранных targets. По умолчанию она выключена. Для запуска
 оставить `dispatch_pipelines` включённым; уже работающие targets и опубликованные версии пропускаются.
@@ -300,7 +308,7 @@ patches chain для default language, не создавая workspace и не �
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
-| `selectel_location` | `ru-7a`; для ручного обхода сбоя пула выбрать `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a` |
+| `selectel_location` | `ru-2c`; для ручного обхода сбоя пула выбрать `ru-7a`, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a` |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |

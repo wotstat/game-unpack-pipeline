@@ -100,7 +100,7 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert "--field client_type=sd" in dispatch["run"]
     assert "--field languages=ALL" in dispatch["run"]
     assert '--field selectel_location="${SELECTEL_LOCATION}"' in dispatch["run"]
-    assert dispatch["env"]["SELECTEL_LOCATION"] == "${{ inputs.selectel_location || 'ru-7a' }}"
+    assert dispatch["env"]["SELECTEL_LOCATION"] == "${{ inputs.selectel_location || 'ru-2c' }}"
     assert '--field detected_release_name="${RELEASE_NAME}"' in dispatch["run"]
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]

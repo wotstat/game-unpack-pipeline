@@ -68,7 +68,7 @@ workflow или отдельный репозиторий и не перенос
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
   использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной input `selectel_location`
-  задаёт общий пул для всех запускаемых targets; cron использует `ru-7a`.
+  задаёт общий пул для всех запускаемых targets; cron использует `ru-2c`.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
@@ -107,8 +107,8 @@ workflow или отдельный репозиторий и не перенос
   прогресса обычного HTTP, лимит download-шага 60 минут и четырёхчасовой kill switch сохраняются.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
-  позволяет вручную выбрать `ru-7a` (по умолчанию), резервный `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a`
-  в основном workflow и checker; cron checker использует default `ru-7a`.
+  позволяет вручную выбрать `ru-2c` (по умолчанию), резервный `ru-7a`, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a`
+  в основном workflow и checker; cron checker использует default `ru-2c`.
   Автоматического переключения пулов нет.
   Для `ru-2`/`ru-3`/`ru-6`/`ru-8`/`ru-9` образ берётся
   из optional variable `SELECTEL_IMAGE_ID_RU_2`/`SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_6`/`SELECTEL_IMAGE_ID_RU_8`/`SELECTEL_IMAGE_ID_RU_9`
@@ -141,14 +141,14 @@ workflow или отдельный репозиторий и не перенос
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
-- Production flavor в `ru-7a`, `ru-7b`, `ru-3b` и `ru-6c` зафиксирован как HighFreq с выделенными ядрами
+- Основной пул `ru-2c` использует HighFreq без выделенных ядер `HFL1.8-16384-240`
+  (8 vCPU, 16 ГБ RAM, 240 ГБ local disk).
+  Резервный flavor в `ru-7a`, `ru-7b`, `ru-3b` и `ru-6c` зафиксирован как HighFreq с выделенными ядрами
   `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk).
   `ru-6a` использует `HFL2.8-32768-256-AMD`, `ru-6b` — `HFL2.8-32768-256-INTEL`
   (оба: 8 vCPU, 32 ГБ RAM, 256 ГБ local disk, выделенные ядра).
   Ручные резервы `ru-8a` и `ru-9a` используют
   обычный HighFreq без выделенных ядер `HFL1.16-32768-240` (16 vCPU, 32 ГБ RAM, 240 ГБ local disk).
-  `ru-2c` использует HighFreq без выделенных ядер `HFL1.8-16384-240`
-  (8 vCPU, 16 ГБ RAM, 240 ГБ local disk).
   Flavor определяется только выбранным сегментом; Standard и произвольный выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
   точным ownership-маркерам и проверяет `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2`. Перед удалением общего

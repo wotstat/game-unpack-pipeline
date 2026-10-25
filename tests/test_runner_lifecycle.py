@@ -787,7 +787,7 @@ class WorkflowContractTests(unittest.TestCase):
             "        description: Selectel pool segment "
             "(ru-2c/ru-8a/ru-9a use HighFreq without dedicated cores)\n"
             "        required: true\n"
-            "        default: ru-7a\n"
+            "        default: ru-2c\n"
             "        type: choice\n"
             "        options:\n"
             "          - ru-7a\n"
@@ -802,11 +802,11 @@ class WorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7a' }}", workflow
+            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-2c' }}", workflow
         )
         self.assertIn(
             "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
-            "        || inputs.selectel_location == 'ru-2c' && 'ru-2'\n"
+            "        || (inputs.selectel_location || 'ru-2c') == 'ru-2c' && 'ru-2'\n"
             "        || startsWith(inputs.selectel_location, 'ru-6') && 'ru-6'\n"
             "        || inputs.selectel_location == 'ru-8a' && 'ru-8'\n"
             "        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7'",
@@ -825,7 +825,7 @@ class WorkflowContractTests(unittest.TestCase):
             "SELECTEL_FLAVOR_ID: >-\n"
             "    ${{ (inputs.selectel_location == 'ru-8a' || inputs.selectel_location == 'ru-9a')\n"
             "        && 'HFL1.16-32768-240'\n"
-            "        || inputs.selectel_location == 'ru-2c' && 'HFL1.8-16384-240'\n"
+            "        || (inputs.selectel_location || 'ru-2c') == 'ru-2c' && 'HFL1.8-16384-240'\n"
             "        || inputs.selectel_location == 'ru-6a' && 'HFL2.8-32768-256-AMD'\n"
             "        || inputs.selectel_location == 'ru-6b' && 'HFL2.8-32768-256-INTEL'\n"
             "        || 'HFL2.16-32768-256-AMD' }}",
