@@ -141,9 +141,8 @@ workflow или отдельный репозиторий и не перенос
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
-- Production flavor в `ru-7a`, `ru-7b` и `ru-3b` зафиксирован как HighFreq с выделенными ядрами
-  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk). Ручной резерв `ru-6c` использует
-  HighFreq с выделенными ядрами `HFL2.16-32768-256-INTEL` с теми же ресурсами.
+- Production flavor в `ru-7a`, `ru-7b`, `ru-3b` и `ru-6c` зафиксирован как HighFreq с выделенными ядрами
+  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk).
   Ручной резерв `ru-9a` использует
   обычный HighFreq без выделенных ядер `HFL1.16-32768-240` (16 vCPU, 32 ГБ RAM, 240 ГБ local disk).
   Flavor определяется только выбранным сегментом; Standard и произвольный выбор flavor не поддерживаются.
