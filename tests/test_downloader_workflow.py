@@ -155,7 +155,14 @@ def test_status_page_deploy_runs_after_status_commit() -> None:
 def test_bot_dispatched_pipeline_explicitly_dispatches_reconciler_after_cleanup() -> None:
     job = _workflow()["jobs"]["dispatch-reconciler"]
 
-    assert set(job["needs"]) == {"provision", "cleanup"}
+    assert set(job["needs"]) == {
+        "provision",
+        "cleanup",
+        "queue-watchdog",
+        "record-status",
+        "deploy-status-page",
+        "notify",
+    }
     assert "always()" in job["if"]
     assert "github.actor == 'github-actions[bot]'" in job["if"]
     assert "needs.provision.result != 'skipped'" in job["if"]

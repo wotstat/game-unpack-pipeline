@@ -24,6 +24,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: selectel-reconciliation-${{ inputs.source_run_id || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
 jobs:
   reconcile:
     name: Reconcile source run
@@ -91,6 +95,31 @@ jobs:
           done
           echo "deleted_count=${deleted_count}" >>"${GITHUB_OUTPUT}"
           exit "${cleanup_failed}"
+
+  retry-preempted:
+    name: Retry confirmed VM preemption
+    needs: reconcile
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out retry controller from main
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+
+      - name: Retry source attempt after successful reconciliation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id || github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt || github.event.workflow_run.run_attempt }}
+        run: >-
+          python3 -m scripts.selectel_attempt retry
+          --run-id "${SOURCE_RUN_ID}"
+          --run-attempt "${SOURCE_RUN_ATTEMPT}"
 
   notify-recovery:
     name: Telegram recovery alert

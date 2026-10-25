@@ -71,6 +71,11 @@ on:
           - ru-6c
           - ru-8a
           - ru-9a
+      preemptible:
+        description: Use preemptible VMs (two attempts, then one ordinary VM)
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -255,6 +260,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NAME: ${{ steps.compare.outputs.release_name }}
           SELECTEL_LOCATION: ${{ inputs.selectel_location || 'ru-2c' }}
+          SELECTEL_PREEMPTIBLE: ${{ github.event_name == 'schedule' || inputs.preemptible }}
           TARGET: ${{ matrix.target }}
         run: |
           set -Eeuo pipefail
@@ -264,6 +270,7 @@ jobs:
             --field client_type=sd \
             --field languages=ALL \
             --field selectel_location="${SELECTEL_LOCATION}" \
+            --field preemptible="${SELECTEL_PREEMPTIBLE}" \
             --field detected_release_name="${RELEASE_NAME}" \
             --field publish_wot_src=true \
             --field publish_wot_gui_assets=true \

@@ -36,7 +36,8 @@ targets, сравнивает `release_name` с `status/<target>.json` и в dis
 dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет
-target, client type, languages, ручной выбор `selectel_location` и три независимых переключателя `publish_wot_src`,
+target, client type, languages, ручной выбор `selectel_location`, boolean `preemptible`
+и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
 ## Границы компонентов
@@ -69,6 +70,22 @@ workflow или отдельный репозиторий и не перенос
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
   использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной input `selectel_location`
   задаёт общий пул для всех запускаемых targets; cron использует `ru-2c`.
+  `preemptible: true` по умолчанию в основном workflow и checker; cron также включает его.
+  Если выключить, VM обычная и немедленных автоматических повторов нет.
+- При включённом `preemptible` первые две полные попытки одного Actions Run прерываемые,
+  третья — обычная. Полный rerun с теми же SHA/ref разрешён только после подтверждённого
+  вытеснения и успешного reconciler. Обычная попытка завершает немедленную цепочку;
+  существующее расписание checker для неуспешной версии сохраняется.
+  Подтверждение требует точных ownership-маркеров, `gup_boot_disk=local`, выбранного
+  режима, системного тега `preemptible` и `SHELVED_OFFLOADED`/`EXPIRED`. `SHUTOFF`,
+  отсутствие VM, ошибки API, NoValidHost и ошибки обработки не считаются вытеснением.
+  Чтение и создание используют compute microversion 2.72. Локальный диск теряется,
+  поэтому каждая попытка создаёт новые VM/JIT runner и собирает snapshot заново.
+  Runtime watchdog на стандартном GitHub-hosted runner опрашивает VM до завершения
+  downloader и включённых consumer в пределах исходного четырёхчасового дедлайна.
+  Артефакты `selectel-attempt-<run_id>-<run_attempt>-provision|monitor` содержат только
+  несекретную причину завершения, режим и возраст VM. Повторы manual/bot reconciliation
+  сериализованы по source Run ID; устаревшая попытка не может запустить новый rerun.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
@@ -167,9 +184,12 @@ workflow или отдельный репозиторий и не перенос
   или подтверждённого отсутствия VM. Самоудаление VM не очищает direct public port, security group и
   runner registrations — эти хвосты принадлежат последующему reconciler.
 - Для ручного snapshot run reconciler запускается через `workflow_run`. Snapshot run, созданный
-  checker через repository `GITHUB_TOKEN`, после cleanup явно dispatch'ит reconciler, потому что
+  checker или перезапущенный через repository `GITHUB_TOKEN`, после завершения cleanup и отчётов
+  явно dispatch'ит reconciler, потому что
   GitHub подавляет последующий `workflow_run` для token-originated chain. Оба пути передают исходные
   `run_id`/`run_attempt`; reconciliation остаётся идемпотентной.
+  Для подтверждённого вытеснения и отменённой прерываемой попытки также предусмотрен
+  явный dispatch. Ручная отмена без успешного шага отмены из VM monitor не запускает rerun.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
   target, downloader `readable_version` в формате `x.x.x.x #xxx`, client type, языками и consumer
   state. Введённый `ALL` сохраняется в заголовке буквально, а последняя строка показывает полную

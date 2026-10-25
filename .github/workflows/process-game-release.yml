@@ -50,6 +50,11 @@ on:
         required: false
         default: ""
         type: string
+      preemptible:
+        description: Use preemptible VMs (two attempts, then one ordinary VM)
+        required: true
+        default: true
+        type: boolean
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
@@ -70,6 +75,7 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
+  SELECTEL_PREEMPTIBLE: ${{ inputs.preemptible && fromJSON(github.run_attempt) < 3 }}
   SELECTEL_FLAVOR_ID: >-
     ${{ (inputs.selectel_location == 'ru-8a' || inputs.selectel_location == 'ru-9a')
         && 'HFL1.16-32768-240'
@@ -104,6 +110,7 @@ jobs:
     timeout-minutes: 15
     environment: selectel
     outputs:
+      preempted: ${{ steps.provision.outputs.preempted }}
       emergency_credential_id: ${{ steps.provision.outputs.emergency_credential_id }}
       emergency_self_destruct_at: ${{ steps.provision.outputs.emergency_self_destruct_at }}
       port_id: ${{ steps.provision.outputs.port_id }}
@@ -168,8 +175,18 @@ jobs:
           SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
           SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
         run: >-
-          python3 scripts/runner_lifecycle.py provision
+          python3 -m scripts.selectel_attempt provision
           --instance-key "${INSTANCE_KEY}"
+          --report "${RUNNER_TEMP}/selectel-attempt/provision.json"
+
+      - name: Upload VM provision report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: selectel-attempt-${{ github.run_id }}-${{ github.run_attempt }}-provision
+          path: ${{ runner.temp }}/selectel-attempt/provision.json
+          if-no-files-found: warn
+          retention-days: 30
 
   download:
     name: Download and unpack (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -386,8 +403,13 @@ jobs:
     name: Queue watchdog (manual-${{ github.run_id }}-${{ github.run_attempt }})
     needs: provision
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 260
     environment: selectel
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      preempted: ${{ steps.monitor.outputs.preempted }}
     steps:
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
@@ -415,9 +437,39 @@ jobs:
           repositories: game-unpack-pipeline
           permission-administration: write
 
-      - name: Install OpenStack CLI for timed-out cleanup
-        if: steps.watch.outputs.timed_out == 'true'
+      - name: Install OpenStack CLI for VM monitoring and cleanup
         uses: ./.github/actions/setup-openstack
+
+      - name: Monitor temporary VM through publication
+        id: monitor
+        if: steps.watch.outputs.timed_out != 'true'
+        env:
+          GITHUB_WATCH_TOKEN: ${{ github.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          SERVER_ID: ${{ needs.provision.outputs.server_id }}
+          SELECTEL_VM_DEADLINE: ${{ needs.provision.outputs.emergency_self_destruct_at }}
+          PUBLISH_WOT_SRC: ${{ inputs.publish_wot_src }}
+          PUBLISH_WOT_GUI_ASSETS: ${{ inputs.publish_wot_gui_assets }}
+          PUBLISH_WOTSTAT_ASSETS: ${{ inputs.publish_wotstat_assets }}
+          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
+          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
+          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
+          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
+          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+        run: >-
+          python3 -m scripts.selectel_attempt watch
+          --instance-key "${INSTANCE_KEY}"
+          --server-id "${SERVER_ID}"
+          --report "${RUNNER_TEMP}/selectel-attempt/monitor.json"
+
+      - name: Upload VM monitoring report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: selectel-attempt-${{ github.run_id }}-${{ github.run_attempt }}-monitor
+          path: ${{ runner.temp }}/selectel-attempt/monitor.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Delete resources after queue timeout
         if: steps.watch.outputs.timed_out == 'true'
@@ -450,8 +502,10 @@ jobs:
           --security-group-id "${SECURITY_GROUP_ID}"
           --diagnostics
 
-      - name: Cancel workflow after queue timeout
-        if: always() && steps.watch.outputs.timed_out == 'true'
+      - name: Cancel workflow after VM interruption
+        if: >-
+          always() && !cancelled() &&
+          (steps.watch.outputs.timed_out == 'true' || steps.monitor.outputs.cancel_required == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
@@ -699,11 +753,19 @@ jobs:
     name: Dispatch reconciler (manual-${{ github.run_id }}-${{ github.run_attempt }})
     if: >-
       always() &&
-      github.actor == 'github-actions[bot]' &&
+      (github.actor == 'github-actions[bot]' ||
+       github.triggering_actor == 'github-actions[bot]' ||
+       needs.provision.outputs.preempted == 'true' ||
+       needs.queue-watchdog.outputs.preempted == 'true' ||
+       cancelled()) &&
       needs.provision.result != 'skipped'
     needs:
       - provision
       - cleanup
+      - queue-watchdog
+      - record-status
+      - deploy-status-page
+      - notify
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

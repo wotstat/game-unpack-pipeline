@@ -407,6 +407,9 @@ class ProvisionOrderingTests(unittest.TestCase):
             config,
             server_id,
             timeout_seconds=300,
+            identity=lifecycle.ResourceIdentity(
+                "wotstat/game-unpack-pipeline", "123456", "2", "manual-123456-2"
+            ),
             sensitive_values=(
                 "test-app-token",
                 "test-public-token",

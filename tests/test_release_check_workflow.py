@@ -35,6 +35,7 @@ def test_release_checker_runs_hourly_and_dispatches_all_targets_by_default() -> 
         "dispatch_pipelines",
         "force_retry",
         "selectel_location",
+        "preemptible",
     }
     boolean_inputs = {name: item for name, item in inputs.items() if name != "selectel_location"}
     assert all(item["default"] is (name != "force_retry") for name, item in boolean_inputs.items())

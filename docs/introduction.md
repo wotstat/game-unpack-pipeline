@@ -146,6 +146,7 @@ snapshot до стадии `snapshot` и предоставляет только
 | `client_type` | `sd` или `hd` |
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `ALL` |
 | `selectel_location` | `ru-2c` по умолчанию; ручной резерв `ru-7a`, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a` |
+| `preemptible` | `true`: две попытки на прерываемых VM, затем одна на обычной при подтверждённом вытеснении; `false`: одна обычная VM |
 | `detected_release_name` | Необязательная подсказка checker; в прямом ручном запуске остаётся пустой |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
@@ -164,6 +165,18 @@ HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`: 16 vCPU
 автоматически соответствует доступным CPU. Ручной checker также позволяет выбрать пул; cron
 использует `ru-2c`. Автоматического переключения пулов нет. Standard и произвольный выбор flavor
 не поддерживаются.
+
+Основной workflow и checker по умолчанию включают `preemptible`; cron также использует
+прерываемую VM. При подтверждённом вытеснении следующий полный attempt того же Actions Run
+запускается после cleanup и успешного reconciler. Attempts 1 и 2 прерываемые, attempt 3 — обычный
+и завершает немедленную цепочку. С выключенной опцией автоматических немедленных повторов нет.
+Сохраняются target, inputs и SHA/ref исходного workflow; VM и четыре runner создаются заново,
+поскольку локальный диск Selectel при вытеснении теряется. Ошибки обработки, обычное выключение,
+ручная отмена и недоступность API не запускают такие повторы. Плановые повторы checker остаются.
+
+GitHub-hosted watchdog наблюдает за VM до окончания downloader и всех включённых consumer.
+Причина завершения и возраст VM сохраняются в небольших `selectel-attempt-*` artifacts
+без credentials, адресов и cloud identifiers. Четырёхчасовой дедлайн каждой VM сохраняется.
 
 ## Проверка новых версий
 
@@ -305,9 +318,11 @@ ID. Затем GitHub Git Database API создаёт один final version com
 - Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
   reconciler машинно подтвердил `deleted_count > 0`.
 - Для обычного ручного run reconciler стартует по `workflow_run`. Если snapshot был запущен
-  checker'ом через repository `GITHUB_TOKEN`, основной workflow после cleanup явно создаёт
+  checker'ом или перезапущен через repository `GITHUB_TOKEN`, основной workflow после cleanup и отчётов явно создаёт
   эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
   token-originated цепочке.
+  Такой же явный путь предусмотрен для вытесненной или отменённой прерываемой попытки.
+  Только подтверждённое вытеснение допускает полный rerun после успешной очистки.
 
 Checker запускается по cron каждый час без отдельной telemetry задержек schedule. Повторы
 неуспешной версии выполняются тем же checker по расписанию из status, без отдельного retry

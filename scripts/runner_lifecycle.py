@@ -50,6 +50,14 @@ class TransientLifecycleError(LifecycleError):
     """An API failure with an unknown result; replay only safe operations."""
 
 
+class PreemptedLifecycleError(LifecycleError):
+    """An owned, tagged VM with a local boot disk was offloaded by Selectel."""
+
+    def __init__(self, created_at: str | None = None) -> None:
+        super().__init__("Selectel preempted the temporary VM; its local disk was lost")
+        self.created_at = created_at
+
+
 def validate_repository(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
         raise LifecycleError("repository must have owner/repository form")
@@ -139,6 +147,7 @@ class SelectelConfig:
     image_id: str
     flavor_id: str
     public_network_api_url: str
+    preemptible: bool = False
 
     @classmethod
     def from_environment(cls, *, require_compute: bool = True) -> SelectelConfig:
@@ -181,7 +190,10 @@ class SelectelConfig:
             if parsed.scheme != "https" or not parsed.netloc:
                 raise LifecycleError(f"{url_field} must be an HTTPS URL")
 
-        return cls(**values)
+        preemptible = os.environ.get("SELECTEL_PREEMPTIBLE", "false").lower()
+        if preemptible not in {"true", "false"}:
+            raise LifecycleError("SELECTEL_PREEMPTIBLE must be true or false")
+        return cls(**values, preemptible=preemptible == "true")
 
     def openstack_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
@@ -945,6 +957,15 @@ def create_server(
                 f"gup_run_attempt={identity.run_attempt}",
                 "--property",
                 f"gup_instance_key={identity.instance_key}",
+                "--property",
+                "gup_boot_disk=local",
+                "--property",
+                f"gup_preemptible={str(config.preemptible).lower()}",
+                *(
+                    ["--tag", "preemptible", "--os-compute-api-version", "2.72"]
+                    if config.preemptible
+                    else []
+                ),
                 "-f",
                 "json",
                 identity.server_name,
@@ -1090,13 +1111,20 @@ def wait_for_server_active(
     timeout_seconds: int,
     *,
     sensitive_values: Iterable[str] = (),
+    identity: ResourceIdentity | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        result = openstack(config, ["server", "show", server_id, "-f", "json"], check=False)
+        result = openstack(
+            config,
+            ["server", "show", server_id, "--os-compute-api-version", "2.72", "-f", "json"],
+            check=False,
+        )
         if result.returncode == 0:
             server = parse_json_output(result, "server status lookup")
             status = str(object_value(server, "status")).upper()
+            if identity is not None and server_is_preempted(config, identity, server):
+                raise PreemptedLifecycleError(server_created_at(server))
             if status == "ACTIVE":
                 print("VM ACTIVE")
                 append_summary("- VM status: `ACTIVE`")
@@ -1108,10 +1136,17 @@ def wait_for_server_active(
 
 
 def wait_for_runner_online(
-    identity: RunnerIdentity, runner_id: str, app_token: str, timeout_seconds: int
+    identity: RunnerIdentity,
+    runner_id: str,
+    app_token: str,
+    timeout_seconds: int,
+    *,
+    server_check: Callable[[], None] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if server_check is not None:
+            server_check()
         status, runner, _ = http_json(
             "GET",
             github_url(f"repos/{identity.repository}/actions/runners/{runner_id}"),
@@ -1157,6 +1192,69 @@ def server_has_ownership_markers(server: Mapping[str, Any], identity: ResourceId
         )
         for key, value in expected.items()
     )
+
+
+def server_property(server: Mapping[str, Any], name: str) -> str:
+    try:
+        properties = object_value(server, "properties")
+    except LifecycleError:
+        return ""
+    if isinstance(properties, Mapping):
+        return str(properties.get(name, ""))
+    match = re.search(
+        rf"(?:^|[,\s]){re.escape(name)}\s*=\s*['\"]?([^,'\"\s]+)['\"]?(?:,|$)",
+        str(properties),
+    )
+    return match.group(1) if match else ""
+
+
+def server_created_at(server: Mapping[str, Any]) -> str | None:
+    value = server.get("created")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def server_is_preempted(
+    config: SelectelConfig, identity: ResourceIdentity, server: Mapping[str, Any]
+) -> bool:
+    # SHELVED_OFFLOADED also means FROZEN for network-boot servers. Selectel forbids
+    # freezing local-boot servers; require our boot/mode markers and the provider tag.
+    tags = server.get("tags", [])
+    if isinstance(tags, str):
+        tags = [item.strip() for item in tags.split(",")]
+    return (
+        config.preemptible is True
+        and server_has_ownership_markers(server, identity)
+        and server_property(server, "gup_boot_disk") == "local"
+        and server_property(server, "gup_preemptible") == "true"
+        and str(server.get("status", "")).upper() in {"SHELVED_OFFLOADED", "EXPIRED"}
+        and isinstance(tags, list)
+        and "preemptible" in tags
+    )
+
+
+def check_server_not_preempted(
+    config: SelectelConfig, identity: ResourceIdentity, server_id: str
+) -> None:
+    if config.preemptible is not True:
+        return
+    shown = openstack(
+        config,
+        ["server", "show", server_id, "--os-compute-api-version", "2.72", "-f", "json"],
+        check=False,
+    )
+    if shown.returncode != 0:
+        return
+    server = parse_json_output(shown, "server interruption lookup")
+    if isinstance(server, dict) and server_is_preempted(config, identity, server):
+        raise PreemptedLifecycleError(server_created_at(server))
 
 
 def find_server_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[str]:
@@ -1643,6 +1741,7 @@ def provision(arguments: argparse.Namespace) -> None:
             server_id,
             timeout_seconds=300,
             sensitive_values=(app_token, public_token, *jit_configs.values()),
+            identity=identity,
         )
         emergency_credential_id, emergency_credential_secret = (
             create_emergency_application_credential(
@@ -1665,24 +1764,28 @@ def provision(arguments: argparse.Namespace) -> None:
             downloader_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+            server_check=lambda: check_server_not_preempted(config, identity, server_id),
         )
         wait_for_runner_online(
             wot_gui_assets_runner,
             wot_gui_assets_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+            server_check=lambda: check_server_not_preempted(config, identity, server_id),
         )
         wait_for_runner_online(
             wot_src_runner,
             wot_src_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+            server_check=lambda: check_server_not_preempted(config, identity, server_id),
         )
         wait_for_runner_online(
             wotstat_assets_runner,
             wotstat_assets_runner_id,
             app_token,
             timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
+            server_check=lambda: check_server_not_preempted(config, identity, server_id),
         )
         append_summary(f"- Runner version: `{runner_version}`")
         append_summary(f"- Selectel server: `{server_id}`")

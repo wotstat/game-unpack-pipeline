@@ -309,6 +309,7 @@ patches chain для default language, не создавая workspace и не �
 | `client_type` | `sd` |
 | `languages` | `EN` |
 | `selectel_location` | `ru-2c`; для ручного обхода сбоя пула выбрать `ru-7a`, `ru-7b`, `ru-3b`, `ru-6a`, `ru-6b`, `ru-6c`, `ru-8a` или `ru-9a` |
+| `preemptible` | `true`: две прерываемые попытки и обычная третья при вытеснении; `false`: обычная VM без немедленного retry |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
@@ -394,13 +395,50 @@ Consumer можно включать независимо для каждого 
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 14. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
     `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
-    явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
+    явно вызывает тот же workflow после cleanup и отчётов, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
     приходит отдельный recovery alert.
+    Bot rerun учитывает `github.triggering_actor`; вытесненная/отменённая прерываемая попытка
+    также явно запускает reconciler. После успешной очистки он может выполнить следующий
+    полный attempt в пределах политики прерываемых VM.
 
 Queue watchdog ждёт назначения download job на downloader runner 10 минут. Self-hosted publisher
 job ограничены 60 минутами, uploader — 120 минутами; их состояния и шаги видны непосредственно в
 основном run.
+
+После назначения downloader тот же GitHub-hosted watchdog продолжает наблюдать за VM через
+Selectel API раз в минуту до завершения downloader и включённых consumer. Его общий срок
+ограничен исходным четырёхчасовым дедлайном VM. При подтверждённом вытеснении он сначала
+сохраняет monitoring report, затем отменяет потерявшую VM попытку; обычные cleanup/status/Telegram
+и reconciler выполняются перед следующим полным запуском.
+
+### Прерываемые VM и полные повторы
+
+`preemptible` включён по умолчанию в ручных формах основного workflow и checker, а также в cron.
+Отключение выбирает обычную VM без немедленного retry. При включении:
+
+1. Actions attempt 1 — прерываемая VM.
+2. Если Selectel вытеснил её, после успешного reconciler выполняется полный attempt 2 на новой
+   прерываемой VM с четырьмя новыми JIT runner.
+3. Если вытеснен и attempt 2, полный attempt 3 использует обычную VM. Его сбой завершает цепочку.
+
+Используется full rerun одного Run ID с исходными SHA/ref и inputs. Ручные rerun также увеличивают
+номер attempt; начиная с третьего VM всегда обычная. Другой сегмент автоматически не выбирается.
+Полный повтор начинает скачивание и сборку заново: [Selectel удаляет данные локального диска](https://docs.selectel.ru/cloud-servers/manage/restore-preemptible-server/).
+Существующие плановые повторы checker через 12 часов и далее сохраняются.
+
+Прерывание подтверждается только у своей VM с локальным диском, маркером прерываемости,
+системным тегом `preemptible` и состоянием `SHELVED_OFFLOADED` (`EXPIRED` в панели).
+Обычная заморозка сетевого диска не подходит под эти условия. `SHUTOFF`, NoValidHost, ошибки
+приложения/API и ручная отмена не разрешают немедленный retry. При отменённом run дополнительно
+проверяется успешный шаг отмены из VM monitor. Создание и чтение VM используют microversion 2.72,
+чтобы API возвращал системные теги. Пароль Selectel остаётся только на GitHub-hosted runner.
+
+Для измерения частоты вытеснений сохраняются `selectel-attempt-<run_id>-<attempt>-provision`
+и `selectel-attempt-<run_id>-<attempt>-monitor` artifacts (30 дней): режим, причина завершения,
+время наблюдения и возраст VM. В них нет credentials, IP или облачных UUID. Отсутствующий или
+некорректный report не разрешает retry. Reconciler сериализован по source Run ID и перед POST
+перепроверяет текущий attempt, поэтому повторная reconciliation не создаёт дополнительную попытку.
 
 ## 10. Отмена и повторная очистка
 
