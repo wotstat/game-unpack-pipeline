@@ -72,7 +72,7 @@ jobs:
           instance_key="manual-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
           cleanup_failed=0
           deleted_count=0
-          for selectel_region in ru-7 ru-3 ru-9 ru-6 ru-8; do
+          for selectel_region in ru-7 ru-3 ru-9 ru-6 ru-8 ru-2; do
             export SELECTEL_OS_REGION_NAME="${selectel_region}"
             export SELECTEL_PUBLIC_NETWORK_API_URL="https://${selectel_region}.cloud.api.selcloud.ru/public-network"
             region_output="$(mktemp "${RUNNER_TEMP}/reconcile-${selectel_region}.XXXXXX")"
@@ -80,7 +80,7 @@ jobs:
               --instance-key "${instance_key}" \
               --run-id "${SOURCE_RUN_ID}" \
               --run-attempt "${SOURCE_RUN_ATTEMPT}" \
-              --credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8 \
+              --credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8 ru-2 \
               --diagnostics; then
               cleanup_failed=1
             fi

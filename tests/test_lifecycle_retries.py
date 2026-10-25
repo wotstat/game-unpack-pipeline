@@ -35,9 +35,9 @@ CONFIG = lifecycle.SelectelConfig(
 )
 
 
-@pytest.mark.parametrize("live_region", ["ru-7", "ru-3", "ru-9", "ru-6", "ru-8"])
+@pytest.mark.parametrize("live_region", ["ru-7", "ru-3", "ru-9", "ru-6", "ru-8", "ru-2"])
 def test_reconciler_retains_credential_while_vm_exists_in_another_region(live_region: str) -> None:
-    regions = ("ru-7", "ru-3", "ru-9", "ru-6", "ru-8")
+    regions = ("ru-7", "ru-3", "ru-9", "ru-6", "ru-8", "ru-2")
     arguments = lifecycle.build_parser().parse_args(
         [
             "cleanup",
@@ -86,7 +86,7 @@ def test_reconciler_deletes_credential_only_after_all_regions_confirm_vm_absent(
         lifecycle.delete_emergency_application_credentials(
             CONFIG,
             IDENTITY,
-            credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6", "ru-8"),
+            credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6", "ru-8", "ru-2"),
             deleted_resources=deleted,
         )
 
@@ -96,6 +96,7 @@ def test_reconciler_deletes_credential_only_after_all_regions_confirm_vm_absent(
         "ru-9",
         "ru-6",
         "ru-8",
+        "ru-2",
     ]
     delete.assert_called_once_with(CONFIG, ["application", "credential"], GROUP_ID)
     assert deleted == [f"selectel-application-credential:{GROUP_ID}"]
@@ -110,7 +111,9 @@ def test_reconciler_does_not_delete_credential_if_a_region_cannot_be_checked() -
         pytest.raises(lifecycle.LifecycleError, match="API unavailable"),
     ):
         lifecycle.delete_emergency_application_credentials(
-            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6", "ru-8")
+            CONFIG,
+            IDENTITY,
+            credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6", "ru-8", "ru-2"),
         )
 
     delete.assert_not_called()
