@@ -793,6 +793,7 @@ class WorkflowContractTests(unittest.TestCase):
             "          - ru-7a\n"
             "          - ru-7b\n"
             "          - ru-3b\n"
+            "          - ru-6c\n"
             "          - ru-9a",
             workflow,
         )
@@ -801,16 +802,21 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
+            "        || inputs.selectel_location == 'ru-6c' && 'ru-6'\n"
             "        || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7'",
             workflow,
         )
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
+        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_6 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
         self.assertIn("vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
+        self.assertIn("https://ru-6.cloud.api.selcloud.ru/public-network", workflow)
         self.assertIn("https://ru-9.cloud.api.selcloud.ru/public-network", workflow)
         self.assertIn(
             "SELECTEL_FLAVOR_ID: >-\n"
             "    ${{ inputs.selectel_location == 'ru-9a'\n"
-            "        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}",
+            "        && 'HFL1.16-32768-240'\n"
+            "        || inputs.selectel_location == 'ru-6c'\n"
+            "        && 'HFL2.16-32768-256-INTEL' || 'HFL2.16-32768-256-AMD' }}",
             workflow,
         )
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
@@ -883,7 +889,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
         self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
         self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)
-        self.assertIn("for selectel_region in ru-7 ru-3 ru-9", reconciler)
+        self.assertIn("for selectel_region in ru-7 ru-3 ru-9 ru-6; do", reconciler)
+        self.assertIn("--credential-check-regions ru-7 ru-3 ru-9 ru-6", reconciler)
         self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
         self.assertIn("environment: telegram", reconciler)
 

@@ -25,7 +25,7 @@ manual workflow_dispatch
   → cleanup с always()
   → параллельно запись результата run в status и итоговый Telegram-отчёт
   → после status commit сборка и deployment GitHub Pages
-  → workflow_run reconciler в ru-7, ru-3 и ru-9
+  → workflow_run reconciler в ru-7, ru-3, ru-9 и ru-6
   → recovery alert только при deleted_count > 0
 ```
 
@@ -107,11 +107,12 @@ workflow или отдельный репозиторий и не перенос
   прогресса обычного HTTP, лимит download-шага 60 минут и четырёхчасовой kill switch сохраняются.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
-  позволяет вручную выбрать `ru-7a` (по умолчанию), резервный `ru-7b`, `ru-3b` или `ru-9a`
+  позволяет вручную выбрать `ru-7a` (по умолчанию), резервный `ru-7b`, `ru-3b`, `ru-6c` или `ru-9a`
   в основном workflow и checker; cron checker использует default `ru-7a`.
   Автоматического переключения пулов нет.
-  Для `ru-3`/`ru-9` образ берётся
-  из optional variable `SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_9` либо по уникальному имени
+  Для `ru-3`/`ru-6`/`ru-9` образ берётся
+  из optional variable `SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_6`/`SELECTEL_IMAGE_ID_RU_9`
+  либо по уникальному имени
   `Ubuntu 24.04 LTS 64-bit` в выбранном region.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
   snapshot identity и descriptor digest.
@@ -141,12 +142,14 @@ workflow или отдельный репозиторий и не перенос
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
 - Production flavor в `ru-7a`, `ru-7b` и `ru-3b` зафиксирован как HighFreq с выделенными ядрами
-  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk). Ручной резерв `ru-9a` использует
+  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk). Ручной резерв `ru-6c` использует
+  HighFreq с выделенными ядрами `HFL2.16-32768-256-INTEL` с теми же ресурсами.
+  Ручной резерв `ru-9a` использует
   обычный HighFreq без выделенных ядер `HFL1.16-32768-240` (16 vCPU, 32 ГБ RAM, 240 ГБ local disk).
   Flavor определяется только выбранным сегментом; Standard и произвольный выбор flavor не поддерживаются.
 - Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
-  точным ownership-маркерам и проверяет `ru-7`, `ru-3` и `ru-9`. Перед удалением общего
-  emergency credential reconciler подтверждает отсутствие VM во всех трёх region; отсутствие
+  точным ownership-маркерам и проверяет `ru-7`, `ru-3`, `ru-9` и `ru-6`. Перед удалением общего
+  emergency credential reconciler подтверждает отсутствие VM во всех четырёх region; отсутствие
   только в текущем region не разрешает удалить credential ещё живой VM в другом пуле.
 - При статусе VM `ERROR` provision до cleanup выводит только `fault.code` и очищенный
   `fault.message`. Из сообщения удаляются известные secrets/JIT-конфигурации, credentials по

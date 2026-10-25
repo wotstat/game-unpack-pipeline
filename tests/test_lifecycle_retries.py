@@ -35,17 +35,34 @@ CONFIG = lifecycle.SelectelConfig(
 )
 
 
-def test_reconciler_retains_credential_while_vm_exists_in_another_region() -> None:
+@pytest.mark.parametrize("live_region", ["ru-7", "ru-3", "ru-9", "ru-6"])
+def test_reconciler_retains_credential_while_vm_exists_in_another_region(live_region: str) -> None:
+    regions = ("ru-7", "ru-3", "ru-9", "ru-6")
+    arguments = lifecycle.build_parser().parse_args(
+        [
+            "cleanup",
+            "--instance-key",
+            IDENTITY.instance_key,
+            "--credential-check-regions",
+            *regions,
+        ]
+    )
     with (
-        patch.object(lifecycle, "find_server_ids", side_effect=[[], [PORT_ID]]) as find_servers,
+        patch.object(
+            lifecycle,
+            "find_server_ids",
+            side_effect=[([PORT_ID] if region == live_region else []) for region in regions],
+        ) as find_servers,
         patch.object(lifecycle, "find_emergency_application_credential_ids") as find_credentials,
         patch.object(lifecycle, "delete_openstack_resource") as delete,
     ):
         lifecycle.delete_emergency_application_credentials(
-            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9")
+            CONFIG, IDENTITY, credential_check_regions=arguments.credential_check_regions
         )
 
-    assert [call.args[0].region_name for call in find_servers.call_args_list] == ["ru-7", "ru-3"]
+    assert [call.args[0].region_name for call in find_servers.call_args_list] == list(
+        regions[: regions.index(live_region) + 1]
+    )
     find_credentials.assert_not_called()
     delete.assert_not_called()
 
@@ -69,7 +86,7 @@ def test_reconciler_deletes_credential_only_after_all_regions_confirm_vm_absent(
         lifecycle.delete_emergency_application_credentials(
             CONFIG,
             IDENTITY,
-            credential_check_regions=("ru-7", "ru-3", "ru-9"),
+            credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6"),
             deleted_resources=deleted,
         )
 
@@ -77,6 +94,7 @@ def test_reconciler_deletes_credential_only_after_all_regions_confirm_vm_absent(
         "ru-7",
         "ru-3",
         "ru-9",
+        "ru-6",
     ]
     delete.assert_called_once_with(CONFIG, ["application", "credential"], GROUP_ID)
     assert deleted == [f"selectel-application-credential:{GROUP_ID}"]
@@ -91,7 +109,7 @@ def test_reconciler_does_not_delete_credential_if_a_region_cannot_be_checked() -
         pytest.raises(lifecycle.LifecycleError, match="API unavailable"),
     ):
         lifecycle.delete_emergency_application_credentials(
-            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9")
+            CONFIG, IDENTITY, credential_check_regions=("ru-7", "ru-3", "ru-9", "ru-6")
         )
 
     delete.assert_not_called()

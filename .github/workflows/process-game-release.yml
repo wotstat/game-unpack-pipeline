@@ -39,6 +39,7 @@ on:
           - ru-7a
           - ru-7b
           - ru-3b
+          - ru-6c
           - ru-9a
       detected_release_name:
         description: Optional release detected by Check game releases
@@ -67,14 +68,19 @@ env:
   PYTHONUNBUFFERED: "1"
   SELECTEL_FLAVOR_ID: >-
     ${{ inputs.selectel_location == 'ru-9a'
-        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}
+        && 'HFL1.16-32768-240'
+        || inputs.selectel_location == 'ru-6c'
+        && 'HFL2.16-32768-256-INTEL' || 'HFL2.16-32768-256-AMD' }}
   SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-7a' }}
   SELECTEL_OS_REGION_NAME: >-
     ${{ inputs.selectel_location == 'ru-3b' && 'ru-3'
+        || inputs.selectel_location == 'ru-6c' && 'ru-6'
         || inputs.selectel_location == 'ru-9a' && 'ru-9' || 'ru-7' }}
   SELECTEL_PUBLIC_NETWORK_API_URL: >-
     ${{ inputs.selectel_location == 'ru-3b'
         && 'https://ru-3.cloud.api.selcloud.ru/public-network'
+        || inputs.selectel_location == 'ru-6c'
+        && 'https://ru-6.cloud.api.selcloud.ru/public-network'
         || inputs.selectel_location == 'ru-9a'
         && 'https://ru-9.cloud.api.selcloud.ru/public-network'
         || 'https://ru-7.cloud.api.selcloud.ru/public-network' }}
@@ -135,6 +141,8 @@ jobs:
           SELECTEL_IMAGE_ID: >-
             ${{ inputs.selectel_location == 'ru-3b'
                 && (vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit')
+                || inputs.selectel_location == 'ru-6c'
+                && (vars.SELECTEL_IMAGE_ID_RU_6 || 'Ubuntu 24.04 LTS 64-bit')
                 || inputs.selectel_location == 'ru-9a'
                 && (vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit')
                 || vars.SELECTEL_IMAGE_ID }}

@@ -65,6 +65,7 @@ on:
           - ru-7a
           - ru-7b
           - ru-3b
+          - ru-6c
           - ru-9a
 
 permissions:

@@ -28,6 +28,11 @@ production pipeline для найденных новых версий; тако�
 - 16 vCPU и 32 ГБ RAM при текущих профилях;
 - 256 ГБ local disk HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`.
 
+Ручной резерв `ru-6c` использует HighFreq с выделенными ядрами
+`HFL2.16-32768-256-INTEL`: те же 16 vCPU, 32 ГБ RAM и 256 ГБ локального диска,
+но на Intel вместо AMD. Квоты на CPU, RAM, локальный диск и direct public IP
+нужно выделить отдельно в `ru-6c` перед первым запуском.
+
 Для ручного резерва `ru-9a` используется обычный HighFreq без выделенных ядер
 `HFL1.16-32768-240`: на один run нужны свободные 16 vCPU, 32 ГБ RAM, 240 ГБ локального диска
 и один direct public IP. Pipeline подбирает число workers по фактическим CPU.
@@ -40,17 +45,21 @@ production pipeline для найденных новых версий; тако�
 cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
 
 Input `selectel_location` в основном workflow и ручном checker позволяет выбрать сегмент пула.
-По умолчанию и для cron checker используется `ru-7a`; `ru-7b`, `ru-3b` и `ru-9a` — ручные резервные варианты:
+По умолчанию и для cron checker используется `ru-7a`; `ru-7b`, `ru-3b`, `ru-6c` и `ru-9a` — ручные резервные варианты:
 
 | Availability zone | OpenStack region | Public Network endpoint |
 | --- | --- | --- |
 | `ru-7a` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 | `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
 | `ru-3b` | `ru-3` | `https://ru-3.cloud.api.selcloud.ru/public-network` |
+| `ru-6c` | `ru-6` | `https://ru-6.cloud.api.selcloud.ru/public-network` |
 | `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
 
 В `ru-3b` (Санкт-Петербург) доступны те же HighFreq-конфигурации с выделенными ядрами, что и
 в `ru-7a` и `ru-7b` (Москва). Оба московских сегмента используют один `SELECTEL_IMAGE_ID` региона `ru-7`.
+`ru-6c` (Москва, зона доступности 4) использует отдельный регион `ru-6` и Intel HighFreq
+с выделенными ядрами. Основания выбора и ограничения описаны в
+[исследовании дополнительных пулов](research/selectel-ru6-2026-10-25.md).
 `ru-9a` (Санкт-Петербург) использует обычный HighFreq без выделенных ядер.
 Перед резервным запуском проверить квоты проекта в выбранном регионе на CPU/RAM, локальный диск
 и direct public IP. Preflight выбранного региона проверяет доступность образа, flavor, сегмента
@@ -58,8 +67,15 @@ Input `selectel_location` в основном workflow и ручном checker �
 
 В `ru-7a`/`ru-7b`/`ru-3b` flavor зафиксирован как `HFL2.16-32768-256-AMD`. Он соответствует включённой
 в панели опции **Выделенные ядра**; Hyper-Threading (SMT) остаётся включённым по умолчанию.
+В `ru-6c` зафиксирован `HFL2.16-32768-256-INTEL` с выделенными ядрами и включённым SMT.
 В `ru-9a` зафиксирован `HFL1.16-32768-240` без выделенных ядер. Standard и произвольный выбор
 flavor не поддерживаются.
+
+В [модели оплаты Selectel](https://docs.selectel.ru/cloud-servers/about/payment/)
+учитывается максимальное потребление ресурсов проекта за каждый астрономический час.
+Поэтому даже 50 минут работы могут попасть в два оплачиваемых часа, например с 10:25 до 11:15.
+Более быстрый CPU не гарантирует выполнение всего pipeline в пределах одного такого интервала:
+длительность также зависит от скачивания, публикации и cleanup.
 
 ## 2. Repository-level GitHub App
 
@@ -164,12 +180,14 @@ caller, включая техническую доступность `GH_APP_PRI
 | `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
 | `SELECTEL_IMAGE_ID` | Уникальное имя или UUID выбранного Ubuntu 24.04 x64 image |
 | `SELECTEL_IMAGE_ID_RU_3` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-3` |
+| `SELECTEL_IMAGE_ID_RU_6` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-6` |
 | `SELECTEL_IMAGE_ID_RU_9` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-9` |
 
 `SELECTEL_OS_PROJECT_ID` может быть UUID с дефисами или 32 шестнадцатеричными символами. Image и
 фиксированный HighFreq flavor разрешаются OpenStack CLI в выбранном регионе.
-Для `ru-7` используется `SELECTEL_IMAGE_ID`. Для `ru-3`/`ru-9` — `SELECTEL_IMAGE_ID_RU_3`/
-`SELECTEL_IMAGE_ID_RU_9`, если задана соответствующая variable, иначе уникальное имя публичного
+Для `ru-7` используется `SELECTEL_IMAGE_ID`. Для `ru-3`/`ru-6`/`ru-9` —
+соответствующая variable `SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_6`/
+`SELECTEL_IMAGE_ID_RU_9`, если она задана, иначе уникальное имя публичного
 образа `Ubuntu 24.04 LTS 64-bit` в выбранном регионе. UUID образа из `ru-7`
 в резервные регионы не переносится. До создания
 ресурсов preflight проверяет authentication, image, flavor, availability zone и наличие свободного
@@ -230,7 +248,7 @@ Workflow автоматически запускается каждый час �
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
 В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-7a` (по умолчанию),
-`ru-7b`, `ru-3b` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
+`ru-7b`, `ru-3b`, `ru-6c` или `ru-9a`. Например, `ru-9a` направит все запускаемые этой проверкой pipeline в этот пул.
 Чтобы сразу повторить найденные неопубликованные версии после ошибок, включить `force_retry`:
 галочка обходит ожидание retry для всех выбранных targets. По умолчанию она выключена. Для запуска
 оставить `dispatch_pipelines` включённым; уже работающие targets и опубликованные версии пропускаются.
@@ -270,7 +288,7 @@ patches chain для default language, не создавая workspace и не �
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
-| `selectel_location` | `ru-7a`; для ручного обхода сбоя пула выбрать `ru-7b`, `ru-3b` или `ru-9a` |
+| `selectel_location` | `ru-7a`; для ручного обхода сбоя пула выбрать `ru-7b`, `ru-3b`, `ru-6c` или `ru-9a` |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
@@ -355,7 +373,7 @@ Consumer можно включать независимо для каждого 
     заголовке буквально. Полная длительность run от
     `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
 14. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
-    `ru-7`, `ru-3` и `ru-9`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
+    `ru-7`, `ru-3`, `ru-9` и `ru-6`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
     явно вызывает тот же workflow после cleanup, поскольку GitHub подавляет следующий
     `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
     приходит отдельный recovery alert.
@@ -382,13 +400,13 @@ job ограничены 60 минутами, uploader — 120 минутами;
 4. Передать `source_run_id` и `source_run_attempt`.
 5. Повторять manual reconciler безопасно, если Selectel или GitHub API временно недоступны.
 
-Reconciler проверяет `ru-7`, `ru-3` и `ru-9` и удаляет только ресурсы с детерминированными именами и совпавшими
+Reconciler проверяет `ru-7`, `ru-3`, `ru-9` и `ru-6` и удаляет только ресурсы с детерминированными именами и совпавшими
 repository/run/attempt ownership-маркерами. Уже отсутствующий ресурс считается очищенным. При
 ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
 перечнем незавершённых действий.
 
 Emergency application credential относится к общему Identity API. Перед его удалением reconciler
-с `--credential-check-regions ru-7 ru-3 ru-9` подтверждает отсутствие VM во всех трёх region.
+с `--credential-check-regions ru-7 ru-3 ru-9 ru-6` подтверждает отсутствие VM во всех четырёх region.
 Если VM ещё существует в другом регионе или API не позволяет проверить её отсутствие, credential
 сохраняется для systemd kill switch. Штатный cleanup проверяет регион своего run.
 

@@ -1908,7 +1908,7 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument(
         "--credential-check-regions",
         nargs="+",
-        choices=("ru-7", "ru-3", "ru-9"),
+        choices=("ru-7", "ru-3", "ru-9", "ru-6"),
         default=(),
         help="Require VM absence in every listed region before deleting its global credential",
     )
