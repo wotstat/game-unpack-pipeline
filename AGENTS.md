@@ -85,7 +85,8 @@ workflow или отдельный репозиторий и не перенос
   downloader и включённых consumer в пределах исходного четырёхчасового дедлайна.
   Артефакты `selectel-attempt-<run_id>-<run_attempt>-provision|monitor` содержат только
   несекретную причину завершения, режим и возраст VM. Повторы manual/bot reconciliation
-  сериализованы по source Run ID; устаревшая попытка не может запустить новый rerun.
+  сериализованы по source Run ID/attempt, чтобы дубли не отменяли ожидающую
+  reconciliation следующего attempt; устаревшая попытка не может запустить новый rerun.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.

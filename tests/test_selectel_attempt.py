@@ -399,6 +399,11 @@ def test_workflows_keep_retry_after_cleanup_and_support_token_originated_reruns(
     assert retry["needs"] == "reconcile"
     assert "always()" not in retry.get("if", "")
     assert reconciler["concurrency"]["cancel-in-progress"] is False
+    reconciliation_group = reconciler["concurrency"]["group"]
+    assert "inputs.source_run_id || github.event.workflow_run.id" in reconciliation_group
+    assert (
+        "inputs.source_run_attempt || github.event.workflow_run.run_attempt" in reconciliation_group
+    )
     dispatch = main["jobs"]["dispatch-reconciler"]
     assert "github.triggering_actor" in dispatch["if"]
     assert "cancelled()" in dispatch["if"]

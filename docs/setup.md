@@ -437,8 +437,10 @@ Selectel API раз в минуту до завершения downloader и вк
 Для измерения частоты вытеснений сохраняются `selectel-attempt-<run_id>-<attempt>-provision`
 и `selectel-attempt-<run_id>-<attempt>-monitor` artifacts (30 дней): режим, причина завершения,
 время наблюдения и возраст VM. В них нет credentials, IP или облачных UUID. Отсутствующий или
-некорректный report не разрешает retry. Reconciler сериализован по source Run ID и перед POST
-перепроверяет текущий attempt, поэтому повторная reconciliation не создаёт дополнительную попытку.
+некорректный report не разрешает retry. Reconciler сериализован по source Run ID/attempt,
+поэтому дубли событий не отменяют ожидающую reconciliation следующего attempt. Перед POST
+контроллер перепроверяет текущий attempt, поэтому повторная reconciliation не создаёт
+дополнительную попытку.
 
 ## 10. Отмена и повторная очистка
 
