@@ -814,9 +814,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "SELECTEL_FLAVOR_ID: >-\n"
             "    ${{ inputs.selectel_location == 'ru-9a'\n"
-            "        && 'HFL1.16-32768-240'\n"
-            "        || inputs.selectel_location == 'ru-6c'\n"
-            "        && 'HFL2.8-32768-256-AMD' || 'HFL2.16-32768-256-AMD' }}",
+            "        && 'HFL1.16-32768-240' || 'HFL2.16-32768-256-AMD' }}",
             workflow,
         )
         self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
