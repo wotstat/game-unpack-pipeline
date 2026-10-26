@@ -133,6 +133,7 @@ def job(role: str, status: str = "completed", conclusion: str = "success") -> di
         "name": f"{attempt.VM_JOB_PREFIXES[role]} ({IDENTITY.instance_key})",
         "status": status,
         "conclusion": conclusion,
+        "steps": [{"name": "Work", "conclusion": conclusion}],
     }
 
 
@@ -205,6 +206,233 @@ def test_monitor_persists_only_confirmed_preemption(tmp_path: Path, mode: str) -
         assert "2.72" in cloud.call_args.args[1]
     else:
         assert not any(call.args == ("cancel_required", "true") for call in output.call_args_list)
+
+
+@pytest.mark.parametrize("role", list(attempt.VM_JOB_PREFIXES))
+@pytest.mark.parametrize("status", ["SHELVED_OFFLOADED", "EXPIRED"])
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled"])
+def test_monitor_detects_preemption_after_runner_shutdown(
+    tmp_path: Path, role: str, status: str, conclusion: str
+) -> None:
+    arguments = argparse.Namespace(
+        instance_key=IDENTITY.instance_key,
+        server_id=SERVER_ID,
+        report=tmp_path / "monitor.json",
+        timeout_seconds=60,
+        poll_seconds=1,
+    )
+    interrupted = job(role, conclusion=conclusion)
+    interrupted["steps"] = [{"name": "Verify downloads", "conclusion": "cancelled"}]
+    jobs = [interrupted]
+    if role != "download":
+        interrupted["name"] += " / Work"
+        jobs = [job(other) if other != role else interrupted for other in attempt.VM_JOB_PREFIXES]
+    with (
+        patch.dict(os.environ, environment(), clear=True),
+        patch.object(lifecycle.SelectelConfig, "from_environment", return_value=CONFIG),
+        patch.object(lifecycle, "add_mask"),
+        patch.object(lifecycle, "write_output") as output,
+        patch.object(attempt, "attempt_jobs", return_value=jobs),
+        patch.object(
+            lifecycle,
+            "openstack",
+            return_value=Mock(returncode=0, stdout=json.dumps(owned_server(status=status))),
+        ) as cloud,
+    ):
+        attempt.watch(arguments)
+    report = attempt.read_report(arguments.report, source_run(), 1, "monitor")
+    assert report["preempted"] is True
+    assert report["reason"] == "preempted"
+    output.assert_any_call("cancel_required", "true")
+    cloud.assert_called_once()
+    assert "2.72" in cloud.call_args.args[1]
+    source = source_run(conclusion="cancelled")
+    with (
+        patch.dict(os.environ, environment(), clear=True),
+        patch.object(attempt, "github_get", side_effect=[source, source]),
+        patch.object(attempt, "fetch_reports", return_value=[report]),
+        patch.object(
+            attempt,
+            "attempt_jobs",
+            return_value=[
+                {
+                    "name": f"Queue watchdog ({IDENTITY.instance_key})",
+                    "steps": [{"name": attempt.CANCEL_STEP, "conclusion": "success"}],
+                }
+            ],
+        ),
+        patch.object(lifecycle, "http_json") as post,
+        patch.object(lifecycle, "write_output"),
+        patch.object(lifecycle, "append_summary"),
+    ):
+        attempt.retry(argparse.Namespace(run_id=IDENTITY.run_id, run_attempt=1))
+    post.assert_called_once()
+    assert post.call_args.args[:2] == (
+        "POST",
+        "https://api.github.com/repos/wotstat/game-unpack-pipeline/actions/runs/123456/rerun",
+    )
+
+
+@pytest.mark.parametrize("initial_status", ["ACTIVE", "SHUTOFF", "unavailable", "transient_error"])
+def test_monitor_waits_for_final_vm_state_after_runner_shutdown(
+    tmp_path: Path, initial_status: str
+) -> None:
+    arguments = argparse.Namespace(
+        instance_key=IDENTITY.instance_key,
+        server_id=SERVER_ID,
+        report=tmp_path / "monitor.json",
+        timeout_seconds=300,
+        poll_seconds=60,
+    )
+    interrupted = job("download", conclusion="failure")
+    interrupted["steps"] = None
+    initial: Any = Mock(returncode=0, stdout=json.dumps(owned_server(status=initial_status)))
+    if initial_status == "unavailable":
+        initial = Mock(returncode=1)
+    if initial_status == "transient_error":
+        initial = lifecycle.TransientLifecycleError("OpenStack request timed out")
+    with (
+        patch.dict(os.environ, environment(), clear=True),
+        patch.object(lifecycle.SelectelConfig, "from_environment", return_value=CONFIG),
+        patch.object(lifecycle, "add_mask"),
+        patch.object(lifecycle, "write_output"),
+        patch.object(attempt, "attempt_jobs", return_value=[interrupted]) as lookup,
+        patch.object(
+            lifecycle,
+            "openstack",
+            side_effect=[initial, Mock(returncode=0, stdout=json.dumps(owned_server()))],
+        ) as cloud,
+        patch("scripts.selectel_attempt.time.monotonic", return_value=0),
+        patch("scripts.selectel_attempt.time.sleep") as sleep,
+    ):
+        attempt.watch(arguments)
+    assert attempt.read_report(arguments.report, source_run(), 1, "monitor")["preempted"] is True
+    lookup.assert_called_once()
+    assert cloud.call_count == 2
+    sleep.assert_called_once_with(60)
+
+
+@pytest.mark.parametrize(
+    ("state", "timeout_seconds", "reason"),
+    [
+        ("ACTIVE", 300, "runner_interrupted"),
+        ("SHUTOFF", 300, "runner_interrupted"),
+        ("unavailable", 300, "runner_interrupted"),
+        ("transient_error", 300, "runner_interrupted"),
+        ("ERROR", 300, "vm_stopped"),
+        ("untagged", 300, "vm_stopped"),
+        ("ordinary", 300, "vm_stopped"),
+        ("unowned", 300, "monitor_failed"),
+        ("ACTIVE", 90, "deadline"),
+    ],
+)
+def test_runner_shutdown_needs_confirmed_preemption_within_deadline(
+    tmp_path: Path, state: str, timeout_seconds: int, reason: str
+) -> None:
+    arguments = argparse.Namespace(
+        instance_key=IDENTITY.instance_key,
+        server_id=SERVER_ID,
+        report=tmp_path / "monitor.json",
+        timeout_seconds=timeout_seconds,
+        poll_seconds=60,
+    )
+    interrupted = job("download", conclusion="failure")
+    interrupted["steps"] = [{"conclusion": "cancelled"}]
+    server = owned_server(status=state)
+    if state in {"untagged", "ordinary", "unowned"}:
+        server["status"] = "SHELVED_OFFLOADED"
+    if state == "untagged":
+        server["tags"] = []
+    if state == "unowned":
+        server["properties"]["gup_run_attempt"] = "2"
+    response = Mock(returncode=0, stdout=json.dumps(server))
+    if state == "unavailable":
+        response = Mock(returncode=1)
+    elapsed = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    with (
+        patch.dict(os.environ, environment(), clear=True),
+        patch.object(
+            lifecycle.SelectelConfig,
+            "from_environment",
+            return_value=replace(CONFIG, preemptible=state != "ordinary"),
+        ),
+        patch.object(lifecycle, "add_mask"),
+        patch.object(lifecycle, "write_output") as output,
+        patch.object(attempt, "attempt_jobs", return_value=[interrupted]),
+        patch.object(
+            lifecycle,
+            "openstack",
+            return_value=response,
+            side_effect=lifecycle.TransientLifecycleError("OpenStack request timed out")
+            if state == "transient_error"
+            else None,
+        ) as cloud,
+        patch("scripts.selectel_attempt.time.monotonic", side_effect=lambda: elapsed),
+        patch("scripts.selectel_attempt.time.sleep", side_effect=advance),
+    ):
+        if reason in {"deadline", "monitor_failed"}:
+            with pytest.raises(lifecycle.LifecycleError, match=r"deadline|ownership"):
+                attempt.watch(arguments)
+        else:
+            attempt.watch(arguments)
+    report = attempt.read_report(arguments.report, source_run(), 1, "monitor")
+    assert report["preempted"] is False
+    assert report["reason"] == reason
+    assert not any(call.args == ("preempted", "true") for call in output.call_args_list)
+    assert cloud.call_count <= 3
+    expected_elapsed = (
+        min(timeout_seconds, 120) if reason in {"runner_interrupted", "deadline"} else 0
+    )
+    assert elapsed == expected_elapsed
+
+
+@pytest.mark.parametrize(
+    ("conclusion", "steps"),
+    [
+        ("success", ["success"]),
+        ("failure", ["failure", "cancelled"]),
+        ("cancelled", ["failure", "cancelled"]),
+        ("failure", ["timed_out"]),
+        ("timed_out", ["timed_out"]),
+    ],
+)
+def test_completed_work_and_application_errors_are_not_reclassified_as_preemption(
+    tmp_path: Path, conclusion: str, steps: list[str]
+) -> None:
+    arguments = argparse.Namespace(
+        instance_key=IDENTITY.instance_key,
+        server_id=SERVER_ID,
+        report=tmp_path / "monitor.json",
+        timeout_seconds=60,
+        poll_seconds=1,
+    )
+    download = job("download", conclusion=conclusion)
+    download["steps"] = [{"conclusion": step} for step in steps]
+    values = environment() | {
+        "PUBLISH_WOT_SRC": "false",
+        "PUBLISH_WOT_GUI_ASSETS": "false",
+        "PUBLISH_WOTSTAT_ASSETS": "false",
+    }
+    with (
+        patch.dict(os.environ, values, clear=True),
+        patch.object(lifecycle.SelectelConfig, "from_environment", return_value=CONFIG),
+        patch.object(lifecycle, "add_mask"),
+        patch.object(lifecycle, "write_output"),
+        patch.object(
+            attempt, "attempt_jobs", return_value=[download, job("wot-src", conclusion="cancelled")]
+        ),
+        patch.object(lifecycle, "openstack") as cloud,
+    ):
+        attempt.watch(arguments)
+    report = attempt.read_report(arguments.report, source_run(), 1, "monitor")
+    assert report["preempted"] is False
+    assert report["reason"] == "jobs_completed"
+    cloud.assert_not_called()
 
 
 def test_provision_failure_report_distinguishes_preemption_from_other_errors(

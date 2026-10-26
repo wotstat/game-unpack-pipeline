@@ -26,6 +26,7 @@ REPORT_VERSION = 1
 WORKFLOW_PATH = ".github/workflows/process-game-release.yml"
 MAX_ATTEMPTS = 3
 MAX_REPORT_BYTES = 16 * 1024
+RUNNER_SHUTDOWN_GRACE_SECONDS = 120
 VM_JOB_PREFIXES = {
     "download": "Download and unpack",
     "wot-src": "Publish wot-src",
@@ -124,9 +125,9 @@ def attempt_jobs(repository: str, run_id: str, attempt: str, token: str) -> list
         page += 1
 
 
-def vm_jobs_finished(
-    jobs: list[dict[str, Any]], identity: lifecycle.ResourceIdentity, consumers: set[str]
-) -> bool:
+def matching_vm_jobs(
+    jobs: list[dict[str, Any]], identity: lifecycle.ResourceIdentity
+) -> dict[str, dict[str, Any]]:
     selected: dict[str, dict[str, Any]] = {}
     for role, prefix in VM_JOB_PREFIXES.items():
         name = f"{prefix} ({identity.instance_key})"
@@ -139,12 +140,35 @@ def vm_jobs_finished(
             raise lifecycle.LifecycleError("Duplicate VM jobs in one attempt")
         if matches:
             selected[role] = matches[0]
+    return selected
+
+
+def vm_jobs_finished(
+    jobs: list[dict[str, Any]], identity: lifecycle.ResourceIdentity, consumers: set[str]
+) -> bool:
+    selected = matching_vm_jobs(jobs, identity)
     download = selected.get("download")
     if not download or download.get("status") != "completed":
         return False
     if download.get("conclusion") != "success":
         return True
     return all(selected.get(role, {}).get("status") == "completed" for role in consumers)
+
+
+def vm_jobs_interrupted(
+    jobs: list[dict[str, Any]], identity: lifecycle.ResourceIdentity, consumers: set[str]
+) -> bool:
+    for role, job in matching_vm_jobs(jobs, identity).items():
+        if role not in consumers | {"download"} or job.get("status") != "completed":
+            continue
+        # A runner shutdown can finish the job as failure while its active step
+        # is cancelled (or no steps are reported). An explicit step failure or
+        # timeout remains an application error, even if the VM stops later.
+        if job.get("conclusion") in {"failure", "cancelled"} and not any(
+            step.get("conclusion") in {"failure", "timed_out"} for step in job.get("steps") or []
+        ):
+            return True
+    return False
 
 
 def watch(arguments: argparse.Namespace) -> None:
@@ -169,35 +193,49 @@ def watch(arguments: argparse.Namespace) -> None:
             raise lifecycle.LifecycleError("VM deadline must include a time zone")
         remaining = min(remaining, (parsed_deadline - datetime.now(UTC)).total_seconds())
     deadline = time.monotonic() + max(0, remaining)
+    shutdown_deadline: float | None = None
     try:
         while time.monotonic() < deadline:
-            # Completed work wins over a later VM stop. In particular a failed
-            # application job must not turn into a retry because the VM stopped later.
+            if shutdown_deadline is None:
+                try:
+                    jobs = attempt_jobs(
+                        identity.repository, identity.run_id, identity.run_attempt, token
+                    )
+                except lifecycle.TransientLifecycleError:
+                    print(
+                        "::warning::GitHub jobs temporarily unavailable; preemption is not assumed"
+                    )
+                    time.sleep(max(0, min(arguments.poll_seconds, deadline - time.monotonic())))
+                    continue
+                if vm_jobs_finished(jobs, identity, consumers):
+                    if not vm_jobs_interrupted(jobs, identity, consumers):
+                        report["reason"] = "jobs_completed"
+                        return
+                    # GitHub may finish the interrupted job before Selectel exposes
+                    # the final VM state. Keep observing briefly before cleanup can
+                    # delete the evidence, within the original four-hour deadline.
+                    shutdown_deadline = min(
+                        deadline, time.monotonic() + RUNNER_SHUTDOWN_GRACE_SECONDS
+                    )
+            observation_deadline = shutdown_deadline if shutdown_deadline is not None else deadline
             try:
-                jobs = attempt_jobs(
-                    identity.repository, identity.run_id, identity.run_attempt, token
+                shown = lifecycle.openstack(
+                    config,
+                    [
+                        "server",
+                        "show",
+                        arguments.server_id,
+                        "--os-compute-api-version",
+                        "2.72",
+                        "-f",
+                        "json",
+                    ],
+                    check=False,
+                    timeout=max(1, min(180, int(observation_deadline - time.monotonic()))),
                 )
             except lifecycle.TransientLifecycleError:
-                print("::warning::GitHub jobs temporarily unavailable; preemption is not assumed")
-                time.sleep(arguments.poll_seconds)
-                continue
-            if vm_jobs_finished(jobs, identity, consumers):
-                report["reason"] = "jobs_completed"
-                return
-            shown = lifecycle.openstack(
-                config,
-                [
-                    "server",
-                    "show",
-                    arguments.server_id,
-                    "--os-compute-api-version",
-                    "2.72",
-                    "-f",
-                    "json",
-                ],
-                check=False,
-            )
-            if shown.returncode == 0:
+                shown = None
+            if shown is not None and shown.returncode == 0:
                 server = lifecycle.parse_json_output(shown, "monitored VM")
                 if not isinstance(server, dict) or not lifecycle.server_has_ownership_markers(
                     server, identity
@@ -210,7 +248,9 @@ def watch(arguments: argparse.Namespace) -> None:
                     print("::warning::Selectel preempted the VM; a full retry may follow cleanup")
                     return
                 status = str(server.get("status", "")).upper()
-                if status in {"ERROR", "SHUTOFF", "SHELVED_OFFLOADED", "EXPIRED"}:
+                if status in {"ERROR", "SHUTOFF", "SHELVED_OFFLOADED", "EXPIRED"} and not (
+                    shutdown_deadline is not None and status == "SHUTOFF"
+                ):
                     report["reason"] = "vm_stopped"
                     lifecycle.write_output("cancel_required", "true")
                     print("::error::VM stopped without confirmed preemption; no automatic retry")
@@ -218,7 +258,13 @@ def watch(arguments: argparse.Namespace) -> None:
             else:
                 # An unavailable API is not evidence of an eviction.
                 print("::warning::VM status temporarily unavailable; preemption is not assumed")
-            time.sleep(arguments.poll_seconds)
+            if shutdown_deadline is not None and time.monotonic() >= shutdown_deadline:
+                report["reason"] = "runner_interrupted"
+                print(
+                    "::warning::Runner stopped without confirmed VM preemption; no automatic retry"
+                )
+                return
+            time.sleep(max(0, min(arguments.poll_seconds, observation_deadline - time.monotonic())))
         report["reason"] = "deadline"
         lifecycle.write_output("cancel_required", "true")
         raise lifecycle.LifecycleError("VM monitoring deadline exceeded; no automatic retry")
