@@ -9,17 +9,39 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from game_downloader.delivery import ArtifactDownloader, DownloadPolicy, _hash_file
+import httpx
+
+from game_downloader.delivery import (
+    ArtifactDownloader,
+    DownloadPolicy,
+    _DownloadProgress,
+    _hash_file,
+)
 from game_downloader.models import AcquisitionArtifact, AcquisitionPlan, Stage, StageResult
 from game_downloader.workspace import Workspace
 
 MIB = 1024 * 1024
 METHODS = ("curl", "aria2", "aria2-split", "downloader")
+DIAGNOSTIC_METHODS = (
+    "aria2",
+    "downloader",
+    "downloader-4",
+    "downloader-1",
+    "downloader-buffered",
+    "downloader-no-progress",
+)
+
+
+def ignore_progress(*args: Any, **kwargs: Any) -> None:
+    pass
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -106,10 +128,26 @@ def worker(args: argparse.Namespace) -> None:
     directory.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     details: dict[str, Any] = {}
-    if args.method == "downloader":
-        result = ArtifactDownloader(
-            DownloadPolicy(max_workers=16), progress_observer=lambda msg: print(msg, flush=True)
-        ).download(plan, Workspace(directory))
+    if args.method.startswith("downloader"):
+        workers = {"downloader-4": 4, "downloader-1": 1}.get(args.method, 16)
+        with ExitStack() as changes:
+            # Controlled diagnostic probes; these overrides never affect production runs.
+            if args.method == "downloader-buffered":
+                original_iter_raw = httpx.Response.iter_raw
+
+                def buffered_raw(
+                    response: httpx.Response, chunk_size: int | None = None
+                ) -> Iterator[bytes]:
+                    yield from original_iter_raw(response, chunk_size=MIB)
+
+                changes.enter_context(patch.object(httpx.Response, "iter_raw", buffered_raw))
+            if args.method == "downloader-no-progress":
+                changes.enter_context(patch.object(_DownloadProgress, "update", ignore_progress))
+                changes.enter_context(patch.object(_DownloadProgress, "completed", ignore_progress))
+            result = ArtifactDownloader(
+                DownloadPolicy(max_workers=workers),
+                progress_observer=lambda msg: print(msg, flush=True),
+            ).download(plan, Workspace(directory))
         digests = {item.artifact.artifact_id: item.blob_sha256 for item in result.artifacts}
         details = {
             "parallel_range_artifacts": sum(
@@ -235,7 +273,8 @@ def benchmark(args: argparse.Namespace) -> None:
         reference: dict[str, str] | None = None
         for repeat in range(args.repeats):
             # Rotate order so a warmed CDN or a changing route cannot consistently favor one tool.
-            methods = METHODS[repeat % len(METHODS) :] + METHODS[: repeat % len(METHODS)]
+            choices = DIAGNOSTIC_METHODS if args.diagnose else METHODS
+            methods = choices[repeat % len(choices) :] + choices[: repeat % len(choices)]
             for method in methods:
                 label = f"{case}-{repeat + 1}-{method}"
                 work = root / label
@@ -338,9 +377,12 @@ def main() -> None:
     run.add_argument("--work", type=Path, required=True)
     run.add_argument("--reports", type=Path, required=True)
     run.add_argument("--repeats", type=int, choices=(1, 2, 3), default=2)
+    run.add_argument("--diagnose", action="store_true")
     run.set_defaults(handler=benchmark)
     child = subparsers.add_parser("worker")
-    child.add_argument("--method", choices=METHODS, required=True)
+    child.add_argument(
+        "--method", choices=tuple(dict.fromkeys(METHODS + DIAGNOSTIC_METHODS)), required=True
+    )
     child.add_argument("--plan", type=Path, required=True)
     child.add_argument("--work", type=Path, required=True)
     child.add_argument("--result", type=Path, required=True)
