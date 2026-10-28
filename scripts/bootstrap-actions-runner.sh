@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This file is embedded into cloud-init by runner_lifecycle.py. The provisioner
+# This file is uploaded over one-time SSH by runner_lifecycle.py. The provisioner
 # prepends the required values as shell-safe variables. All JIT configurations
 # are consumed once and never passed through service-unit arguments.
 
@@ -22,6 +22,33 @@ readonly RUNNER_ARCHIVE=/tmp/actions-runner.tar.gz
 echo 'gup-bootstrap: arming four-hour emergency self-destruct timer'
 systemctl daemon-reload
 systemctl enable --now gup-emergency-self-destruct.timer
+
+# Establish egress-only networking before any runner or job receives credentials.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install --yes --no-install-recommends nftables python3 curl sudo ca-certificates
+cat >/etc/nftables.conf <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+table inet gup {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+    # IPv6 neighbour discovery and path MTU are required for working egress.
+    meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert, packet-too-big, destination-unreachable, time-exceeded } accept
+  }
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output { type filter hook output priority 0; policy accept; }
+}
+EOF
+nft --check --file /etc/nftables.conf
+systemctl enable --now nftables
+# Revoke the bootstrap key and password login; runtime jobs need no SSH ingress.
+rm -f /root/.ssh/authorized_keys
+install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' 'PasswordAuthentication no' 'PermitRootLogin no' >/etc/ssh/sshd_config.d/00-gup.conf
+systemctl disable ssh.socket ssh.service
 
 echo "gup-bootstrap: downloading GitHub Actions Runner ${RUNNER_VERSION}"
 install -d -m 0755 "${RUNNER_TEMPLATE_DIR}" "${RUNNERS_ROOT}"
@@ -212,4 +239,6 @@ systemctl enable --now \
   github-actions-runner-wot-src.service \
   github-actions-runner-wotstat-assets.service
 rm -f /usr/local/sbin/bootstrap-actions-runner
+systemd-run --unit=gup-close-ssh --on-active=15s /bin/systemctl stop ssh.socket ssh.service
+touch /run/gup-bootstrap.ready
 echo 'gup-bootstrap: downloader, wot-src, wot-gui-assets and wotstat-assets runner services started'

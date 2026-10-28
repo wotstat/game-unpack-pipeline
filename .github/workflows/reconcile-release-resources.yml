@@ -25,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: selectel-reconciliation-${{ inputs.source_run_id || github.event.workflow_run.id }}-${{ inputs.source_run_attempt || github.event.workflow_run.run_attempt }}
+  group: aeza-reconciliation-${{ inputs.source_run_id || github.event.workflow_run.id }}-${{ inputs.source_run_attempt || github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: selectel
+    environment: aeza
     outputs:
       deleted_count: ${{ steps.cleanup.outputs.deleted_count }}
     env:
@@ -59,67 +59,17 @@ jobs:
           repositories: game-unpack-pipeline
           permission-administration: write
 
-      - name: Install OpenStack CLI
-        uses: ./.github/actions/setup-openstack
-
       - name: Reconcile resources by deterministic ownership markers
         id: cleanup
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
-          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
-          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
-          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
         run: |
           set -Eeuo pipefail
-          instance_key="manual-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
-          cleanup_failed=0
-          deleted_count=0
-          for selectel_region in ru-7 ru-3 ru-9 ru-6 ru-8 ru-2; do
-            export SELECTEL_OS_REGION_NAME="${selectel_region}"
-            export SELECTEL_PUBLIC_NETWORK_API_URL="https://${selectel_region}.cloud.api.selcloud.ru/public-network"
-            region_output="$(mktemp "${RUNNER_TEMP}/reconcile-${selectel_region}.XXXXXX")"
-            if ! env GITHUB_OUTPUT="${region_output}" python3 scripts/runner_lifecycle.py cleanup \
-              --instance-key "${instance_key}" \
-              --run-id "${SOURCE_RUN_ID}" \
-              --run-attempt "${SOURCE_RUN_ATTEMPT}" \
-              --credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8 ru-2 \
-              --diagnostics; then
-              cleanup_failed=1
-            fi
-            region_deleted="$(sed -n 's/^deleted_count=//p' "${region_output}" | tail -n 1)"
-            if [[ "${region_deleted}" =~ ^[0-9]+$ ]]; then
-              deleted_count=$((deleted_count + region_deleted))
-            fi
-          done
-          echo "deleted_count=${deleted_count}" >>"${GITHUB_OUTPUT}"
-          exit "${cleanup_failed}"
-
-  retry-preempted:
-    name: Retry confirmed VM preemption
-    needs: reconcile
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Check out retry controller from main
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: main
-
-      - name: Retry source attempt after successful reconciliation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id || github.event.workflow_run.id }}
-          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt || github.event.workflow_run.run_attempt }}
-        run: >-
-          python3 -m scripts.selectel_attempt retry
-          --run-id "${SOURCE_RUN_ID}"
-          --run-attempt "${SOURCE_RUN_ATTEMPT}"
+          python3 scripts/runner_lifecycle.py cleanup \
+            --instance-key "manual-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}" \
+            --run-id "${SOURCE_RUN_ID}" \
+            --run-attempt "${SOURCE_RUN_ATTEMPT}"
 
   notify-recovery:
     name: Telegram recovery alert

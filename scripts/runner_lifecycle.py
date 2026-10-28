@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Provision and clean one Selectel VM with isolated GitHub Actions JIT runners.
-
-The script deliberately keeps all cloud mutations behind explicit subcommands.
-Importing it and running its unit tests never contacts Selectel or GitHub.
-"""
+"""Provision and reconcile one hourly Aeza VM and four isolated JIT runners."""
 
 from __future__ import annotations
 
 import argparse
-import base64
+import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -23,23 +20,477 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
-EMERGENCY_SELF_DESTRUCT_AFTER = timedelta(hours=4)
-EMERGENCY_CREDENTIAL_RETRY_GRACE = timedelta(hours=1)
-SELECTEL_RETRY_DELAYS = (5, 15, 30)
+AEZA_API_URL = "https://my.aeza.net/api/v2"
+AEZA_PRODUCT_ID = 157
+AEZA_PRODUCT_NAME = "MSKs-5"
+AEZA_RETRY_DELAYS = (5, 15, 30)
 TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
-UUID_RE = re.compile(
-    r"^(?:[0-9a-fA-F]{32}|"
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
-)
+ROLES = ("downloader", "wot-src", "wot-gui-assets", "wotstat-assets")
+
+
+@dataclass(frozen=True)
+class AezaConfig:
+    api_key: str = field(repr=False)
+
+    @classmethod
+    def from_environment(cls) -> AezaConfig:
+        return cls(require_environment("AEZA_API_KEY"))
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Mapping[str, Any] | None = None,
+        expected_statuses: Sequence[int] = (200,),
+    ) -> tuple[int, Any, Mapping[str, str]]:
+        return http_json(
+            method,
+            f"{AEZA_API_URL}/{path.lstrip('/')}",
+            token=self.api_key,
+            body=body,
+            expected_statuses=expected_statuses,
+        )
+
+
+def aeza_items(config: AezaConfig, path: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        separator = "&" if "?" in path else "?"
+        _, payload, _ = config.request("GET", f"{path}{separator}limit=100&offset={offset}")
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise LifecycleError("Aeza returned an invalid list")
+        page = payload["items"]
+        if not all(isinstance(item, dict) for item in page):
+            raise LifecycleError("Aeza returned an invalid list item")
+        items.extend(page)
+        offset += len(page)
+        if offset >= int(payload.get("total", offset)):
+            return items
+        if not page:
+            raise LifecycleError("Aeza pagination stopped before total")
+
+
+def preflight(config: AezaConfig) -> None:
+    products = aeza_items(config, "services/products")
+    matches = [p for p in products if p.get("id") == AEZA_PRODUCT_ID]
+    if len(matches) != 1 or matches[0].get("name") != AEZA_PRODUCT_NAME:
+        raise LifecycleError("Aeza MSKs-5 product identity changed")
+    product = matches[0]
+    if product.get("isAvailable") is not True or product.get("groupId") != 2:
+        raise LifecycleError("Aeza Moscow Shared MSKs-5 is unavailable")
+    _, price, _ = config.request(
+        "GET", f"services/orders/price?productId={AEZA_PRODUCT_ID}&paymentTerm=hour&termCount=1"
+    )
+    # Prices are euro cents. Refuse unexpected upgrades or a price increase.
+    if not isinstance(price, dict) or not 0 < price.get("totalPrice", 0) <= 53:
+        raise LifecycleError("Aeza hourly quote exceeds EUR 0.53")
+    if price.get("availability", {}).get("status") != "ok":
+        raise LifecycleError("Aeza hourly VM capacity is unavailable")
+    _, account, _ = config.request("GET", "accounts/me")
+    if not isinstance(account, dict) or account.get("balance", 0) < 4 * price["totalPrice"]:
+        raise LifecycleError("Aeza balance cannot cover the four-hour VM lifetime")
+    _, limits, _ = config.request("GET", "services/limits")
+    for limit in limits.get("items", []):
+        if (2 in limit.get("groupIds", []) or "hour" in limit.get("paymentTerms", [])) and (
+            limit.get("used", 0) >= limit.get("available", 0)
+        ):
+            raise LifecycleError("Aeza shared/hourly account limit has no free capacity")
+    print("Preflight: Moscow Shared MSKs-5, 16 vCPU / 32 GiB / 480 GB, EUR 0.53/hour")
+
+
+def server_has_ownership_markers(server: Mapping[str, Any], identity: ResourceIdentity) -> bool:
+    product = server.get("product")
+    product_id = product.get("id") if isinstance(product, dict) else None
+    return (
+        server.get("name") == identity.server_name
+        and server.get("productId", product_id) == AEZA_PRODUCT_ID
+        and server.get("paymentTerm") == "hour"
+    )
+
+
+def owned_servers(config: AezaConfig, identity: ResourceIdentity) -> list[dict[str, Any]]:
+    candidates = aeza_items(config, "services")
+    return [
+        item
+        for item in candidates
+        if server_has_ownership_markers(item, identity) and item.get("status") != "deleted"
+    ]
+
+
+def create_server(config: AezaConfig, identity: ResourceIdentity, ssh_key_id: str) -> str:
+    if any(item.get("name") == identity.server_name for item in aeza_items(config, "services")):
+        raise LifecycleError("An Aeza service with this attempt name already exists")
+    # Never replay an order, including after 502 or a lost response. Cleanup
+    # discovers the resulting VM by the repository hash and exact run/attempt.
+    config.request(
+        "POST",
+        "services/orders",
+        body={
+            "method": "balance",
+            "orders": [
+                {
+                    "productId": AEZA_PRODUCT_ID,
+                    "count": 1,
+                    "name": identity.server_name,
+                    "term": "hour",
+                    "termCount": 1,
+                    "autoProlong": True,
+                    "parameters": {"os": "ubuntu_2404"},
+                    "sshKeyIds": [int(ssh_key_id)],
+                }
+            ],
+        },
+    )
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        matches = owned_servers(config, identity)
+        if len(matches) > 1:
+            raise LifecycleError("Multiple Aeza services match one attempt")
+        if matches:
+            return str(matches[0]["id"])
+        time.sleep(5)
+    raise LifecycleError("Aeza order not visible; reconcile this attempt before retrying")
+
+
+def get_server(config: AezaConfig, server_id: str) -> dict[str, Any] | None:
+    if not re.fullmatch(r"[1-9][0-9]*", server_id):
+        raise LifecycleError("Invalid Aeza service ID")
+    status, server, _ = config.request("GET", f"services/{server_id}", expected_statuses=(200, 404))
+    if status == 404:
+        return None
+    if not isinstance(server, dict):
+        raise LifecycleError("Aeza returned an invalid service")
+    return server
+
+
+def wait_for_server_active(config: AezaConfig, identity: ResourceIdentity, server_id: str) -> str:
+    deadline = time.monotonic() + 420
+    while time.monotonic() < deadline:
+        server = get_server(config, server_id)
+        if server is None or not server_has_ownership_markers(server, identity):
+            raise LifecycleError("Aeza VM disappeared or ownership does not match")
+        if server.get("status") in {"blocked", "suspended", "deleted"}:
+            raise LifecycleError("Aeza VM entered an unusable state")
+        if server.get("status") == "active" and server.get("ip"):
+            address = ipaddress.ip_address(server["ip"])
+            if not address.is_global:
+                raise LifecycleError("Aeza VM address is not public")
+            return str(address)
+        time.sleep(5)
+    raise LifecycleError("Aeza VM activation timed out")
+
+
+def delete_servers(
+    config: AezaConfig,
+    identity: ResourceIdentity,
+    server_id: str = "",
+    *,
+    deleted_resources: list[str],
+) -> None:
+    candidates = {str(item["id"]) for item in owned_servers(config, identity)}
+    if server_id:
+        candidates.add(server_id)
+    for candidate in sorted(candidates):
+        server = get_server(config, candidate)
+        if server is None or server.get("status") == "deleted":
+            continue
+        if not server_has_ownership_markers(server, identity):
+            raise LifecycleError("Refusing to delete Aeza VM: ownership markers do not match")
+        # DELETE may have succeeded; confirm state instead of assuming it.
+        with suppress(TransientLifecycleError):
+            config.request("DELETE", f"services/{candidate}", expected_statuses=(204, 404))
+        deadline = time.monotonic() + 240
+        while time.monotonic() < deadline:
+            current = get_server(config, candidate)
+            if current is None or current.get("status") == "deleted":
+                deleted_resources.append(f"aeza-service:{candidate}")
+                break
+            if not server_has_ownership_markers(current, identity):
+                raise LifecycleError("Aeza VM ownership changed while deleting")
+            time.sleep(5)
+        else:
+            raise LifecycleError("Aeza deletion is not confirmed; billing may still be active")
+
+
+def delete_ssh_keys(config: AezaConfig, identity: ResourceIdentity, deleted: list[str]) -> None:
+    for key in aeza_items(config, "services/ssh-keys"):
+        if key.get("name") != identity.base_name:
+            continue
+        if not str(key.get("publicKey", "")).endswith(" " + identity.descriptor):
+            raise LifecycleError("Refusing to delete SSH key with mismatched ownership")
+        status, _, _ = config.request(
+            "DELETE", f"services/ssh-keys/{int(key['id'])}", expected_statuses=(204, 404)
+        )
+        if status == 204:
+            deleted.append(f"aeza-ssh-key:{key['id']}")
+
+
+def render_bootstrap(
+    identity: ResourceIdentity,
+    config: AezaConfig,
+    server_id: str,
+    deadline: datetime,
+    runner_package: tuple[str, str, str],
+    jit_configs: Mapping[str, str],
+) -> str:
+    import base64
+
+    if set(jit_configs) != set(ROLES) or deadline.tzinfo is None:
+        raise LifecycleError("Bootstrap requires four JIT configurations and an absolute deadline")
+    url, digest, version = runner_package
+    assignments = {
+        "RUNNER_DOWNLOAD_URL": url,
+        "RUNNER_SHA256": digest,
+        "RUNNER_VERSION": version,
+        **{
+            role.replace("-", "_").upper() + "_RUNNER_JIT_CONFIG": jit_configs[role]
+            for role in ROLES
+        },
+    }
+    template = Path(__file__).with_name("bootstrap-actions-runner.sh").read_text()
+    bootstrap = (
+        "#!/bin/bash\n"
+        + "\n".join(f"{name}={shlex.quote(value)}" for name, value in assignments.items())
+        + "\n"
+        + template
+    )
+    timer = f"""[Unit]
+Description=Four-hour Aeza VM lifetime
+[Timer]
+OnCalendar={deadline.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}
+AccuracySec=1s
+Persistent=true
+Unit=gup-emergency-self-destruct.service
+[Install]
+WantedBy=timers.target
+"""
+    service = """[Unit]
+Description=Delete expired Aeza VM
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/gup-emergency-self-destruct \\
+  --config /etc/gup-emergency-self-destruct.json
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=120s
+"""
+    files = {
+        "/usr/local/sbin/bootstrap-actions-runner": bootstrap,
+        "/usr/local/sbin/gup-emergency-self-destruct": Path(__file__)
+        .with_name("emergency_self_destruct.py")
+        .read_text(),
+        "/etc/gup-emergency-self-destruct.json": json.dumps(
+            {
+                "api_key": config.api_key,
+                "server_id": server_id,
+                "server_name": identity.server_name,
+                "product_id": AEZA_PRODUCT_ID,
+            }
+        ),
+        "/etc/systemd/system/gup-emergency-self-destruct.service": service,
+        "/etc/systemd/system/gup-emergency-self-destruct.timer": timer,
+    }
+    # SSH carries files over stdin; neither credentials nor JIT data enter argv,
+    # provider user-data, artifacts, or command output.
+    encoded = base64.b64encode(json.dumps(files).encode()).decode()
+    return f"""#!/bin/bash
+set -Eeuo pipefail
+umask 077
+python3 - <<'PY'
+import base64,json,os
+for path, content in json.loads(base64.b64decode('{encoded}')).items():
+    with open(path, 'w') as stream:
+        os.chmod(path, 0o600)
+        stream.write(content)
+PY
+systemctl daemon-reload
+systemctl enable --now gup-emergency-self-destruct.timer
+systemd-run --unit=gup-bootstrap --property=Type=exec \\
+  /bin/bash /usr/local/sbin/bootstrap-actions-runner
+while [[ ! -f /run/gup-bootstrap.ready ]]; do
+  if systemctl is-failed --quiet gup-bootstrap; then
+    journalctl --unit=gup-bootstrap --no-pager --lines=60
+    exit 1
+  fi
+  sleep 5
+done
+"""
+
+
+def ssh_bootstrap(
+    address: str, private_key: Path, payload: str, *, sensitive_values: Iterable[str] = ()
+) -> None:
+    deadline = time.monotonic() + 180
+    command = [
+        "ssh",
+        "-i",
+        str(private_key),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"UserKnownHostsFile={private_key.parent / 'known_hosts'}",
+        "-o",
+        "ConnectTimeout=10",
+        f"root@{address}",
+    ]
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [*command, "true"], capture_output=True, text=True, timeout=20, check=False
+        )
+        if result.returncode == 0:
+            break
+        if "REMOTE HOST IDENTIFICATION HAS CHANGED" in result.stderr:
+            raise LifecycleError("Aeza SSH host key changed")
+        time.sleep(5)
+    else:
+        raise LifecycleError("Aeza SSH readiness timed out")
+    # Submit secret files once. A lost response cannot safely replay JIT configs.
+    result = subprocess.run(
+        [*command, "bash -s"],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    if result.returncode:
+        details = sanitized(result.stdout + result.stderr, sensitive_values)[-6000:]
+        raise LifecycleError(f"Aeza bootstrap failed; reconcile before retrying: {details}")
+
+
+def provision(arguments: argparse.Namespace) -> None:
+    config = AezaConfig.from_environment()
+    identity = build_identity(arguments.instance_key)
+    app_token = require_environment("GITHUB_APP_TOKEN")
+    public_token = require_environment("GITHUB_PUBLIC_TOKEN")
+    add_mask(config.api_key)
+    write_output("resource_key", identity.instance_key)
+    write_output("server_name", identity.server_name)
+    write_output("runner_scope_label", identity.scope_label)
+    for role in ROLES:
+        runner = identity.runner(role)
+        write_output(role.replace("-", "_") + "_runner_name", runner.name)
+        write_output(role.replace("-", "_") + "_runner_label", runner.label)
+    preflight(config)
+    package = resolve_runner_package(app_token, public_token)
+    write_output("runner_version", package[2])
+    deadline = (datetime.now(UTC) + timedelta(hours=4)).replace(microsecond=0)
+    write_output("emergency_self_destruct_at", deadline.isoformat())
+    with tempfile.TemporaryDirectory(prefix="gup-aeza-") as temporary:
+        private_key = Path(temporary) / "id_ed25519"
+        run_command(
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                identity.descriptor,
+                "-f",
+                str(private_key),
+            ]
+        )
+        _, key, _ = config.request(
+            "POST",
+            "services/ssh-keys",
+            body={
+                "name": identity.base_name,
+                "publicKey": private_key.with_suffix(".pub").read_text().strip(),
+                "autoAssign": False,
+            },
+            expected_statuses=(200, 201),
+        )
+        key_id = str(key["id"])
+        write_output("ssh_key_id", key_id)
+        server_id = create_server(config, identity, key_id)
+        write_output("server_id", server_id)
+        address = wait_for_server_active(config, identity, server_id)
+        configs: dict[str, str] = {}
+        runners: dict[str, str] = {}
+        for role in ROLES:
+            runner_id, jit = create_jit_runner(identity.runner(role), app_token)
+            configs[role] = jit
+            runners[role] = runner_id
+            write_output(role.replace("-", "_") + "_runner_id", runner_id)
+        ssh_bootstrap(
+            address,
+            private_key,
+            render_bootstrap(identity, config, server_id, deadline, package, configs),
+            sensitive_values=(config.api_key, *configs.values()),
+        )
+        online_deadline = time.monotonic() + int(
+            os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")
+        )
+        for role in ROLES:
+            wait_for_runner_online(
+                identity.runner(role),
+                runners[role],
+                app_token,
+                max(1, int(online_deadline - time.monotonic())),
+            )
+    append_summary("## Ephemeral Aeza runner")
+    append_summary("- Moscow Shared MSKs-5; hourly billing")
+    append_summary(f"- Emergency deletion deadline: `{deadline.isoformat()}`")
+
+
+def cleanup(arguments: argparse.Namespace) -> None:
+    config = AezaConfig.from_environment()
+    identity = build_identity(
+        arguments.instance_key, run_id=arguments.run_id, run_attempt=arguments.run_attempt
+    )
+    app_token = require_environment("GITHUB_APP_TOKEN")
+    failures: list[str] = []
+    deleted: list[str] = []
+    # Delete billed resources first. One failed GitHub call must never prevent
+    # the cloud cleanup, and a cloud failure must not skip runner cleanup.
+    try:
+        delete_servers(config, identity, arguments.server_id, deleted_resources=deleted)
+    except Exception as error:  # continue every cleanup despite a malformed provider response
+        failures.append(str(error) if isinstance(error, LifecycleError) else type(error).__name__)
+    else:
+        try:
+            delete_ssh_keys(config, identity, deleted)
+        except Exception as error:
+            failures.append(
+                str(error) if isinstance(error, LifecycleError) else type(error).__name__
+            )
+    for role in ROLES:
+        try:
+            delete_github_runners(
+                identity.runner(role),
+                app_token,
+                getattr(arguments, role.replace("-", "_") + "_runner_id"),
+                deleted_resources=deleted,
+            )
+        except Exception as error:
+            failures.append(
+                str(error) if isinstance(error, LifecycleError) else type(error).__name__
+            )
+    write_output("deleted_count", len(deleted))
+    append_summary(f"- Resources deleted: `{len(deleted)}`")
+    if failures:
+        raise LifecycleError("Cleanup incomplete: " + " | ".join(failures))
+    print("Cleanup confirmed: Aeza service deleted and runner registrations removed")
 
 
 class LifecycleError(RuntimeError):
@@ -48,14 +499,6 @@ class LifecycleError(RuntimeError):
 
 class TransientLifecycleError(LifecycleError):
     """An API failure with an unknown result; replay only safe operations."""
-
-
-class PreemptedLifecycleError(LifecycleError):
-    """An owned, tagged VM with a local boot disk was offloaded by Selectel."""
-
-    def __init__(self, created_at: str | None = None) -> None:
-        super().__init__("Selectel preempted the temporary VM; its local disk was lost")
-        self.created_at = created_at
 
 
 def validate_repository(value: str) -> str:
@@ -95,19 +538,12 @@ class ResourceIdentity:
 
     @property
     def base_name(self) -> str:
-        return f"gup-{self.instance_key}"
+        repository_hash = hashlib.sha256(self.repository.encode()).hexdigest()[:10]
+        return f"gup-{repository_hash}-{self.instance_key}"
 
     @property
     def server_name(self) -> str:
         return self.base_name
-
-    @property
-    def security_group_name(self) -> str:
-        return f"{self.base_name}-sg"
-
-    @property
-    def emergency_credential_name(self) -> str:
-        return f"{self.base_name}-self-destruct"
 
     @property
     def scope_label(self) -> str:
@@ -120,10 +556,6 @@ class ResourceIdentity:
             f"run_attempt={self.run_attempt};instance_key={self.instance_key}"
         )
 
-    @property
-    def emergency_credential_description(self) -> str:
-        return f"{self.descriptor};purpose=emergency-self-destruct"
-
     def runner(self, role: str) -> RunnerIdentity:
         name = f"{self.base_name}-{role}"
         return RunnerIdentity(
@@ -135,84 +567,6 @@ class ResourceIdentity:
         )
 
 
-@dataclass(frozen=True)
-class SelectelConfig:
-    auth_url: str
-    username: str
-    password: str
-    user_domain_name: str
-    project_id: str
-    region_name: str
-    availability_zone: str
-    image_id: str
-    flavor_id: str
-    public_network_api_url: str
-    preemptible: bool = False
-
-    @classmethod
-    def from_environment(cls, *, require_compute: bool = True) -> SelectelConfig:
-        required = {
-            "SELECTEL_OS_AUTH_URL": "auth_url",
-            "SELECTEL_OS_USERNAME": "username",
-            "SELECTEL_OS_PASSWORD": "password",
-            "SELECTEL_OS_USER_DOMAIN_NAME": "user_domain_name",
-            "SELECTEL_OS_PROJECT_ID": "project_id",
-            "SELECTEL_OS_REGION_NAME": "region_name",
-            "SELECTEL_PUBLIC_NETWORK_API_URL": "public_network_api_url",
-        }
-        if require_compute:
-            required.update(
-                {
-                    "SELECTEL_AVAILABILITY_ZONE": "availability_zone",
-                    "SELECTEL_IMAGE_ID": "image_id",
-                    "SELECTEL_FLAVOR_ID": "flavor_id",
-                }
-            )
-
-        values: dict[str, str] = {}
-        missing: list[str] = []
-        for environment_name, field_name in required.items():
-            value = os.environ.get(environment_name, "").strip()
-            if not value:
-                missing.append(environment_name)
-            values[field_name] = value
-        if missing:
-            raise LifecycleError(f"Missing configuration: {', '.join(sorted(missing))}")
-
-        values.setdefault("availability_zone", "")
-        values.setdefault("image_id", "")
-        values.setdefault("flavor_id", "")
-
-        if not UUID_RE.fullmatch(values["project_id"]):
-            raise LifecycleError("SELECTEL_OS_PROJECT_ID must be a UUID")
-        for url_field in ("auth_url", "public_network_api_url"):
-            parsed = urllib.parse.urlparse(values[url_field])
-            if parsed.scheme != "https" or not parsed.netloc:
-                raise LifecycleError(f"{url_field} must be an HTTPS URL")
-
-        preemptible = os.environ.get("SELECTEL_PREEMPTIBLE", "false").lower()
-        if preemptible not in {"true", "false"}:
-            raise LifecycleError("SELECTEL_PREEMPTIBLE must be true or false")
-        return cls(**values, preemptible=preemptible == "true")
-
-    def openstack_environment(self) -> dict[str, str]:
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "OS_AUTH_URL": self.auth_url,
-                "OS_IDENTITY_API_VERSION": "3",
-                "OS_VOLUME_API_VERSION": "3",
-                "OS_PROJECT_DOMAIN_NAME": self.user_domain_name,
-                "OS_PROJECT_ID": self.project_id,
-                "OS_REGION_NAME": self.region_name,
-                "OS_USER_DOMAIN_NAME": self.user_domain_name,
-                "OS_USERNAME": self.username,
-                "OS_PASSWORD": self.password,
-            }
-        )
-        return environment
-
-
 def validate_instance_key(value: str) -> str:
     if not INSTANCE_KEY_RE.fullmatch(value):
         raise LifecycleError(
@@ -220,10 +574,6 @@ def validate_instance_key(value: str) -> str:
             "it must start and end with a letter or digit"
         )
     return value
-
-
-def normalized_uuid(value: str) -> str:
-    return value.replace("-", "").lower()
 
 
 def require_environment(name: str) -> str:
@@ -234,7 +584,7 @@ def require_environment(name: str) -> str:
 
 
 def add_mask(value: str) -> None:
-    if value:
+    if value and os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::add-mask::{value}")
 
 
@@ -259,7 +609,18 @@ def append_summary(line: str) -> None:
 
 def sanitized(text: str, sensitive_values: Iterable[str] = ()) -> str:
     result = text
-    for value in sensitive_values:
+    for value in (
+        *sensitive_values,
+        *(
+            os.environ.get(name, "")
+            for name in (
+                "AEZA_API_KEY",
+                "GITHUB_APP_TOKEN",
+                "GITHUB_PUBLIC_TOKEN",
+                "GITHUB_WATCH_TOKEN",
+            )
+        ),
+    ):
         if value:
             result = result.replace(value, "***")
     result = re.sub(r"github_pat_[A-Za-z0-9_]+", "***", result)
@@ -301,168 +662,6 @@ def run_command(
     return result
 
 
-def openstack(
-    config: SelectelConfig,
-    arguments: Sequence[str],
-    *,
-    check: bool = True,
-    timeout: int = 180,
-    sensitive_values: Iterable[str] = (),
-) -> subprocess.CompletedProcess[str]:
-    # Creation is not idempotent. Only reads and authentication can be replayed here.
-    safe_prefixes = {
-        ("token", "issue"),
-        ("image", "show"),
-        ("flavor", "show"),
-        ("server", "list"),
-        ("server", "show"),
-        ("port", "show"),
-        ("availability", "zone", "list"),
-        ("security", "group", "list"),
-        ("security", "group", "show"),
-        ("security", "group", "rule", "list"),
-        ("application", "credential", "list"),
-        ("application", "credential", "show"),
-    }
-    retry_safe = any(tuple(arguments[: len(prefix)]) == prefix for prefix in safe_prefixes)
-    retry_delays = SELECTEL_RETRY_DELAYS if retry_safe else ()
-    deadline = time.monotonic() + timeout
-    for attempt in range(len(retry_delays) + 1):
-        try:
-            result = run_command(
-                ["openstack", *arguments],
-                environment=config.openstack_environment(),
-                check=False,
-                timeout=max(
-                    1, min(60 if retry_safe else timeout, int(deadline - time.monotonic()))
-                ),
-                sensitive_values=sensitive_values,
-            )
-        except LifecycleError as error:
-            if not isinstance(error.__cause__, subprocess.TimeoutExpired):
-                raise
-            failure: LifecycleError = TransientLifecycleError("OpenStack request timed out")
-        else:
-            if result.returncode == 0:
-                return result
-            details = sanitized(result.stderr.strip() or result.stdout.strip(), sensitive_values)
-            transient = bool(
-                re.search(
-                    r"HTTP(?:/\S+)?\s*[:(]?\s*(?:408|429|500|502|503|504)\b|"
-                    r"\b(?:RequestTimeout|TooManyRequests|InternalServerError|BadGateway|"
-                    r"ServiceUnavailable|GatewayTimeout)\b|"
-                    r"UNEXPECTED_EOF_WHILE_READING|EOF occurred in violation of protocol|"
-                    r"connection (?:reset|aborted|refused)|remote end closed connection|"
-                    r"(?:connect|read)\s*timed?\s*out|readtimeout|connecttimeout|"
-                    r"temporary failure in name resolution|failed to establish a new connection",
-                    details,
-                    re.IGNORECASE,
-                )
-            )
-            if not transient and not check:
-                return result
-            error_type = TransientLifecycleError if transient else LifecycleError
-            failure = error_type(
-                f"Command {shlex.join(['openstack', *arguments][:4])} "
-                f"failed with {result.returncode}: {details}"
-            )
-            if not transient:
-                raise failure
-        if attempt == len(retry_delays) or time.monotonic() + retry_delays[attempt] >= deadline:
-            # check=False must not turn an unavailable API into "resource absent".
-            raise failure
-        delay = retry_delays[attempt]
-        print(f"::warning::Temporary OpenStack API failure; retry {attempt + 1}/3 in {delay}s")
-        time.sleep(delay)
-    raise AssertionError("unreachable")
-
-
-def parse_json_output(result: subprocess.CompletedProcess[str], operation: str) -> Any:
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise LifecycleError(f"{operation} returned invalid JSON") from error
-
-
-def openstack_resource_missing(details: str) -> bool:
-    return (
-        re.search(
-            r"\bHTTP(?:/\S+)?\s*[:(]?\s*404\b|"
-            r"\bNo (?:Server|SecurityGroup|Security Group|ApplicationCredential|"
-            r"Application Credential)\b[^\n]*(?:found|exists)\b",
-            details,
-            re.IGNORECASE,
-        )
-        is not None
-    )
-
-
-def delete_openstack_resource(
-    config: SelectelConfig,
-    resource: Sequence[str],
-    resource_id: str,
-    *,
-    check: bool = True,
-    timeout: int = 180,
-) -> subprocess.CompletedProcess[str] | None:
-    """Retry deletion of an ownership-checked UUID; None means confirmed absent after an error."""
-    deadline = time.monotonic() + timeout
-    for attempt in range(len(SELECTEL_RETRY_DELAYS) + 1):
-        remaining = max(1, min(60, int(deadline - time.monotonic())))
-        try:
-            result = openstack(
-                config, [*resource, "delete", resource_id], check=False, timeout=remaining
-            )
-            if result.returncode != 0:
-                details = sanitized(
-                    result.stderr.strip() or result.stdout.strip(), [config.password]
-                )
-                if openstack_resource_missing(details):
-                    # An asynchronous delete can finish during the retry backoff.
-                    return None
-                if check:
-                    raise LifecycleError(f"OpenStack resource deletion failed: {details}")
-            return result
-        except TransientLifecycleError as error:
-            # The DELETE may have succeeded before the connection broke. Check that exact UUID
-            # before replaying it; failure to read is never evidence that deletion succeeded.
-            if time.monotonic() >= deadline:
-                raise
-            shown = openstack(
-                config,
-                [*resource, "show", resource_id],
-                check=False,
-                timeout=max(1, min(60, int(deadline - time.monotonic()))),
-            )
-            if shown.returncode != 0:
-                details = shown.stderr.strip() or shown.stdout.strip()
-                if openstack_resource_missing(details):
-                    print("Resource confirmed absent after ambiguous OpenStack deletion")
-                    return None
-                raise LifecycleError(
-                    "Could not confirm resource state after failed deletion"
-                ) from error
-            if attempt == len(SELECTEL_RETRY_DELAYS):
-                raise
-            delay = SELECTEL_RETRY_DELAYS[attempt]
-            if time.monotonic() + delay >= deadline:
-                raise
-            print(
-                "::warning::Temporary OpenStack deletion failure; "
-                f"resource still exists, retry in {delay}s"
-            )
-            time.sleep(delay)
-    raise AssertionError("unreachable")
-
-
-def object_value(value: Mapping[str, Any], *names: str) -> Any:
-    lowered = {str(key).lower(): item for key, item in value.items()}
-    for name in names:
-        if name.lower() in lowered:
-            return lowered[name.lower()]
-    raise LifecycleError(f"Response does not contain any of: {', '.join(names)}")
-
-
 def http_json(
     method: str,
     url: str,
@@ -483,13 +682,13 @@ def http_json(
         if github_api:
             headers["Authorization"] = f"Bearer {token}"
         else:
-            headers["X-Auth-Token"] = token
+            headers["X-API-KEY"] = token
     if github_api:
         headers["Accept"] = "application/vnd.github+json"
         headers["X-GitHub-Api-Version"] = GITHUB_API_VERSION
 
     retry_delays = (
-        ((1, 3) if github_api else SELECTEL_RETRY_DELAYS)
+        ((1, 3) if github_api else AEZA_RETRY_DELAYS)
         if method in {"DELETE", "GET", "HEAD"} or retry_safe
         else ()
     )
@@ -510,12 +709,12 @@ def http_json(
                 if transient and not github_api and attempt < len(retry_delays):
                     delay = retry_delays[attempt]
                     print(
-                        f"::warning::Temporary Selectel HTTP {status}; "
+                        f"::warning::Temporary Aeza HTTP {status}; "
                         f"retry {attempt + 1}/3 in {delay}s"
                     )
                     time.sleep(delay)
                     continue
-                details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
+                details = "request rejected"
                 error_type = TransientLifecycleError if transient else LifecycleError
                 raise error_type(f"{method} {url} returned HTTP {status}: {details}") from error
             break
@@ -529,11 +728,11 @@ def http_json(
                 )
                 time.sleep(retry_delays[attempt])
                 continue
-            reason = getattr(error, "reason", None) or str(error) or type(error).__name__
+            reason = type(error).__name__
             raise TransientLifecycleError(f"{method} {url} failed: {reason}") from error
 
     if status not in expected_statuses:
-        details = sanitized(raw.decode("utf-8", errors="replace"))[:2000]
+        details = "request rejected"
         raise LifecycleError(f"{method} {url} returned HTTP {status}: {details}")
     if not raw:
         payload: Any = None
@@ -547,192 +746,6 @@ def http_json(
 
 def github_url(path: str) -> str:
     return f"{require_environment('GITHUB_API_URL').rstrip('/')}/{path.lstrip('/')}"
-
-
-def selectel_token(config: SelectelConfig) -> str:
-    endpoint = f"{config.auth_url.rstrip('/')}/auth/tokens"
-    body = {
-        "auth": {
-            "identity": {
-                "methods": ["password"],
-                "password": {
-                    "user": {
-                        "name": config.username,
-                        "domain": {"name": config.user_domain_name},
-                        "password": config.password,
-                    }
-                },
-            },
-            "scope": {"project": {"id": config.project_id}},
-        }
-    }
-    _, _, headers = http_json(
-        "POST", endpoint, body=body, expected_statuses=(201,), timeout=60, retry_safe=True
-    )
-    token = next(
-        (value for key, value in headers.items() if key.lower() == "x-subject-token"),
-        "",
-    )
-    if not token:
-        raise LifecycleError("Selectel identity response did not contain X-Subject-Token")
-    add_mask(token)
-    return token
-
-
-def public_network_url(config: SelectelConfig, path: str) -> str:
-    return f"{config.public_network_api_url.rstrip('/')}/{path.lstrip('/')}"
-
-
-def preflight(config: SelectelConfig) -> None:
-    token_result = openstack(config, ["token", "issue", "-f", "json"])
-    parse_json_output(token_result, "OpenStack authentication")
-
-    image = parse_json_output(
-        openstack(config, ["image", "show", config.image_id, "-f", "json"]),
-        "image lookup",
-    )
-    flavor = parse_json_output(
-        openstack(config, ["flavor", "show", config.flavor_id, "-f", "json"]),
-        "flavor lookup",
-    )
-    zones = parse_json_output(
-        openstack(config, ["availability", "zone", "list", "-f", "json"]),
-        "availability-zone lookup",
-    )
-    if config.availability_zone not in json.dumps(zones):
-        raise LifecycleError(
-            f"Availability zone {config.availability_zone!r} is not visible to OpenStack"
-        )
-
-    token = selectel_token(config)
-    compact_project_id = config.project_id.replace("-", "")
-    _, quota, _ = http_json(
-        "GET",
-        public_network_url(config, f"v1/projects/{compact_project_id}/quotas"),
-        token=token,
-    )
-    entries = quota.get("network_direct_public_ips", []) if isinstance(quota, dict) else []
-    has_capacity = any(
-        int(entry.get("value", 0)) < 0 or int(entry.get("used", 0)) < int(entry.get("value", 0))
-        for entry in entries
-        if isinstance(entry, dict)
-    )
-    if not has_capacity:
-        raise LifecycleError("Selectel direct-public-IP quota has no free capacity")
-
-    image_name = object_value(image, "name")
-    flavor_name = object_value(flavor, "name")
-    print(f"Preflight: image={image_name}, flavor={flavor_name}, zone={config.availability_zone}")
-    append_summary(
-        f"- Preflight: image `{image_name}`, flavor `{flavor_name}`, "
-        f"zone `{config.availability_zone}`"
-    )
-
-
-def create_security_group(config: SelectelConfig, identity: ResourceIdentity) -> str:
-    payload = parse_json_output(
-        openstack(
-            config,
-            [
-                "security",
-                "group",
-                "create",
-                "--description",
-                identity.descriptor,
-                "-f",
-                "json",
-                identity.security_group_name,
-            ],
-        ),
-        "security-group creation",
-    )
-    group_id = str(object_value(payload, "id"))
-    if not UUID_RE.fullmatch(group_id):
-        raise LifecycleError("OpenStack returned an invalid security-group ID")
-
-    rules = parse_json_output(
-        openstack(
-            config,
-            ["security", "group", "rule", "list", group_id, "-f", "json"],
-        ),
-        "security-group rule lookup",
-    )
-    ingress_rules = [
-        rule
-        for rule in rules
-        if isinstance(rule, dict)
-        and str(rule.get("Direction", rule.get("direction", ""))).lower() == "ingress"
-    ]
-    if ingress_rules:
-        raise LifecycleError("New security group unexpectedly contains ingress rules")
-    return group_id
-
-
-def create_public_port(
-    config: SelectelConfig, identity: ResourceIdentity, security_group_id: str
-) -> tuple[str, str]:
-    token = selectel_token(config)
-    try:
-        _, response, _ = http_json(
-            "POST",
-            public_network_url(config, "v1/public_ports"),
-            token=token,
-            body={
-                "description": identity.descriptor,
-                "admin_state_up": True,
-                "security_group_ids": [security_group_id],
-            },
-            expected_statuses=(201,),
-        )
-    except TransientLifecycleError as error:
-        # A 502 or lost connection may follow a successful create. Never replay POST:
-        # even an empty list can be stale. Recover the owned port as it becomes visible.
-        for delay in SELECTEL_RETRY_DELAYS:
-            print(
-                f"::warning::Public-port creation result unknown; checking owned ports in {delay}s"
-            )
-            time.sleep(delay)
-            candidates = find_public_port_ids(config, identity, token)
-            if len(candidates) > 1:
-                raise LifecycleError(
-                    "Multiple owned public ports found after creation failure"
-                ) from error
-            if not candidates:
-                continue
-            _, response, _ = http_json(
-                "GET",
-                public_network_url(config, f"v1/public_ports/{candidates[0]}"),
-                token=token,
-            )
-            recovered = response.get("port", {}) if isinstance(response, dict) else {}
-            if (
-                recovered.get("id") != candidates[0]
-                or recovered.get("description") != identity.descriptor
-                or normalized_uuid(str(recovered.get("project_id", "")))
-                != normalized_uuid(config.project_id)
-                or recovered.get("security_group_ids") != [security_group_id]
-            ):
-                raise LifecycleError(
-                    "Recovered public port does not match ownership or security group"
-                ) from error
-            print("Recovered public port after ambiguous creation failure")
-            break
-        else:
-            raise
-    port = response.get("port", {}) if isinstance(response, dict) else {}
-    port_id = str(port.get("id", ""))
-    address = str(port.get("ip_address", ""))
-    if not UUID_RE.fullmatch(port_id):
-        raise LifecycleError("Selectel returned an invalid direct-public-port ID")
-    if not address:
-        raise LifecycleError("Selectel did not return a direct public IP address")
-
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        if openstack(config, ["port", "show", port_id], check=False).returncode == 0:
-            return port_id, address
-        time.sleep(3)
-    raise LifecycleError("Direct public port did not become visible to OpenStack")
 
 
 def resolve_runner_package(app_token: str, public_token: str) -> tuple[str, str, str]:
@@ -814,327 +827,6 @@ def create_jit_runner(identity: RunnerIdentity, app_token: str) -> tuple[str, st
     return runner_id, jit_config
 
 
-def emergency_schedule(now: datetime | None = None) -> tuple[datetime, datetime]:
-    current = now or datetime.now(UTC)
-    if current.tzinfo is None:
-        raise LifecycleError("emergency schedule requires a timezone-aware timestamp")
-    deadline = (current.astimezone(UTC) + EMERGENCY_SELF_DESTRUCT_AFTER).replace(microsecond=0)
-    return deadline, deadline + EMERGENCY_CREDENTIAL_RETRY_GRACE
-
-
-def encoded_cloud_file(content: str) -> str:
-    return base64.b64encode(content.encode("utf-8")).decode("ascii")
-
-
-def render_cloud_config(
-    template: str,
-    *,
-    emergency_auth_url: str,
-    emergency_deadline: datetime,
-    emergency_region: str,
-    emergency_script: str,
-    runner_download_url: str,
-    runner_sha256: str,
-    runner_version: str,
-    runner_jit_configs: Mapping[str, str],
-) -> str:
-    expected_roles = {"downloader", "wot-gui-assets", "wot-src", "wotstat-assets"}
-    if set(runner_jit_configs) != expected_roles:
-        raise LifecycleError(
-            "cloud config requires downloader, wot-src, wot-gui-assets and "
-            "wotstat-assets JIT configurations"
-        )
-    assignments = {
-        "RUNNER_DOWNLOAD_URL": runner_download_url,
-        "RUNNER_SHA256": runner_sha256,
-        "RUNNER_VERSION": runner_version,
-        "DOWNLOADER_RUNNER_JIT_CONFIG": runner_jit_configs["downloader"],
-        "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wot-gui-assets"],
-        "WOT_SRC_RUNNER_JIT_CONFIG": runner_jit_configs["wot-src"],
-        "WOTSTAT_ASSETS_RUNNER_JIT_CONFIG": runner_jit_configs["wotstat-assets"],
-    }
-    preamble = "\n".join(
-        f"{'readonly ' if not name.endswith('_JIT_CONFIG') else ''}{name}={shlex.quote(value)}"
-        for name, value in assignments.items()
-    )
-    bootstrap = f"#!/usr/bin/env bash\n{preamble}\n{template}"
-    if emergency_deadline.tzinfo is None:
-        raise LifecycleError("emergency deadline must be timezone-aware")
-    deadline = emergency_deadline.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    emergency_config = json.dumps(
-        {"auth_url": emergency_auth_url, "region": emergency_region},
-        separators=(",", ":"),
-    )
-    emergency_service = """[Unit]
-Description=Emergency deletion of an expired game-unpack-pipeline VM
-Wants=network-online.target
-After=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /usr/local/sbin/gup-emergency-self-destruct \\
-  --config /etc/gup-emergency-self-destruct.json
-Restart=on-failure
-RestartSec=60s
-TimeoutStartSec=45s
-StandardOutput=journal+console
-StandardError=journal+console
-"""
-    emergency_timer = f"""[Unit]
-Description=Four-hour emergency lifetime for a game-unpack-pipeline VM
-
-[Timer]
-OnCalendar={deadline}
-AccuracySec=1s
-Persistent=true
-Unit=gup-emergency-self-destruct.service
-
-[Install]
-WantedBy=timers.target
-"""
-    return f"""#cloud-config
-output:
-  all: "| tee -a /var/log/cloud-init-output.log /dev/console"
-write_files:
-  - path: /usr/local/sbin/bootstrap-actions-runner
-    owner: root:root
-    permissions: '0700'
-    encoding: b64
-    content: {encoded_cloud_file(bootstrap)}
-  - path: /usr/local/sbin/gup-emergency-self-destruct
-    owner: root:root
-    permissions: '0700'
-    encoding: b64
-    content: {encoded_cloud_file(emergency_script)}
-  - path: /etc/gup-emergency-self-destruct.json
-    owner: root:root
-    permissions: '0600'
-    encoding: b64
-    content: {encoded_cloud_file(emergency_config)}
-  - path: /etc/systemd/system/gup-emergency-self-destruct.service
-    owner: root:root
-    permissions: '0644'
-    encoding: b64
-    content: {encoded_cloud_file(emergency_service)}
-  - path: /etc/systemd/system/gup-emergency-self-destruct.timer
-    owner: root:root
-    permissions: '0644'
-    encoding: b64
-    content: {encoded_cloud_file(emergency_timer)}
-runcmd:
-  - [bash, /usr/local/sbin/bootstrap-actions-runner]
-"""
-
-
-def create_server(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    port_id: str,
-    cloud_config_path: str,
-) -> str:
-    payload = parse_json_output(
-        openstack(
-            config,
-            [
-                "server",
-                "create",
-                "--image",
-                config.image_id,
-                "--flavor",
-                config.flavor_id,
-                "--availability-zone",
-                config.availability_zone,
-                "--nic",
-                f"port-id={port_id}",
-                "--user-data",
-                cloud_config_path,
-                "--property",
-                f"gup_repository={identity.repository}",
-                "--property",
-                f"gup_run_id={identity.run_id}",
-                "--property",
-                f"gup_run_attempt={identity.run_attempt}",
-                "--property",
-                f"gup_instance_key={identity.instance_key}",
-                "--property",
-                "gup_boot_disk=local",
-                "--property",
-                f"gup_preemptible={str(config.preemptible).lower()}",
-                *(
-                    ["--tag", "preemptible", "--os-compute-api-version", "2.72"]
-                    if config.preemptible
-                    else []
-                ),
-                "-f",
-                "json",
-                identity.server_name,
-            ],
-            timeout=300,
-        ),
-        "server creation",
-    )
-    server_id = str(object_value(payload, "id"))
-    if not UUID_RE.fullmatch(server_id):
-        raise LifecycleError("OpenStack returned an invalid server ID")
-    return server_id
-
-
-def create_emergency_application_credential(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    server_id: str,
-    expires_at: datetime,
-) -> tuple[str, str]:
-    if not UUID_RE.fullmatch(server_id):
-        raise LifecycleError("Cannot scope emergency credential to an invalid server ID")
-    if expires_at.tzinfo is None:
-        raise LifecycleError("Emergency credential expiration must be timezone-aware")
-    access_rules = json.dumps(
-        [
-            {
-                "method": "DELETE",
-                "path": f"/v2.1/servers/{server_id}",
-                "service": "compute",
-            }
-        ],
-        separators=(",", ":"),
-    )
-    payload = parse_json_output(
-        openstack(
-            config,
-            [
-                "application",
-                "credential",
-                "create",
-                "--restricted",
-                "--role",
-                "member",
-                "--expiration",
-                expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S"),
-                "--description",
-                identity.emergency_credential_description,
-                "--access-rules",
-                access_rules,
-                "-f",
-                "json",
-                identity.emergency_credential_name,
-            ],
-        ),
-        "emergency application-credential creation",
-    )
-    credential_id = str(object_value(payload, "id"))
-    credential_secret = str(object_value(payload, "secret"))
-    if not UUID_RE.fullmatch(credential_id) or not credential_secret:
-        raise LifecycleError("OpenStack returned an invalid emergency application credential")
-    if "\n" in credential_secret or "\r" in credential_secret or len(credential_secret) > 255:
-        raise LifecycleError("OpenStack returned an unusable emergency credential secret")
-    add_mask(credential_secret)
-    return credential_id, credential_secret
-
-
-def set_server_emergency_credentials(
-    config: SelectelConfig,
-    server_id: str,
-    credential_id: str,
-    credential_secret: str,
-) -> None:
-    if not UUID_RE.fullmatch(server_id) or not UUID_RE.fullmatch(credential_id):
-        raise LifecycleError("Cannot publish invalid emergency credential metadata")
-    openstack(
-        config,
-        [
-            "server",
-            "set",
-            "--property",
-            f"gup_emergency_credential_id={credential_id}",
-            "--property",
-            f"gup_emergency_credential_secret={credential_secret}",
-            server_id,
-        ],
-        sensitive_values=(credential_secret,),
-    )
-
-
-def server_error_message(
-    config: SelectelConfig,
-    server: Mapping[str, Any],
-    sensitive_values: Iterable[str],
-) -> str:
-    # Whitelist fault fields: details/user_data/metadata can contain credentials.
-    fault = server.get("fault")
-    if not isinstance(fault, Mapping):
-        fault = {}
-    code = fault.get("code")
-    safe_code = str(code) if isinstance(code, int) and not isinstance(code, bool) else "unavailable"
-    message = fault.get("message")
-    if not isinstance(message, str):
-        message = "unavailable"
-    message = sanitized(
-        message,
-        (
-            config.password,
-            config.username,
-            config.user_domain_name,
-            config.project_id,
-            normalized_uuid(config.project_id),
-            *sensitive_values,
-        ),
-    )
-    message = re.sub(
-        r"(?i)(\b(?:authorization|x-auth-token)\s*:\s*)(?:Bearer\s+|Basic\s+)?[^\s,;]+",
-        r"\1***",
-        message,
-    )
-    message = re.sub(
-        r"""(?i)(["']?\b[\w-]*(?:password|token|secret|authorization|"""
-        r"""private[_-]?key|user[_-]?data)"""
-        r"""\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
-        r"\1***",
-        message,
-    )
-    message = re.sub(
-        r"\b(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\b",
-        "***",
-        message,
-    )
-    # JSON quoting escapes line breaks/control characters before Actions sees the annotation.
-    safe_message = json.dumps(message[:4096], ensure_ascii=True)
-    return (
-        f"Selectel server entered ERROR state; fault.code={safe_code}; fault.message={safe_message}"
-    )
-
-
-def wait_for_server_active(
-    config: SelectelConfig,
-    server_id: str,
-    timeout_seconds: int,
-    *,
-    sensitive_values: Iterable[str] = (),
-    identity: ResourceIdentity | None = None,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        result = openstack(
-            config,
-            ["server", "show", server_id, "--os-compute-api-version", "2.72", "-f", "json"],
-            check=False,
-        )
-        if result.returncode == 0:
-            server = parse_json_output(result, "server status lookup")
-            status = str(object_value(server, "status")).upper()
-            if identity is not None and server_is_preempted(config, identity, server):
-                raise PreemptedLifecycleError(server_created_at(server))
-            if status == "ACTIVE":
-                print("VM ACTIVE")
-                append_summary("- VM status: `ACTIVE`")
-                return
-            if status == "ERROR":
-                raise LifecycleError(server_error_message(config, server, sensitive_values))
-        time.sleep(5)
-    raise LifecycleError("Timed out waiting for Selectel server to become ACTIVE")
-
-
 def wait_for_runner_online(
     identity: RunnerIdentity,
     runner_id: str,
@@ -1164,147 +856,6 @@ def wait_for_runner_online(
                 return
         time.sleep(5)
     raise LifecycleError("Timed out waiting for the JIT runner to become online")
-
-
-def server_has_ownership_markers(server: Mapping[str, Any], identity: ResourceIdentity) -> bool:
-    try:
-        if str(object_value(server, "name")) != identity.server_name:
-            return False
-        properties = object_value(server, "properties")
-    except LifecycleError:
-        return False
-
-    expected = {
-        "gup_repository": identity.repository,
-        "gup_run_id": identity.run_id,
-        "gup_run_attempt": identity.run_attempt,
-        "gup_instance_key": identity.instance_key,
-    }
-    if isinstance(properties, Mapping):
-        return all(str(properties.get(key, "")) == value for key, value in expected.items())
-
-    serialized = str(properties)
-    return all(
-        re.search(
-            rf"(?:^|[,\s]){re.escape(key)}\s*=\s*['\"]?"
-            rf"{re.escape(value)}['\"]?(?:,|$)",
-            serialized,
-        )
-        for key, value in expected.items()
-    )
-
-
-def server_property(server: Mapping[str, Any], name: str) -> str:
-    try:
-        properties = object_value(server, "properties")
-    except LifecycleError:
-        return ""
-    if isinstance(properties, Mapping):
-        return str(properties.get(name, ""))
-    match = re.search(
-        rf"(?:^|[,\s]){re.escape(name)}\s*=\s*['\"]?([^,'\"\s]+)['\"]?(?:,|$)",
-        str(properties),
-    )
-    return match.group(1) if match else ""
-
-
-def server_created_at(server: Mapping[str, Any]) -> str | None:
-    value = server.get("created")
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def server_is_preempted(
-    config: SelectelConfig, identity: ResourceIdentity, server: Mapping[str, Any]
-) -> bool:
-    # SHELVED_OFFLOADED also means FROZEN for network-boot servers. Selectel forbids
-    # freezing local-boot servers; require our boot/mode markers and the provider tag.
-    tags = server.get("tags", [])
-    if isinstance(tags, str):
-        tags = [item.strip() for item in tags.split(",")]
-    return (
-        config.preemptible is True
-        and server_has_ownership_markers(server, identity)
-        and server_property(server, "gup_boot_disk") == "local"
-        and server_property(server, "gup_preemptible") == "true"
-        and str(server.get("status", "")).upper() in {"SHELVED_OFFLOADED", "EXPIRED"}
-        and isinstance(tags, list)
-        and "preemptible" in tags
-    )
-
-
-def check_server_not_preempted(
-    config: SelectelConfig, identity: ResourceIdentity, server_id: str
-) -> None:
-    if config.preemptible is not True:
-        return
-    shown = openstack(
-        config,
-        ["server", "show", server_id, "--os-compute-api-version", "2.72", "-f", "json"],
-        check=False,
-    )
-    if shown.returncode != 0:
-        return
-    server = parse_json_output(shown, "server interruption lookup")
-    if isinstance(server, dict) and server_is_preempted(config, identity, server):
-        raise PreemptedLifecycleError(server_created_at(server))
-
-
-def find_server_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[str]:
-    result = openstack(
-        config,
-        ["server", "list", "--name", identity.server_name, "-f", "json"],
-        check=False,
-    )
-    if result.returncode != 0:
-        details = sanitized(result.stderr.strip() or result.stdout.strip())
-        raise LifecycleError(f"Could not list Selectel servers: {details}")
-    items = parse_json_output(result, "server lookup")
-    matching_ids = {
-        str(item.get("ID", item.get("Id", item.get("id", ""))))
-        for item in items
-        if isinstance(item, dict)
-        and item.get("Name", item.get("name")) == identity.server_name
-        and UUID_RE.fullmatch(str(item.get("ID", item.get("Id", item.get("id", "")))))
-    }
-    owned_ids: list[str] = []
-    for server_id in sorted(matching_ids):
-        show = openstack(config, ["server", "show", server_id, "-f", "json"], check=False)
-        if show.returncode != 0:
-            continue
-        server = parse_json_output(show, "server ownership lookup")
-        if isinstance(server, dict) and server_has_ownership_markers(server, identity):
-            owned_ids.append(server_id)
-    return owned_ids
-
-
-def show_console_log(
-    config: SelectelConfig,
-    server_id: str,
-    *,
-    sensitive_values: Iterable[str] = (),
-    lines: int = 200,
-) -> None:
-    try:
-        result = openstack(config, ["console", "log", "show", server_id], check=False, timeout=60)
-    except LifecycleError:
-        print("Console diagnostics are unavailable")
-        return
-    if result.returncode != 0:
-        print("Console diagnostics are unavailable")
-        return
-    cleaned = sanitized(result.stdout, [config.password, *sensitive_values])
-    tail = cleaned.splitlines()[-lines:]
-    print("----- sanitized Selectel serial console tail -----")
-    print("\n".join(tail))
-    print("----- end serial console tail -----")
 
 
 def delete_github_runners(
@@ -1363,259 +914,6 @@ def delete_github_runners(
             deleted_resources.append(f"github-runner:{identity.repository}:{candidate}")
 
 
-def delete_servers(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    server_id: str = "",
-    *,
-    deleted_resources: list[str] | None = None,
-) -> None:
-    candidates = set(find_server_ids(config, identity))
-    if UUID_RE.fullmatch(server_id):
-        candidates.add(server_id)
-    for candidate in sorted(candidates):
-        show = openstack(config, ["server", "show", candidate, "-f", "json"], check=False)
-        if show.returncode != 0:
-            print(f"Server {candidate}: already absent")
-            continue
-        server = parse_json_output(show, "server ownership lookup")
-        if not isinstance(server, dict) or not server_has_ownership_markers(server, identity):
-            raise LifecycleError(
-                f"Refusing to delete server {candidate}: ownership markers do not match"
-            )
-        if delete_openstack_resource(config, ["server"], candidate, timeout=120) is None:
-            continue
-        deadline = time.monotonic() + 300
-        while time.monotonic() < deadline:
-            if openstack(config, ["server", "show", candidate], check=False).returncode != 0:
-                print(f"Server {candidate}: deleted")
-                if deleted_resources is not None:
-                    deleted_resources.append(f"selectel-server:{candidate}")
-                break
-            time.sleep(5)
-        else:
-            raise LifecycleError(f"Server {candidate} still exists after deletion timeout")
-
-
-def find_emergency_application_credential_ids(
-    config: SelectelConfig, identity: ResourceIdentity
-) -> list[str]:
-    result = openstack(config, ["application", "credential", "list", "-f", "json"])
-    items = parse_json_output(result, "emergency application-credential lookup")
-    if not isinstance(items, list):
-        raise LifecycleError("Emergency application-credential lookup did not return a list")
-    return sorted(
-        {
-            str(item.get("ID", item.get("Id", item.get("id", ""))))
-            for item in items
-            if isinstance(item, dict)
-            and item.get("Name", item.get("name")) == identity.emergency_credential_name
-            and UUID_RE.fullmatch(str(item.get("ID", item.get("Id", item.get("id", "")))))
-        }
-    )
-
-
-def delete_emergency_application_credentials(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    credential_id: str = "",
-    *,
-    credential_check_regions: Sequence[str] = (),
-    deleted_resources: list[str] | None = None,
-) -> None:
-    # Identity credentials are global: absence in this region alone is insufficient
-    # when the reconciler is scanning regions that can still contain the live VM.
-    for region in credential_check_regions:
-        if find_server_ids(replace(config, region_name=region), identity):
-            print(
-                f"Emergency application credential retained because the VM still exists in {region}"
-            )
-            return
-    candidates = set(find_emergency_application_credential_ids(config, identity))
-    if UUID_RE.fullmatch(credential_id):
-        candidates.add(credential_id)
-    for candidate in sorted(candidates):
-        show = openstack(
-            config,
-            ["application", "credential", "show", candidate, "-f", "json"],
-            check=False,
-        )
-        if show.returncode != 0:
-            print(f"Emergency application credential {candidate}: already absent")
-            continue
-        credential = parse_json_output(show, "emergency application-credential ownership lookup")
-        if not isinstance(credential, dict) or (
-            str(object_value(credential, "name")) != identity.emergency_credential_name
-            or str(object_value(credential, "description"))
-            != identity.emergency_credential_description
-        ):
-            raise LifecycleError(
-                f"Refusing to delete application credential {candidate}: "
-                "ownership markers do not match"
-            )
-        if delete_openstack_resource(config, ["application", "credential"], candidate) is None:
-            continue
-        print(f"Emergency application credential {candidate}: deleted")
-        if deleted_resources is not None:
-            deleted_resources.append(f"selectel-application-credential:{candidate}")
-
-
-def find_public_port_ids(
-    config: SelectelConfig, identity: ResourceIdentity, token: str
-) -> list[str]:
-    query = urllib.parse.urlencode({"description": identity.descriptor})
-    _, response, _ = http_json(
-        "GET",
-        public_network_url(config, f"v1/public_ports?{query}"),
-        token=token,
-    )
-    ports = response.get("ports", []) if isinstance(response, dict) else []
-    return sorted(
-        {
-            str(port.get("id"))
-            for port in ports
-            if isinstance(port, dict)
-            and port.get("description") == identity.descriptor
-            and normalized_uuid(str(port.get("project_id", "")))
-            == normalized_uuid(config.project_id)
-            and UUID_RE.fullmatch(str(port.get("id", "")))
-        }
-    )
-
-
-def delete_public_ports(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    token: str,
-    port_id: str = "",
-    *,
-    deleted_resources: list[str] | None = None,
-) -> None:
-    candidates = set(find_public_port_ids(config, identity, token))
-    if UUID_RE.fullmatch(port_id):
-        status, response, _ = http_json(
-            "GET",
-            public_network_url(config, f"v1/public_ports/{port_id}"),
-            token=token,
-            expected_statuses=(200, 404),
-        )
-        if status == 200:
-            port = response.get("port", {}) if isinstance(response, dict) else {}
-            if port.get("description") != identity.descriptor or normalized_uuid(
-                str(port.get("project_id", ""))
-            ) != normalized_uuid(config.project_id):
-                raise LifecycleError(
-                    f"Refusing to delete direct public port {port_id}: "
-                    "ownership markers do not match"
-                )
-            candidates.add(port_id)
-    for candidate in sorted(candidates):
-        deadline = time.monotonic() + 180
-        while True:
-            status, _, _ = http_json(
-                "DELETE",
-                public_network_url(config, f"v1/public_ports/{candidate}"),
-                token=token,
-                expected_statuses=(204, 404, 409),
-            )
-            if status in (204, 404):
-                print(
-                    f"Direct public port {candidate}: "
-                    f"{'already absent' if status == 404 else 'deleted'}"
-                )
-                if status == 204 and deleted_resources is not None:
-                    deleted_resources.append(f"selectel-public-port:{candidate}")
-                break
-            if time.monotonic() >= deadline:
-                raise LifecycleError(f"Direct public port {candidate} is still attached")
-            time.sleep(5)
-
-
-def find_security_group_ids(config: SelectelConfig, identity: ResourceIdentity) -> list[str]:
-    result = openstack(
-        config,
-        [
-            "security",
-            "group",
-            "list",
-            "--name",
-            identity.security_group_name,
-            "-f",
-            "json",
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        return []
-    groups = parse_json_output(result, "security-group lookup")
-    candidates: list[str] = []
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        name = group.get("Name", group.get("name"))
-        description = group.get("Description", group.get("description"))
-        group_id = str(group.get("ID", group.get("Id", group.get("id", ""))))
-        if (
-            name == identity.security_group_name
-            and description == identity.descriptor
-            and UUID_RE.fullmatch(group_id)
-        ):
-            candidates.append(group_id)
-    return sorted(set(candidates))
-
-
-def delete_security_groups(
-    config: SelectelConfig,
-    identity: ResourceIdentity,
-    security_group_id: str = "",
-    *,
-    deleted_resources: list[str] | None = None,
-) -> None:
-    candidates = set(find_security_group_ids(config, identity))
-    if UUID_RE.fullmatch(security_group_id):
-        show = openstack(
-            config,
-            ["security", "group", "show", security_group_id, "-f", "json"],
-            check=False,
-        )
-        if show.returncode == 0:
-            group = parse_json_output(show, "security-group ownership lookup")
-            if (
-                str(object_value(group, "name")) != identity.security_group_name
-                or str(object_value(group, "description")) != identity.descriptor
-            ):
-                raise LifecycleError(
-                    f"Refusing to delete security group {security_group_id}: "
-                    "ownership markers do not match"
-                )
-            candidates.add(security_group_id)
-    for candidate in sorted(candidates):
-        deadline = time.monotonic() + 180
-        while True:
-            result = delete_openstack_resource(
-                config,
-                ["security", "group"],
-                candidate,
-                check=False,
-                timeout=max(1, int(deadline - time.monotonic())),
-            )
-            if result is None:
-                break
-            if result.returncode == 0:
-                print(f"Security group {candidate}: deleted")
-                if deleted_resources is not None:
-                    deleted_resources.append(f"selectel-security-group:{candidate}")
-                break
-            show = openstack(config, ["security", "group", "show", candidate], check=False)
-            if show.returncode != 0:
-                print(f"Security group {candidate}: already absent")
-                break
-            if time.monotonic() >= deadline:
-                details = sanitized(result.stderr.strip())
-                raise LifecycleError(f"Security group {candidate} could not be deleted: {details}")
-            time.sleep(5)
-
-
 def build_identity(
     instance_key: str, *, run_id: str | None = None, run_attempt: str | None = None
 ) -> ResourceIdentity:
@@ -1625,321 +923,6 @@ def build_identity(
         run_attempt=run_attempt or require_environment("GITHUB_RUN_ATTEMPT"),
         instance_key=instance_key,
     )
-
-
-def provision(arguments: argparse.Namespace) -> None:
-    config = SelectelConfig.from_environment(require_compute=True)
-    identity = build_identity(arguments.instance_key)
-    app_token = require_environment("GITHUB_APP_TOKEN")
-    public_token = require_environment("GITHUB_PUBLIC_TOKEN")
-    downloader_runner = identity.runner("downloader")
-    wot_gui_assets_runner = identity.runner("wot-gui-assets")
-    wot_src_runner = identity.runner("wot-src")
-    wotstat_assets_runner = identity.runner("wotstat-assets")
-    add_mask(config.password)
-
-    for name, value in {
-        "resource_key": identity.instance_key,
-        "downloader_runner_name": downloader_runner.name,
-        "downloader_runner_label": downloader_runner.label,
-        "wot_gui_assets_runner_name": wot_gui_assets_runner.name,
-        "wot_gui_assets_runner_label": wot_gui_assets_runner.label,
-        "wot_src_runner_name": wot_src_runner.name,
-        "wot_src_runner_label": wot_src_runner.label,
-        "wotstat_assets_runner_name": wotstat_assets_runner.name,
-        "wotstat_assets_runner_label": wotstat_assets_runner.label,
-        "runner_scope_label": identity.scope_label,
-        "server_name": identity.server_name,
-        "security_group_name": identity.security_group_name,
-        "emergency_credential_name": identity.emergency_credential_name,
-        "resource_descriptor": identity.descriptor,
-    }.items():
-        write_output(name, value)
-
-    append_summary("## Ephemeral Selectel runner")
-    append_summary(f"- Resource key: `{identity.instance_key}`")
-    preflight(config)
-
-    emergency_deadline, emergency_credential_expires_at = emergency_schedule()
-    emergency_deadline_output = emergency_deadline.isoformat().replace("+00:00", "Z")
-    write_output("emergency_self_destruct_at", emergency_deadline_output)
-    server_id = ""
-    emergency_credential_secret = ""
-    jit_configs: dict[str, str] = {}
-    cloud_config_path = ""
-    try:
-        security_group_id = create_security_group(config, identity)
-        write_output("security_group_id", security_group_id)
-        print(f"Security group created: {security_group_id}")
-
-        port_id, public_address = create_public_port(config, identity, security_group_id)
-        write_output("port_id", port_id)
-        write_output("public_address", public_address)
-        print(f"Direct public port created: {port_id}")
-
-        runner_url, runner_sha256, runner_version = resolve_runner_package(app_token, public_token)
-        write_output("runner_version", runner_version)
-        print(f"Runner package resolved: {runner_version}")
-
-        downloader_runner_id, downloader_jit_config = create_jit_runner(
-            downloader_runner, app_token
-        )
-        jit_configs[downloader_runner.role] = downloader_jit_config
-        write_output("downloader_runner_id", downloader_runner_id)
-        print(f"Downloader JIT runner reserved: {downloader_runner_id}")
-
-        wot_gui_assets_runner_id, wot_gui_assets_jit_config = create_jit_runner(
-            wot_gui_assets_runner, app_token
-        )
-        jit_configs[wot_gui_assets_runner.role] = wot_gui_assets_jit_config
-        write_output("wot_gui_assets_runner_id", wot_gui_assets_runner_id)
-        print(f"wot-gui-assets JIT runner reserved: {wot_gui_assets_runner_id}")
-
-        wot_src_runner_id, wot_src_jit_config = create_jit_runner(wot_src_runner, app_token)
-        jit_configs[wot_src_runner.role] = wot_src_jit_config
-        write_output("wot_src_runner_id", wot_src_runner_id)
-        print(f"wot-src JIT runner reserved: {wot_src_runner_id}")
-
-        wotstat_assets_runner_id, wotstat_assets_jit_config = create_jit_runner(
-            wotstat_assets_runner, app_token
-        )
-        jit_configs[wotstat_assets_runner.role] = wotstat_assets_jit_config
-        write_output("wotstat_assets_runner_id", wotstat_assets_runner_id)
-        print(f"wotstat-assets JIT runner reserved: {wotstat_assets_runner_id}")
-
-        template_path = Path(__file__).with_name("bootstrap-actions-runner.sh")
-        template = template_path.read_text(encoding="utf-8")
-        emergency_script_path = Path(__file__).with_name("emergency_self_destruct.py")
-        emergency_script = emergency_script_path.read_text(encoding="utf-8")
-        cloud_config = render_cloud_config(
-            template,
-            emergency_auth_url=config.auth_url,
-            emergency_deadline=emergency_deadline,
-            emergency_region=config.region_name,
-            emergency_script=emergency_script,
-            runner_download_url=runner_url,
-            runner_sha256=runner_sha256,
-            runner_version=runner_version,
-            runner_jit_configs=jit_configs,
-        )
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            prefix="gup-cloud-init-",
-            suffix=".yaml",
-            delete=False,
-        ) as temporary:
-            temporary.write(cloud_config)
-            cloud_config_path = temporary.name
-        os.chmod(cloud_config_path, 0o600)
-
-        server_id = create_server(config, identity, port_id, cloud_config_path)
-        write_output("server_id", server_id)
-        print(f"Server created: {server_id}")
-        wait_for_server_active(
-            config,
-            server_id,
-            timeout_seconds=300,
-            sensitive_values=(app_token, public_token, *jit_configs.values()),
-            identity=identity,
-        )
-        emergency_credential_id, emergency_credential_secret = (
-            create_emergency_application_credential(
-                config,
-                identity,
-                server_id,
-                emergency_credential_expires_at,
-            )
-        )
-        write_output("emergency_credential_id", emergency_credential_id)
-        set_server_emergency_credentials(
-            config,
-            server_id,
-            emergency_credential_id,
-            emergency_credential_secret,
-        )
-        print(f"Four-hour emergency self-destruct armed: {emergency_deadline_output}")
-        wait_for_runner_online(
-            downloader_runner,
-            downloader_runner_id,
-            app_token,
-            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
-            server_check=lambda: check_server_not_preempted(config, identity, server_id),
-        )
-        wait_for_runner_online(
-            wot_gui_assets_runner,
-            wot_gui_assets_runner_id,
-            app_token,
-            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
-            server_check=lambda: check_server_not_preempted(config, identity, server_id),
-        )
-        wait_for_runner_online(
-            wot_src_runner,
-            wot_src_runner_id,
-            app_token,
-            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
-            server_check=lambda: check_server_not_preempted(config, identity, server_id),
-        )
-        wait_for_runner_online(
-            wotstat_assets_runner,
-            wotstat_assets_runner_id,
-            app_token,
-            timeout_seconds=int(os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")),
-            server_check=lambda: check_server_not_preempted(config, identity, server_id),
-        )
-        append_summary(f"- Runner version: `{runner_version}`")
-        append_summary(f"- Selectel server: `{server_id}`")
-        append_summary(f"- Emergency self-destruct: `{emergency_deadline_output}`")
-    except Exception:
-        if server_id:
-            show_console_log(
-                config,
-                server_id,
-                sensitive_values=(
-                    *jit_configs.values(),
-                    app_token,
-                    public_token,
-                    emergency_credential_secret,
-                ),
-            )
-        raise
-    finally:
-        if cloud_config_path:
-            Path(cloud_config_path).unlink(missing_ok=True)
-
-
-def cleanup(arguments: argparse.Namespace) -> None:
-    config = SelectelConfig.from_environment(require_compute=False)
-    identity = build_identity(
-        arguments.instance_key,
-        run_id=arguments.run_id,
-        run_attempt=arguments.run_attempt,
-    )
-    app_token = require_environment("GITHUB_APP_TOKEN")
-    downloader_runner = identity.runner("downloader")
-    wot_gui_assets_runner = identity.runner("wot-gui-assets")
-    wot_src_runner = identity.runner("wot-src")
-    wotstat_assets_runner = identity.runner("wotstat-assets")
-    add_mask(config.password)
-
-    if arguments.diagnostics:
-        candidates = []
-        if UUID_RE.fullmatch(arguments.server_id or ""):
-            candidates.append(arguments.server_id)
-        try:
-            candidates.extend(find_server_ids(config, identity))
-        except LifecycleError as error:
-            print(f"::warning::Server diagnostics lookup failed: {sanitized(str(error))}")
-        for candidate in sorted(set(candidates)):
-            show_console_log(config, candidate, sensitive_values=(app_token,))
-
-    failures: list[str] = []
-    deleted_resources: list[str] = []
-    operations: list[tuple[str, Callable[[], None]]] = [
-        (
-            "GitHub downloader runner registration",
-            lambda: delete_github_runners(
-                downloader_runner,
-                app_token,
-                arguments.downloader_runner_id,
-                deleted_resources=deleted_resources,
-            ),
-        ),
-        (
-            "GitHub wot-src runner registration",
-            lambda: delete_github_runners(
-                wot_src_runner,
-                app_token,
-                arguments.wot_src_runner_id,
-                deleted_resources=deleted_resources,
-            ),
-        ),
-        (
-            "GitHub wot-gui-assets runner registration",
-            lambda: delete_github_runners(
-                wot_gui_assets_runner,
-                app_token,
-                arguments.wot_gui_assets_runner_id,
-                deleted_resources=deleted_resources,
-            ),
-        ),
-        (
-            "GitHub wotstat-assets runner registration",
-            lambda: delete_github_runners(
-                wotstat_assets_runner,
-                app_token,
-                arguments.wotstat_assets_runner_id,
-                deleted_resources=deleted_resources,
-            ),
-        ),
-    ]
-    for label, operation in operations:
-        try:
-            operation()
-        except Exception as error:  # continue cleanup after every resource failure
-            failures.append(f"{label}: {error}")
-            print(f"::error::{label} cleanup failed: {sanitized(str(error))}")
-
-    server_cleanup_succeeded = False
-    try:
-        delete_servers(
-            config,
-            identity,
-            arguments.server_id,
-            deleted_resources=deleted_resources,
-        )
-        server_cleanup_succeeded = True
-    except Exception as error:
-        failures.append(f"Selectel server: {error}")
-        print(f"::error::Selectel server cleanup failed: {sanitized(str(error))}")
-
-    try:
-        token = selectel_token(config)
-        delete_public_ports(
-            config,
-            identity,
-            token,
-            arguments.port_id,
-            deleted_resources=deleted_resources,
-        )
-    except Exception as error:
-        failures.append(f"Direct public port: {error}")
-        print(f"::error::Direct public port cleanup failed: {sanitized(str(error))}")
-
-    try:
-        delete_security_groups(
-            config,
-            identity,
-            arguments.security_group_id,
-            deleted_resources=deleted_resources,
-        )
-    except Exception as error:
-        failures.append(f"Security group: {error}")
-        print(f"::error::Security-group cleanup failed: {sanitized(str(error))}")
-
-    if server_cleanup_succeeded:
-        try:
-            delete_emergency_application_credentials(
-                config,
-                identity,
-                arguments.emergency_credential_id,
-                credential_check_regions=arguments.credential_check_regions,
-                deleted_resources=deleted_resources,
-            )
-        except Exception as error:
-            failures.append(f"Emergency application credential: {error}")
-            print(
-                f"::error::Emergency application-credential cleanup failed: {sanitized(str(error))}"
-            )
-    else:
-        print("::warning::Emergency application credential retained because server cleanup failed")
-
-    write_output("deleted_count", len(deleted_resources))
-    append_summary(f"- Resources deleted: `{len(deleted_resources)}`")
-    if failures:
-        raise LifecycleError("Cleanup incomplete: " + " | ".join(failures))
-    append_summary(f"- Cleanup `{identity.instance_key}`: complete")
-    print("Cleanup complete")
 
 
 def job_targets_runner(job: dict[str, object], runner_label: str) -> bool:
@@ -1990,40 +973,24 @@ def watch_queue(arguments: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    provision_parser = subparsers.add_parser("provision")
-    provision_parser.add_argument("--instance-key", required=True)
-    provision_parser.set_defaults(handler=provision)
-
-    cleanup_parser = subparsers.add_parser("cleanup")
-    cleanup_parser.add_argument("--instance-key", required=True)
-    cleanup_parser.add_argument("--run-id")
-    cleanup_parser.add_argument("--run-attempt")
-    cleanup_parser.add_argument("--downloader-runner-id", default="")
-    cleanup_parser.add_argument("--wot-gui-assets-runner-id", default="")
-    cleanup_parser.add_argument("--wot-src-runner-id", default="")
-    cleanup_parser.add_argument("--wotstat-assets-runner-id", default="")
-    cleanup_parser.add_argument("--server-id", default="")
-    cleanup_parser.add_argument("--port-id", default="")
-    cleanup_parser.add_argument("--security-group-id", default="")
-    cleanup_parser.add_argument("--emergency-credential-id", default="")
-    cleanup_parser.add_argument(
-        "--credential-check-regions",
-        nargs="+",
-        choices=("ru-7", "ru-3", "ru-9", "ru-6", "ru-8", "ru-2"),
-        default=(),
-        help="Require VM absence in every listed region before deleting its global credential",
-    )
-    cleanup_parser.add_argument("--diagnostics", action="store_true")
-    cleanup_parser.set_defaults(handler=cleanup)
-
-    watch_parser = subparsers.add_parser("watch-queue")
-    watch_parser.add_argument("--instance-key", required=True)
-    watch_parser.add_argument("--runner-label", required=True)
-    watch_parser.add_argument("--timeout-seconds", type=int, default=600)
-    watch_parser.set_defaults(handler=watch_queue)
-
+    commands = parser.add_subparsers(dest="command", required=True)
+    create = commands.add_parser("provision")
+    create.add_argument("--instance-key", required=True)
+    create.set_defaults(handler=provision)
+    remove = commands.add_parser("cleanup")
+    remove.add_argument("--instance-key", required=True)
+    remove.add_argument("--run-id")
+    remove.add_argument("--run-attempt")
+    remove.add_argument("--server-id", default="")
+    remove.add_argument("--diagnostics", action="store_true")
+    for role in ROLES:
+        remove.add_argument(f"--{role}-runner-id", default="")
+    remove.set_defaults(handler=cleanup)
+    watch = commands.add_parser("watch-queue")
+    watch.add_argument("--instance-key", required=True)
+    watch.add_argument("--runner-label", required=True)
+    watch.add_argument("--timeout-seconds", type=int, default=600)
+    watch.set_defaults(handler=watch_queue)
     return parser
 
 
@@ -2035,9 +1002,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LifecycleError as error:
         print(f"::error::{sanitized(str(error))}", file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        print("::error::Interrupted", file=sys.stderr)
-        return 130
 
 
 if __name__ == "__main__":
