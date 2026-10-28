@@ -14,10 +14,15 @@ on:
           - "2"
           - "3"
       diagnose:
-        description: Compare thread count, block buffering and progress overhead
+        description: Also compare 1 and 16 downloader file workers
         required: true
         default: false
         type: boolean
+      baseline_sha:
+        description: Optional full SHA from main history to compare before and after
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -66,10 +71,12 @@ jobs:
       BENCHMARK_REPORTS: /var/lib/game-downloader-data/benchmark-${{ github.run_id }}-${{ github.run_attempt }}-reports
       REPEATS: ${{ inputs.repeats }}
       DIAGNOSE: ${{ inputs.diagnose }}
+      BASELINE_SHA: ${{ inputs.baseline_sha }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify VM protections
         shell: bash
         run: |
@@ -122,6 +129,7 @@ jobs:
             --work "${BENCHMARK_ROOT}" \
             --reports "${BENCHMARK_REPORTS}" \
             --repeats "${REPEATS}" \
+            --baseline-sha "${BASELINE_SHA}" \
             "${options[@]}"
       - name: Upload measurements
         if: always()

@@ -3,45 +3,35 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 from urllib.parse import urlsplit
 
-import httpx
-
-from game_downloader.delivery import (
-    ArtifactDownloader,
-    DownloadPolicy,
-    _DownloadProgress,
-    _hash_file,
-)
+from game_downloader import delivery
+from game_downloader.delivery import ArtifactDownloader, DownloadPolicy, _hash_file
 from game_downloader.models import AcquisitionArtifact, AcquisitionPlan, Stage, StageResult
 from game_downloader.workspace import Workspace
 
 MIB = 1024 * 1024
 METHODS = ("curl", "aria2", "aria2-split", "downloader")
 DIAGNOSTIC_METHODS = (
+    "curl",
     "aria2",
+    "aria2-split",
     "downloader",
-    "downloader-4",
+    "downloader-16",
     "downloader-1",
-    "downloader-buffered",
-    "downloader-no-progress",
 )
-
-
-def ignore_progress(*args: Any, **kwargs: Any) -> None:
-    pass
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -129,27 +119,20 @@ def worker(args: argparse.Namespace) -> None:
     started = time.monotonic()
     details: dict[str, Any] = {}
     if args.method.startswith("downloader"):
-        workers = {"downloader-4": 4, "downloader-1": 1}.get(args.method, 16)
-        with ExitStack() as changes:
-            # Controlled diagnostic probes; these overrides never affect production runs.
-            if args.method == "downloader-buffered":
-                original_iter_raw = httpx.Response.iter_raw
-
-                def buffered_raw(
-                    response: httpx.Response, chunk_size: int | None = None
-                ) -> Iterator[bytes]:
-                    yield from original_iter_raw(response, chunk_size=MIB)
-
-                changes.enter_context(patch.object(httpx.Response, "iter_raw", buffered_raw))
-            if args.method == "downloader-no-progress":
-                changes.enter_context(patch.object(_DownloadProgress, "update", ignore_progress))
-                changes.enter_context(patch.object(_DownloadProgress, "completed", ignore_progress))
-            result = ArtifactDownloader(
-                DownloadPolicy(max_workers=workers),
-                progress_observer=lambda msg: print(msg, flush=True),
-            ).download(plan, Workspace(directory))
+        workers = {"downloader-16": 16, "downloader-1": 1, "downloader-baseline": 16}.get(
+            args.method, 4
+        )
+        if args.method == "downloader-baseline":
+            baseline = Path(os.environ["BENCHMARK_BASELINE_SOURCE"]).resolve()
+            if not Path(delivery.__file__).resolve().is_relative_to(baseline):
+                raise ValueError("Baseline worker did not import the historical implementation")
+        result = ArtifactDownloader(
+            DownloadPolicy(max_workers=workers),
+            progress_observer=lambda msg: print(msg, flush=True),
+        ).download(plan, Workspace(directory))
         digests = {item.artifact.artifact_id: item.blob_sha256 for item in result.artifacts}
         details = {
+            "artifact_workers": workers,
             "parallel_range_artifacts": sum(
                 item.transport.parallel_segments > 1 for item in result.artifacts
             ),
@@ -221,6 +204,21 @@ def benchmark(args: argparse.Namespace) -> None:
     reports: Path = args.reports
     root.mkdir(parents=True, exist_ok=False)
     reports.mkdir(parents=True, exist_ok=True)
+    baseline_source: Path | None = None
+    if args.baseline_sha:
+        if re.fullmatch(r"[a-f0-9]{40}", args.baseline_sha) is None:
+            raise ValueError("Baseline must be a full commit SHA")
+        # Accept only source code already present in this main branch's history.
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", args.baseline_sha, "HEAD"], check=True
+        )
+        archive = subprocess.check_output(
+            ["git", "archive", "--format=tar", args.baseline_sha, "src"]
+        )
+        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+            source.extractall(root / "baseline", filter="data")
+        baseline_source = root / "baseline/src"
+        write_json(reports / "baseline.json", {"commit": args.baseline_sha, "artifact_workers": 16})
     metadata_root = root / "metadata"
     resolved = subprocess.run(
         [
@@ -273,7 +271,9 @@ def benchmark(args: argparse.Namespace) -> None:
         reference: dict[str, str] | None = None
         for repeat in range(args.repeats):
             # Rotate order so a warmed CDN or a changing route cannot consistently favor one tool.
-            choices = DIAGNOSTIC_METHODS if args.diagnose else METHODS
+            choices: tuple[str, ...] = DIAGNOSTIC_METHODS if args.diagnose else METHODS
+            if baseline_source is not None:
+                choices += ("downloader-baseline",)
             methods = choices[repeat % len(choices) :] + choices[: repeat % len(choices)]
             for method in methods:
                 label = f"{case}-{repeat + 1}-{method}"
@@ -297,6 +297,10 @@ def benchmark(args: argparse.Namespace) -> None:
                 result_path = reports / f"{label}-result.json"
                 time_path = reports / f"{label}-time.log"
                 print(f"BENCHMARK START {label}", flush=True)
+                child_environment = dict(os.environ)
+                if method == "downloader-baseline":
+                    child_environment["PYTHONPATH"] = str(baseline_source)
+                    child_environment["BENCHMARK_BASELINE_SOURCE"] = str(baseline_source)
                 try:
                     with (reports / f"{label}.log").open("w") as output:
                         subprocess.run(
@@ -319,6 +323,7 @@ def benchmark(args: argparse.Namespace) -> None:
                             ],
                             stdout=output,
                             stderr=subprocess.STDOUT,
+                            env=child_environment,
                             check=True,
                             timeout=900,
                         )
@@ -378,10 +383,13 @@ def main() -> None:
     run.add_argument("--reports", type=Path, required=True)
     run.add_argument("--repeats", type=int, choices=(1, 2, 3), default=2)
     run.add_argument("--diagnose", action="store_true")
+    run.add_argument("--baseline-sha", default="")
     run.set_defaults(handler=benchmark)
     child = subparsers.add_parser("worker")
     child.add_argument(
-        "--method", choices=tuple(dict.fromkeys(METHODS + DIAGNOSTIC_METHODS)), required=True
+        "--method",
+        choices=tuple(dict.fromkeys(METHODS + DIAGNOSTIC_METHODS + ("downloader-baseline",))),
+        required=True,
     )
     child.add_argument("--plan", type=Path, required=True)
     child.add_argument("--work", type=Path, required=True)
