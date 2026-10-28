@@ -458,7 +458,7 @@ def cleanup(arguments: argparse.Namespace) -> None:
     identity = build_identity(
         arguments.instance_key, run_id=arguments.run_id, run_attempt=arguments.run_attempt
     )
-    app_token = require_environment("GITHUB_APP_TOKEN")
+    app_token = os.environ.get("GITHUB_APP_TOKEN", "").strip()
     failures: list[str] = []
     deleted: list[str] = []
     # Delete billed resources first. One failed GitHub call must never prevent
@@ -474,7 +474,9 @@ def cleanup(arguments: argparse.Namespace) -> None:
             failures.append(
                 str(error) if isinstance(error, LifecycleError) else type(error).__name__
             )
-    for role in ROLES:
+    if not app_token:
+        failures.append("GitHub App token unavailable; runner reconciliation is still required")
+    for role in ROLES if app_token else ():
         try:
             delete_github_runners(
                 identity.runner(role),
