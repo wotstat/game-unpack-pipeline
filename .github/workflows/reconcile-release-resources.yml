@@ -5,6 +5,7 @@ on:
   workflow_run:
     workflows:
       - Process game release
+      - Benchmark game download
     types:
       - completed
     branches:
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Run ID of Process game release
+        description: Run ID of Process game release or Benchmark game download
         required: true
         type: string
       source_run_attempt:

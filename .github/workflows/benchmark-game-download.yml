@@ -13,6 +13,11 @@ on:
           - "1"
           - "2"
           - "3"
+      diagnose:
+        description: Compare thread count, block buffering and progress overhead
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
       BENCHMARK_ROOT: /var/lib/game-downloader-data/benchmark-${{ github.run_id }}-${{ github.run_attempt }}
       BENCHMARK_REPORTS: /var/lib/game-downloader-data/benchmark-${{ github.run_id }}-${{ github.run_attempt }}-reports
       REPEATS: ${{ inputs.repeats }}
+      DIAGNOSE: ${{ inputs.diagnose }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -105,11 +111,18 @@ jobs:
             uv run --no-sync python --version
           } >"${BENCHMARK_REPORTS}/versions.txt"
       - name: Compare identical pinned files
-        run: >-
-          uv run --no-sync python -m scripts.benchmark_download run
-          --work "${BENCHMARK_ROOT}"
-          --reports "${BENCHMARK_REPORTS}"
-          --repeats "${REPEATS}"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          options=()
+          if [[ "${DIAGNOSE}" == true ]]; then
+            options+=(--diagnose)
+          fi
+          uv run --no-sync python -m scripts.benchmark_download run \
+            --work "${BENCHMARK_ROOT}" \
+            --reports "${BENCHMARK_REPORTS}" \
+            --repeats "${REPEATS}" \
+            "${options[@]}"
       - name: Upload measurements
         if: always()
         uses: actions/upload-artifact@v7.0.1
