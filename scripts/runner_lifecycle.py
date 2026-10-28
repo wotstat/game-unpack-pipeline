@@ -629,6 +629,10 @@ def sanitized(text: str, sensitive_values: Iterable[str] = ()) -> str:
     result = re.sub(r"gh[opsu]_[A-Za-z0-9]+", "***", result)
     result = re.sub(r"(--jitconfig(?:=|\s+))\S+", r"\1***", result)
     result = re.sub(r'("encoded_jit_config"\s*:\s*")[^"]+(\")', r"\1***\2", result)
+    # A remote Python traceback can echo the base64 file bundle, including
+    # partial bundles after a broken SSH stream. Raw-secret masking cannot
+    # recognize credentials inside those encoded files.
+    result = re.sub(r"[A-Za-z0-9+/_=-]{80,}", "[redacted encoded value]", result)
     result = "\n".join(
         "[redacted jit configuration]" if "jitconfig" in line.lower().replace("_", "") else line
         for line in result.splitlines()
