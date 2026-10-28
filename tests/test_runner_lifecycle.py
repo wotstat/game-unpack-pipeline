@@ -301,3 +301,24 @@ def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None
     )
     assert "retry-preempted" not in reconciler["jobs"]
     assert reconciler["concurrency"]["cancel-in-progress"] is False
+
+
+def test_missing_github_app_token_does_not_block_cloud_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_APP_TOKEN", raising=False)
+    with (
+        patch.object(lifecycle.AezaConfig, "from_environment", return_value=CONFIG),
+        patch.object(lifecycle, "build_identity", return_value=IDENTITY),
+        patch.object(lifecycle, "delete_servers") as servers,
+        patch.object(lifecycle, "delete_ssh_keys") as keys,
+        patch.object(lifecycle, "delete_github_runners") as runners,
+        pytest.raises(lifecycle.LifecycleError, match="GitHub App token unavailable"),
+    ):
+        args = lifecycle.build_parser().parse_args(
+            ["cleanup", "--instance-key", IDENTITY.instance_key]
+        )
+        lifecycle.cleanup(args)
+    servers.assert_called_once()
+    keys.assert_called_once()
+    runners.assert_not_called()

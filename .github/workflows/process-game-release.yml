@@ -408,7 +408,7 @@ jobs:
           retention-days: 30
 
       - name: Delete resources after queue timeout
-        if: steps.watch.outputs.timed_out == 'true'
+        if: always() && steps.watch.outputs.timed_out == 'true'
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
@@ -521,6 +521,7 @@ jobs:
           permission-administration: write
 
       - name: Delete runner and Aeza resources
+        if: always()
         id: cleanup
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}

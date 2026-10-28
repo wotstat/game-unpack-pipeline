@@ -60,6 +60,7 @@ jobs:
           permission-administration: write
 
       - name: Reconcile resources by deterministic ownership markers
+        if: always()
         id: cleanup
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
