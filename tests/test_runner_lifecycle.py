@@ -322,3 +322,25 @@ def test_missing_github_app_token_does_not_block_cloud_cleanup(
     servers.assert_called_once()
     keys.assert_called_once()
     runners.assert_not_called()
+
+
+def test_failed_ssh_bootstrap_redacts_encoded_secret_files() -> None:
+    encoded = base64.b64encode(
+        json.dumps(
+            {
+                "api_key": CONFIG.api_key,
+                "server_name": IDENTITY.server_name,
+                "jit_config": "dummy-jit-configuration",
+            }
+        ).encode()
+    ).decode()
+    result = Mock(returncode=1, stdout=f"Traceback: base64.b64decode('{encoded}')", stderr="")
+    with (
+        patch("subprocess.run", side_effect=[Mock(returncode=0), result]),
+        pytest.raises(lifecycle.LifecycleError) as raised,
+    ):
+        lifecycle.ssh_bootstrap(
+            "1.1.1.1", Path("/tmp/dummy-key"), "safe install", sensitive_values=(CONFIG.api_key,)
+        )
+    assert encoded not in str(raised.value)
+    assert CONFIG.api_key not in str(raised.value)
