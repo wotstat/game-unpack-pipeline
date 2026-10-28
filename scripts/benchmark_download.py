@@ -1,0 +1,353 @@
+"""Compare curl, aria2 and the production downloader against one pinned file set."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from game_downloader.delivery import ArtifactDownloader, DownloadPolicy, _hash_file
+from game_downloader.models import AcquisitionArtifact, AcquisitionPlan, Stage, StageResult
+from game_downloader.workspace import Workspace
+
+MIB = 1024 * 1024
+METHODS = ("curl", "aria2", "aria2-split", "downloader")
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def selected_plan(plan: AcquisitionPlan, case: str) -> AcquisitionPlan:
+    artifacts = [artifact for part in plan.parts for artifact in part.artifacts]
+    if case == "small":
+        candidates = [a for a in artifacts if 64 * MIB <= a.size < 256 * MIB]
+        selected = sorted(candidates, key=lambda a: (abs(a.size - 128 * MIB), a.artifact_id))[:16]
+    else:
+        candidates = [a for a in artifacts if a.size >= 512 * MIB]
+        selected = sorted(candidates, key=lambda a: (a.size, a.artifact_id))[:4]
+    if len(selected) < (16 if case == "small" else 4):
+        raise ValueError(f"Not enough pinned artifacts for {case}")
+    selected_ids = {a.artifact_id for a in selected}
+    parts = tuple(
+        part.model_copy(
+            update={"artifacts": tuple(a for a in part.artifacts if a.artifact_id in selected_ids)}
+        )
+        for part in plan.parts
+    )
+    total = sum(a.size for a in selected)
+    descriptor_bytes = plan.disk_space.descriptor_bytes
+    reduced = plan.model_copy(
+        update={
+            "parts": parts,
+            "disk_space": plan.disk_space.model_copy(
+                update={
+                    "download_bytes": total,
+                    "assembled_bytes": total,
+                    "reserve_bytes": 0,
+                    "required_free_bytes": descriptor_bytes + 2 * total,
+                }
+            ),
+        }
+    )
+    return AcquisitionPlan.model_validate(reduced.model_dump())
+
+
+def artifact_name(artifact: AcquisitionArtifact) -> str:
+    return artifact.artifact_id.removeprefix("sha256:") + ".bin"
+
+
+def verify_file(item: tuple[AcquisitionArtifact, Path]) -> tuple[str, str]:
+    artifact, path = item
+    if path.stat().st_size != artifact.size:
+        raise ValueError("Benchmark received an unexpected file size")
+    sha256, source_verified = _hash_file(path, artifact.source_hash)
+    if artifact.source_hash is not None and not source_verified:
+        raise ValueError("Benchmark file failed its declared source hash")
+    return artifact.artifact_id, sha256
+
+
+def curl_file(item: tuple[AcquisitionArtifact, Path]) -> None:
+    artifact, directory = item
+    subprocess.run(
+        [
+            "curl",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "300",
+            "--output",
+            str(directory / artifact_name(artifact)),
+            "--url",
+            artifact.source_urls[0],
+        ],
+        check=True,
+        timeout=310,
+    )
+
+
+def worker(args: argparse.Namespace) -> None:
+    plan = AcquisitionPlan.model_validate_json(args.plan.read_bytes())
+    artifacts = tuple(a for part in plan.parts for a in part.artifacts)
+    directory: Path = args.work
+    directory.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    details: dict[str, Any] = {}
+    if args.method == "downloader":
+        result = ArtifactDownloader(
+            DownloadPolicy(max_workers=16), progress_observer=lambda msg: print(msg, flush=True)
+        ).download(plan, Workspace(directory))
+        digests = {item.artifact.artifact_id: item.blob_sha256 for item in result.artifacts}
+        details = {
+            "parallel_range_artifacts": sum(
+                item.transport.parallel_segments > 1 for item in result.artifacts
+            ),
+            "parallel_range_fallbacks": sum(
+                len(item.transport.parallel_range_fallbacks) for item in result.artifacts
+            ),
+            "reused_artifacts": result.reused_artifacts,
+        }
+        if result.reused_artifacts:
+            raise ValueError("A benchmark must not reuse downloaded files")
+        transferred_at = time.monotonic()
+    else:
+        if args.method == "curl":
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(curl_file, ((a, directory) for a in artifacts)))
+        else:
+            input_path = directory / "aria2-input.txt"
+            input_path.write_text(
+                "".join(f"{a.source_urls[0]}\n  out={artifact_name(a)}\n" for a in artifacts)
+            )
+            split = "16" if args.method == "aria2-split" else "1"
+            subprocess.run(
+                [
+                    "aria2c",
+                    "--no-conf=true",
+                    "--max-concurrent-downloads=16",
+                    f"--split={split}",
+                    f"--max-connection-per-server={split}",
+                    "--min-split-size=128M",
+                    "--file-allocation=none",
+                    "--summary-interval=0",
+                    "--download-result=hide",
+                    "--console-log-level=warn",
+                    "--max-tries=4",
+                    "--connect-timeout=15",
+                    "--timeout=60",
+                    "--auto-file-renaming=false",
+                    f"--dir={directory}",
+                    f"--input-file={input_path}",
+                ],
+                check=True,
+                timeout=600,
+            )
+        transferred_at = time.monotonic()
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            digests = dict(
+                executor.map(verify_file, ((a, directory / artifact_name(a)) for a in artifacts))
+            )
+    finished = time.monotonic()
+    total = sum(a.size for a in artifacts)
+    write_json(
+        args.result,
+        {
+            "method": args.method,
+            "bytes": total,
+            "files": len(artifacts),
+            "transfer_seconds": transferred_at - started,
+            "validation_seconds": finished - transferred_at,
+            "elapsed_seconds": finished - started,
+            "mib_per_second": total / MIB / (finished - started),
+            "digests": digests,
+            **details,
+        },
+    )
+
+
+def benchmark(args: argparse.Namespace) -> None:
+    root: Path = args.work
+    reports: Path = args.reports
+    root.mkdir(parents=True, exist_ok=False)
+    reports.mkdir(parents=True, exist_ok=True)
+    metadata_root = root / "metadata"
+    resolved = subprocess.run(
+        [
+            "game-downloader",
+            "run",
+            "--target",
+            "wot-eu",
+            "--client-type",
+            "sd",
+            "--languages",
+            "ALL",
+            "--until",
+            "plan-acquisition",
+            "--skip-check",
+            "--json",
+            "--data-root",
+            str(metadata_root),
+        ],
+        stdout=subprocess.PIPE,
+        check=True,
+        timeout=300,
+    )
+    report = json.loads(resolved.stdout)
+    workspace = Workspace(metadata_root)
+    stage_result = StageResult.model_validate_json(
+        workspace.read_bytes(
+            workspace.stage_path(report["run_id"], Stage.PLAN_ACQUISITION) / "result.json"
+        )
+    )
+    full_plan = AcquisitionPlan.model_validate(stage_result.payload)
+    results: list[dict[str, Any]] = []
+    for case in ("small", "large"):
+        plan = selected_plan(full_plan, case)
+        artifacts = [a for part in plan.parts for a in part.artifacts]
+        # The report identifies files without publishing redirect queries or credentials.
+        write_json(
+            reports / f"{case}-manifest.json",
+            [
+                {
+                    "artifact_id": a.artifact_id,
+                    "path": a.path.utf8,
+                    "size": a.size,
+                    "source_hosts": [urlsplit(url).hostname for url in a.source_urls],
+                }
+                for a in artifacts
+            ],
+        )
+        plan_path = root / f"{case}-plan.json"
+        plan_path.write_text(plan.model_dump_json())
+        reference: dict[str, str] | None = None
+        for repeat in range(args.repeats):
+            # Rotate order so a warmed CDN or a changing route cannot consistently favor one tool.
+            methods = METHODS[repeat % len(METHODS) :] + METHODS[: repeat % len(METHODS)]
+            for method in methods:
+                label = f"{case}-{repeat + 1}-{method}"
+                work = root / label
+                samples = reports / f"{label}-samples.jsonl"
+                monitor = subprocess.Popen(
+                    [
+                        sys.executable,
+                        ".github/scripts/performance-metrics.py",
+                        "monitor",
+                        "--stage",
+                        label,
+                        "--data-root",
+                        str(root),
+                        "--samples",
+                        str(samples),
+                        "--interval-seconds",
+                        "1",
+                    ]
+                )
+                result_path = reports / f"{label}-result.json"
+                time_path = reports / f"{label}-time.log"
+                print(f"BENCHMARK START {label}", flush=True)
+                try:
+                    with (reports / f"{label}.log").open("w") as output:
+                        subprocess.run(
+                            [
+                                "/usr/bin/time",
+                                "--verbose",
+                                f"--output={time_path}",
+                                sys.executable,
+                                "-m",
+                                "scripts.benchmark_download",
+                                "worker",
+                                "--method",
+                                method,
+                                "--plan",
+                                str(plan_path),
+                                "--work",
+                                str(work),
+                                "--result",
+                                str(result_path),
+                            ],
+                            stdout=output,
+                            stderr=subprocess.STDOUT,
+                            check=True,
+                            timeout=900,
+                        )
+                finally:
+                    monitor.terminate()
+                    monitor.wait(timeout=15)
+                subprocess.run(
+                    [
+                        sys.executable,
+                        ".github/scripts/performance-metrics.py",
+                        "summarize",
+                        "--stage",
+                        label,
+                        "--samples",
+                        str(samples),
+                        "--time-report",
+                        str(time_path),
+                        "--output",
+                        str(reports / f"{label}-performance.json"),
+                    ],
+                    check=True,
+                )
+                measurement = json.loads(result_path.read_text())
+                if reference is None:
+                    reference = measurement["digests"]
+                elif reference != measurement["digests"]:
+                    raise ValueError("The tools did not download identical bytes")
+                results.append({"case": case, "repeat": repeat + 1, **measurement})
+                write_json(reports / "results.json", results)
+                print(
+                    f"BENCHMARK RESULT {label}: {measurement['mib_per_second']:.1f} MiB/s, "
+                    f"{measurement['elapsed_seconds']:.2f}s, verified identical bytes",
+                    flush=True,
+                )
+                shutil.rmtree(work)
+    summary = [
+        "| File set | Run | Tool | MiB/s including validation | Seconds |",
+        "| --- | ---: | --- | ---: | ---: |",
+    ]
+    summary.extend(
+        f"| {r['case']} | {r['repeat']} | {r['method']} | "
+        f"{r['mib_per_second']:.1f} | {r['elapsed_seconds']:.2f} |"
+        for r in results
+    )
+    rendered = "\n".join(summary) + "\n"
+    (reports / "summary.md").write_text(rendered)
+    if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(path, "a") as output:
+            output.write(rendered)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run = subparsers.add_parser("run")
+    run.add_argument("--work", type=Path, required=True)
+    run.add_argument("--reports", type=Path, required=True)
+    run.add_argument("--repeats", type=int, choices=(1, 2, 3), default=2)
+    run.set_defaults(handler=benchmark)
+    child = subparsers.add_parser("worker")
+    child.add_argument("--method", choices=METHODS, required=True)
+    child.add_argument("--plan", type=Path, required=True)
+    child.add_argument("--work", type=Path, required=True)
+    child.add_argument("--result", type=Path, required=True)
+    child.set_defaults(handler=worker)
+    args = parser.parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -40,6 +40,12 @@ target, client type, languages
 и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
+Ручной диагностический `.github/workflows/benchmark-game-download.yml` сравнивает curl,
+aria2 и внутренний downloader на одинаковом подмножестве pinned файлов `wot-eu`.
+Он использует обычный lifecycle временной VM, проверяет размеры/source hash/SHA-256,
+сохраняет performance artifacts и всегда выполняет cleanup. Snapshot consumer и status
+production-версий в этом workflow не вызываются.
+
 ## Границы компонентов
 
 - `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,

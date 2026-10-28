@@ -144,6 +144,21 @@ ClickHouse и S3 в Pages workflow недоступны.
 Стандартный URL проекта после первого deployment:
 `https://wotstat.github.io/game-unpack-pipeline/`.
 
+## Диагностика скорости скачивания
+
+`Actions → Benchmark game download → Run workflow` на `main` арендует отдельную почасовую
+MSKs-5 с production firewall и четырёхчасовым kill switch. Workflow получает один Acquisition
+Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним соединением на файл, aria2 с Range
+и production downloader. Наборы включают 16 файлов 64–256 МиБ и четыре файла от 512 МиБ.
+Порядок инструментов меняется между повторами; каждый инструмент получает пустой каталог,
+размеры и source hash проверяются, SHA-256 всех результатов должны совпасть.
+
+Время включает проверку целостности. Артефакт `download-benchmark-<run_id>-<attempt>` содержит
+отдельно время передачи и проверки, CPU/I/O/network samples, версии инструментов и манифест
+выбранных файлов без URL query/credentials. У downloader его внутренняя проверка входит во
+время передачи. После измерений cleanup подтверждает удаление VM, временного SSH-ключа и runner.
+Workflow не публикует snapshot и не меняет production status.
+
 ## 7. Автоматическая и ручная проверка новых версий
 
 Workflow автоматически запускается каждый час по расписанию `23 * * * *`: в `00:23`,

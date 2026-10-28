@@ -1,0 +1,154 @@
+name: Benchmark game download
+run-name: Download benchmark · Aeza MSKs-5 · @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Repetitions of each comparison
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: aeza
+    outputs:
+      downloader_runner_label: ${{ steps.provision.outputs.downloader_runner_label }}
+      server_id: ${{ steps.provision.outputs.server_id }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: game-unpack-pipeline
+          permission-administration: write
+      - name: Provision hourly VM with production protections
+        id: provision
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_PUBLIC_TOKEN: ${{ github.token }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
+        run: python3 scripts/runner_lifecycle.py provision --instance-key "${INSTANCE_KEY}"
+
+  benchmark:
+    needs: provision
+    runs-on:
+      - self-hosted
+      - ${{ needs.provision.outputs.downloader_runner_label }}
+    timeout-minutes: 90
+    env:
+      BENCHMARK_ROOT: /var/lib/game-downloader-data/benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+      BENCHMARK_REPORTS: /var/lib/game-downloader-data/benchmark-${{ github.run_id }}-${{ github.run_attempt }}-reports
+      REPEATS: ${{ inputs.repeats }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify VM protections
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl is-active --quiet gup-emergency-self-destruct.timer
+          sudo systemctl is-active --quiet nftables
+          sudo nft --json list table inet gup | python3 -c '
+          import json, sys
+          chains = {entry["chain"]["name"]: entry["chain"]
+                    for entry in json.load(sys.stdin)["nftables"] if "chain" in entry}
+          assert all(chains[name]["policy"] == "drop" for name in ("input", "forward"))
+          '
+          test "$(sudo stat --format=%a /etc/gup-emergency-self-destruct.json)" = 600
+          sudo test ! -s /root/.ssh/authorized_keys
+      - name: Install benchmark tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends aria2 curl sysstat time
+          install -d -m 0700 "${BENCHMARK_REPORTS}"
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.11.28"
+          python-version: "3.13.14"
+      - name: Install pinned downloader
+        run: uv sync --frozen --no-dev
+      - name: Record host and tool versions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 .github/scripts/performance-metrics.py inventory \
+            --data-root /var/lib/game-downloader-data \
+            --output "${BENCHMARK_REPORTS}/host-performance.json"
+          {
+            git rev-parse HEAD
+            curl --version
+            aria2c --version
+            uv run --no-sync python --version
+          } >"${BENCHMARK_REPORTS}/versions.txt"
+      - name: Compare identical pinned files
+        run: >-
+          uv run --no-sync python -m scripts.benchmark_download run
+          --work "${BENCHMARK_ROOT}"
+          --reports "${BENCHMARK_REPORTS}"
+          --repeats "${REPEATS}"
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: download-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BENCHMARK_REPORTS }}
+          retention-days: 14
+          if-no-files-found: warn
+
+  cleanup:
+    if: always()
+    needs:
+      - provision
+      - benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: aeza
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: game-unpack-pipeline
+          permission-administration: write
+      - name: Confirm VM deletion and remove temporary keys and runners
+        if: always()
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
+          INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
+          SERVER_ID: ${{ needs.provision.outputs.server_id }}
+        run: >-
+          python3 scripts/runner_lifecycle.py cleanup
+          --instance-key "${INSTANCE_KEY}"
+          --server-id "${SERVER_ID}"
+          --diagnostics
