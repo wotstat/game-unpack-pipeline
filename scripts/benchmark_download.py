@@ -31,6 +31,7 @@ DIAGNOSTIC_METHODS = (
     "downloader",
     "downloader-16",
     "downloader-1",
+    "downloader-processes",
 )
 
 
@@ -49,6 +50,10 @@ def selected_plan(plan: AcquisitionPlan, case: str) -> AcquisitionPlan:
         selected = sorted(candidates, key=lambda a: (a.size, a.artifact_id))[:4]
     if len(selected) < (16 if case == "small" else 4):
         raise ValueError(f"Not enough pinned artifacts for {case}")
+    return subset_plan(plan, selected)
+
+
+def subset_plan(plan: AcquisitionPlan, selected: list[AcquisitionArtifact]) -> AcquisitionPlan:
     selected_ids = {a.artifact_id for a in selected}
     parts = tuple(
         part.model_copy(
@@ -118,7 +123,50 @@ def worker(args: argparse.Namespace) -> None:
     directory.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     details: dict[str, Any] = {}
-    if args.method.startswith("downloader"):
+    if args.method == "downloader-processes":
+        # Diagnostic isolation: each process runs the unchanged production implementation.
+        process_count = min(4, len(artifacts))
+        groups: list[list[AcquisitionArtifact]] = [[] for _ in range(process_count)]
+        loads = [0] * process_count
+        for artifact in sorted(artifacts, key=lambda a: (-a.size, a.artifact_id)):
+            index = min(range(process_count), key=lambda index: (loads[index], index))
+            groups[index].append(artifact)
+            loads[index] += artifact.size
+
+        def run_group(index: int) -> dict[str, Any]:
+            group_plan = directory / f"group-{index}-plan.json"
+            group_plan.write_text(subset_plan(plan, groups[index]).model_dump_json())
+            group_result = directory / f"group-{index}-result.json"
+            with (directory / f"group-{index}.log").open("w") as output:
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "scripts.benchmark_download",
+                        "worker",
+                        "--method",
+                        "downloader",
+                        "--plan",
+                        str(group_plan),
+                        "--work",
+                        str(directory / f"group-{index}"),
+                        "--result",
+                        str(group_result),
+                    ],
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    check=True,
+                    timeout=600,
+                )
+            value: dict[str, Any] = json.loads(group_result.read_text())
+            return value
+
+        with ThreadPoolExecutor(max_workers=process_count) as executor:
+            group_results = list(executor.map(run_group, range(process_count)))
+        digests = {key: value for group in group_results for key, value in group["digests"].items()}
+        details = {"download_processes": process_count, "artifact_workers": 4 * process_count}
+        transferred_at = time.monotonic()
+    elif args.method.startswith("downloader"):
         workers = {"downloader-16": 16, "downloader-1": 1, "downloader-baseline": 16}.get(
             args.method, 4
         )
