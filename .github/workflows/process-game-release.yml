@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · ${{ inputs.selectel_location || 'ru-9a' }} · @${{ github.actor }}
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza MSKs-5 · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -30,31 +30,11 @@ on:
         required: true
         default: ALL
         type: string
-      selectel_location:
-        description: Selectel pool segment (ru-2c/ru-8a/ru-9a use HighFreq without dedicated cores)
-        required: true
-        default: ru-9a
-        type: choice
-        options:
-          - ru-7a
-          - ru-7b
-          - ru-3b
-          - ru-2c
-          - ru-6a
-          - ru-6b
-          - ru-6c
-          - ru-8a
-          - ru-9a
       detected_release_name:
         description: Optional release detected by Check game releases
         required: false
         default: ""
         type: string
-      preemptible:
-        description: Use preemptible VMs (two attempts, then one ordinary VM)
-        required: true
-        default: true
-        type: boolean
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
@@ -75,46 +55,15 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
-  SELECTEL_PREEMPTIBLE: ${{ inputs.preemptible && fromJSON(github.run_attempt) < 3 }}
-  SELECTEL_FLAVOR_ID: >-
-    ${{ (inputs.selectel_location == 'ru-8a' || (inputs.selectel_location || 'ru-9a') == 'ru-9a')
-        && 'HFL1.16-32768-240'
-        || inputs.selectel_location == 'ru-2c' && 'HFL1.8-16384-240'
-        || inputs.selectel_location == 'ru-6a' && 'HFL2.8-32768-256-AMD'
-        || inputs.selectel_location == 'ru-6b' && 'HFL2.8-32768-256-INTEL'
-        || 'HFL2.16-32768-256-AMD' }}
-  SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-9a' }}
-  SELECTEL_OS_REGION_NAME: >-
-    ${{ inputs.selectel_location == 'ru-3b' && 'ru-3'
-        || inputs.selectel_location == 'ru-2c' && 'ru-2'
-        || startsWith(inputs.selectel_location, 'ru-6') && 'ru-6'
-        || inputs.selectel_location == 'ru-8a' && 'ru-8'
-        || (inputs.selectel_location || 'ru-9a') == 'ru-9a' && 'ru-9' || 'ru-7' }}
-  SELECTEL_PUBLIC_NETWORK_API_URL: >-
-    ${{ inputs.selectel_location == 'ru-3b'
-        && 'https://ru-3.cloud.api.selcloud.ru/public-network'
-        || inputs.selectel_location == 'ru-2c'
-        && 'https://ru-2.cloud.api.selcloud.ru/public-network'
-        || startsWith(inputs.selectel_location, 'ru-6')
-        && 'https://ru-6.cloud.api.selcloud.ru/public-network'
-        || inputs.selectel_location == 'ru-8a'
-        && 'https://ru-8.cloud.api.selcloud.ru/public-network'
-        || (inputs.selectel_location || 'ru-9a') == 'ru-9a'
-        && 'https://ru-9.cloud.api.selcloud.ru/public-network'
-        || 'https://ru-7.cloud.api.selcloud.ru/public-network' }}
 
 jobs:
   provision:
     name: Provision (manual-${{ github.run_id }}-${{ github.run_attempt }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: selectel
+    environment: aeza
     outputs:
-      preempted: ${{ steps.provision.outputs.preempted }}
-      emergency_credential_id: ${{ steps.provision.outputs.emergency_credential_id }}
       emergency_self_destruct_at: ${{ steps.provision.outputs.emergency_self_destruct_at }}
-      port_id: ${{ steps.provision.outputs.port_id }}
-      public_address: ${{ steps.provision.outputs.public_address }}
       resource_key: ${{ steps.provision.outputs.resource_key }}
       downloader_runner_id: ${{ steps.provision.outputs.downloader_runner_id }}
       downloader_runner_label: ${{ steps.provision.outputs.downloader_runner_label }}
@@ -130,7 +79,6 @@ jobs:
       wotstat_assets_runner_name: ${{ steps.provision.outputs.wotstat_assets_runner_name }}
       runner_scope_label: ${{ steps.provision.outputs.runner_scope_label }}
       runner_version: ${{ steps.provision.outputs.runner_version }}
-      security_group_id: ${{ steps.provision.outputs.security_group_id }}
       server_id: ${{ steps.provision.outputs.server_id }}
       server_name: ${{ steps.provision.outputs.server_name }}
     steps:
@@ -147,9 +95,6 @@ jobs:
           repositories: game-unpack-pipeline
           permission-administration: write
 
-      - name: Install OpenStack CLI
-        uses: ./.github/actions/setup-openstack
-
       - name: Create VM and wait for runner
         id: provision
         env:
@@ -157,34 +102,18 @@ jobs:
           GITHUB_PUBLIC_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           RUNNER_ONLINE_TIMEOUT_SECONDS: "600"
-          SELECTEL_IMAGE_ID: >-
-            ${{ inputs.selectel_location == 'ru-3b'
-                && (vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit')
-                || inputs.selectel_location == 'ru-2c'
-                && (vars.SELECTEL_IMAGE_ID_RU_2 || 'Ubuntu 24.04 LTS 64-bit')
-                || startsWith(inputs.selectel_location, 'ru-6')
-                && (vars.SELECTEL_IMAGE_ID_RU_6 || 'Ubuntu 24.04 LTS 64-bit')
-                || inputs.selectel_location == 'ru-8a'
-                && (vars.SELECTEL_IMAGE_ID_RU_8 || 'Ubuntu 24.04 LTS 64-bit')
-                || (inputs.selectel_location || 'ru-9a') == 'ru-9a'
-                && (vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit')
-                || vars.SELECTEL_IMAGE_ID }}
-          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
-          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
-          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
-          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
         run: >-
-          python3 -m scripts.selectel_attempt provision
+          python3 -m scripts.vm_monitor provision
           --instance-key "${INSTANCE_KEY}"
-          --report "${RUNNER_TEMP}/selectel-attempt/provision.json"
+          --report "${RUNNER_TEMP}/aeza-attempt/provision.json"
 
       - name: Upload VM provision report
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: selectel-attempt-${{ github.run_id }}-${{ github.run_attempt }}-provision
-          path: ${{ runner.temp }}/selectel-attempt/provision.json
+          name: aeza-attempt-${{ github.run_id }}-${{ github.run_attempt }}-provision
+          path: ${{ runner.temp }}/aeza-attempt/provision.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -235,6 +164,22 @@ jobs:
             "${selected_workers}" >>"${GITHUB_ENV}"
           free -h
           df -h "${GAME_DOWNLOADER_DATA_ROOT}"
+
+      - name: Verify temporary VM protections
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl is-active --quiet gup-emergency-self-destruct.timer
+          sudo systemctl is-active --quiet nftables
+          sudo nft --json list table inet gup | python3 -c '
+          import json, sys
+          chains = {entry["chain"]["name"]: entry["chain"]
+                    for entry in json.load(sys.stdin)["nftables"] if "chain" in entry}
+          assert all(chains[name]["policy"] == "drop" for name in ("input", "forward"))
+          '
+          test "$(sudo stat --format=%a /etc/gup-emergency-self-destruct.json)" = 600
+          sudo test ! -s /root/.ssh/authorized_keys
+          systemctl show gup-emergency-self-destruct.timer --property=NextElapseUSecRealtime
 
       - name: Install system tools
         shell: bash
@@ -404,12 +349,10 @@ jobs:
     needs: provision
     runs-on: ubuntu-latest
     timeout-minutes: 260
-    environment: selectel
+    environment: aeza
     permissions:
       actions: write
       contents: read
-    outputs:
-      preempted: ${{ steps.monitor.outputs.preempted }}
     steps:
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
@@ -437,9 +380,6 @@ jobs:
           repositories: game-unpack-pipeline
           permission-administration: write
 
-      - name: Install OpenStack CLI for VM monitoring and cleanup
-        uses: ./.github/actions/setup-openstack
-
       - name: Monitor temporary VM through publication
         id: monitor
         if: steps.watch.outputs.timed_out != 'true'
@@ -447,27 +387,23 @@ jobs:
           GITHUB_WATCH_TOKEN: ${{ github.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
-          SELECTEL_VM_DEADLINE: ${{ needs.provision.outputs.emergency_self_destruct_at }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
+          AEZA_VM_DEADLINE: ${{ needs.provision.outputs.emergency_self_destruct_at }}
           PUBLISH_WOT_SRC: ${{ inputs.publish_wot_src }}
           PUBLISH_WOT_GUI_ASSETS: ${{ inputs.publish_wot_gui_assets }}
           PUBLISH_WOTSTAT_ASSETS: ${{ inputs.publish_wotstat_assets }}
-          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
-          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
-          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
-          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
         run: >-
-          python3 -m scripts.selectel_attempt watch
+          python3 -m scripts.vm_monitor watch
           --instance-key "${INSTANCE_KEY}"
           --server-id "${SERVER_ID}"
-          --report "${RUNNER_TEMP}/selectel-attempt/monitor.json"
+          --report "${RUNNER_TEMP}/aeza-attempt/monitor.json"
 
       - name: Upload VM monitoring report
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: selectel-attempt-${{ github.run_id }}-${{ github.run_attempt }}-monitor
-          path: ${{ runner.temp }}/selectel-attempt/monitor.json
+          name: aeza-attempt-${{ github.run_id }}-${{ github.run_attempt }}-monitor
+          path: ${{ runner.temp }}/aeza-attempt/monitor.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -476,30 +412,20 @@ jobs:
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
-          EMERGENCY_CREDENTIAL_ID: ${{ needs.provision.outputs.emergency_credential_id }}
-          PORT_ID: ${{ needs.provision.outputs.port_id }}
           DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
           WOTSTAT_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wotstat_assets_runner_id }}
-          SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
-          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
-          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
-          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
-          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
         run: >-
           python3 scripts/runner_lifecycle.py cleanup
           --instance-key "${INSTANCE_KEY}"
-          --emergency-credential-id "${EMERGENCY_CREDENTIAL_ID}"
           --downloader-runner-id "${DOWNLOADER_RUNNER_ID}"
           --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}"
           --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
           --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}"
           --server-id "${SERVER_ID}"
-          --port-id "${PORT_ID}"
-          --security-group-id "${SECURITY_GROUP_ID}"
           --diagnostics
 
       - name: Cancel workflow after VM interruption
@@ -577,7 +503,7 @@ jobs:
       - publish-wotstat-assets
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: selectel
+    environment: aeza
     outputs:
       deleted_count: ${{ steps.cleanup.outputs.deleted_count }}
     steps:
@@ -594,16 +520,11 @@ jobs:
           repositories: game-unpack-pipeline
           permission-administration: write
 
-      - name: Install OpenStack CLI
-        uses: ./.github/actions/setup-openstack
-
-      - name: Delete runner and Selectel resources
+      - name: Delete runner and Aeza resources
         id: cleanup
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
-          EMERGENCY_CREDENTIAL_ID: ${{ needs.provision.outputs.emergency_credential_id }}
-          PORT_ID: ${{ needs.provision.outputs.port_id }}
           PROVISION_RESULT: ${{ needs.provision.result }}
           DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
           WOT_GUI_ASSETS_PUBLISH_RESULT: ${{ needs.publish-wot-gui-assets.result }}
@@ -615,14 +536,9 @@ jobs:
           WOTSTAT_ASSETS_UPLOAD_RESULT: ${{ needs.publish-wotstat-assets.result }}
           WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT: ${{ inputs.publish_wotstat_assets && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOTSTAT_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wotstat_assets_runner_id }}
-          SECURITY_GROUP_ID: ${{ needs.provision.outputs.security_group_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
           DOWNLOAD_RESULT: ${{ needs.download.result }}
-          SELECTEL_OS_AUTH_URL: ${{ vars.SELECTEL_OS_AUTH_URL }}
-          SELECTEL_OS_PASSWORD: ${{ secrets.SELECTEL_OS_PASSWORD }}
-          SELECTEL_OS_PROJECT_ID: ${{ vars.SELECTEL_OS_PROJECT_ID }}
-          SELECTEL_OS_USERNAME: ${{ vars.SELECTEL_OS_USERNAME }}
-          SELECTEL_OS_USER_DOMAIN_NAME: ${{ vars.SELECTEL_OS_USER_DOMAIN_NAME }}
         run: |
           set -Eeuo pipefail
           diagnostics=()
@@ -635,14 +551,11 @@ jobs:
           fi
           python3 scripts/runner_lifecycle.py cleanup \
             --instance-key "${INSTANCE_KEY}" \
-            --emergency-credential-id "${EMERGENCY_CREDENTIAL_ID}" \
             --downloader-runner-id "${DOWNLOADER_RUNNER_ID}" \
             --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}" \
             --wot-src-runner-id "${WOT_SRC_RUNNER_ID}" \
             --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}" \
             --server-id "${SERVER_ID}" \
-            --port-id "${PORT_ID}" \
-            --security-group-id "${SECURITY_GROUP_ID}" \
             "${diagnostics[@]}"
 
   record-status:
@@ -755,8 +668,6 @@ jobs:
       always() &&
       (github.actor == 'github-actions[bot]' ||
        github.triggering_actor == 'github-actions[bot]' ||
-       needs.provision.outputs.preempted == 'true' ||
-       needs.queue-watchdog.outputs.preempted == 'true' ||
        cancelled()) &&
       needs.provision.result != 'skipped'
     needs:

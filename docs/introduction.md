@@ -2,7 +2,7 @@
 
 Публичный pipeline автоматической проверки, скачивания, распаковки и публикации снимков клиентов
 World of Tanks и «Мира танков». Репозиторий содержит всю основную полезную нагрузку: протоколы WGUS/LSTUS,
-download/verify, распаковку VFS, readable transforms, sealed `GameSnapshot`, временную Selectel VM
+download/verify, распаковку VFS, readable transforms, sealed `GameSnapshot`, временную Aeza VM
 и вызов publisher workflows. Текущее состояние и короткая история завершённых запусков публикуются
 как статическая страница GitHub Pages.
 
@@ -13,16 +13,16 @@ schedule каждый час на :23 UTC
   → lightweight-проверка всех targets
   → для новых версий workflow_dispatch основного pipeline
 workflow_dispatch
-  → одна временная VM, direct public IP и egress-only security group в Selectel
+  → одна почасовая Aeza MSKs-5 VM; одноразовый SSH bootstrap и egress-only nftables
   → локальный systemd kill switch удаляет VM после четырёх часов
   → четыре изолированных repository-level JIT runner на этой VM
   → встроенный download job собирает полный sealed GameSnapshot
   → выбранные reusable workflows из main: wot-src, wot-gui-assets и wotstat-assets-uploader
     обрабатывают snapshot параллельно
-  → cleanup с always() удаляет runner registrations и ресурсы Selectel
+  → cleanup с always() удаляет runner registrations и услугу Aeza
   → результат run записывается в status параллельно с Telegram-отчётом
   → из status и его Git-истории собирается и публикуется GitHub Pages
-  → workflow_run reconciler повторно проверяет ru-7, ru-3, ru-9, ru-6, ru-8 и ru-2
+  → workflow_run reconciler подтверждает удаление услуги Aeza
 ```
 
 Snapshot не загружается в Actions artifact. Downloader и три consumer читают один абсолютный путь
@@ -39,7 +39,7 @@ publisher с `cancel-in-progress: false`.
 | Компонент | Ответственность |
 | --- | --- |
 | `src/game_downloader` | Resolve WGUS/LSTUS, download/verify, client/VFS/readable pipeline, stubs и sealed `GameSnapshot` |
-| `.github/workflows` и `scripts` | Production entrypoint, Selectel lifecycle, четыре JIT runner, cleanup/reconciliation и отчёты |
+| `.github/workflows` и `scripts` | Production entrypoint, Aeza lifecycle, четыре JIT runner, cleanup/reconciliation и отчёты |
 | [`wot-src`](https://github.com/wotstat/wot-src) | Reusable publication workflow, проверка snapshot и публикация исходников, XML/PO, AS3, stubs и Gameface |
 | [`wot-gui-assets`](https://github.com/wotstat/wot-gui-assets) | Reusable publication workflow, проверка snapshot и публикация `res/gui` без `.py` |
 | [`wotstat-assets-uploader`](https://github.com/wotstat/wotstat-assets-uploader) | Reusable upload workflow, проверка snapshot и загрузка временных данных в ClickHouse и S3 |
@@ -95,7 +95,7 @@ representation и точную версию инструмента. `READY` по
 
 ## Local download
 
-The root-level `download.sh` script runs the same downloader pipeline locally without Selectel,
+The root-level `download.sh` script runs the same downloader pipeline locally without Aeza,
 GitHub Actions, or publishers. The recommended short form is:
 
 ```bash
@@ -145,38 +145,16 @@ snapshot до стадии `snapshot` и предоставляет только
 | `target` | `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`, `mt-public-test` |
 | `client_type` | `sd` или `hd` |
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `ALL` |
-| `selectel_location` | `ru-9a` по умолчанию; ручной резерв `ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c` или `ru-8a` |
-| `preemptible` | `true`: две попытки на прерываемых VM, затем одна на обычной при подтверждённом вытеснении; `false`: одна обычная VM |
 | `detected_release_name` | Необязательная подсказка checker; в прямом ручном запуске остаётся пустой |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
 | `publish_wotstat_assets` | Включить временную загрузку через `wotstat-assets-uploader`; по умолчанию `true` |
 
 Каждый consumer можно независимо отключить для ручного рерана. Если отключить все три, workflow только
-соберёт и проверит snapshot, после чего удалит VM. По умолчанию используется `ru-9a`,
-HighFreq без выделенных ядер `HFL1.16-32768-240`: 16 vCPU, 32 ГБ RAM и 240 ГБ
-локального диска. Такой же профиль используется в ручном резерве `ru-8a`.
-Ручной резерв `ru-2c` использует `HFL1.8-16384-240`: 8 vCPU, 16 ГБ RAM и 240 ГБ
-локального диска. Ручные резервы `ru-7a`/`ru-7b`/`ru-3b`/`ru-6c` используют
-HighFreq с выделенными ядрами `HFL2.16-32768-256-AMD`: 16 vCPU, 32 ГБ RAM и
-256 ГБ локального диска. Меньшие профили `ru-6a` (`HFL2.8-32768-256-AMD`)
-и `ru-6b` (`HFL2.8-32768-256-INTEL`) используют выделенные ядра:
-8 vCPU, 32 ГБ RAM и 256 ГБ локального диска. Число workers
-автоматически соответствует доступным CPU. Ручной checker также позволяет выбрать пул; cron
-использует `ru-9a`. Автоматического переключения пулов нет. Standard и произвольный выбор flavor
-не поддерживаются.
-
-Основной workflow и checker по умолчанию включают `preemptible`; cron также использует
-прерываемую VM. При подтверждённом вытеснении следующий полный attempt того же Actions Run
-запускается после cleanup и успешного reconciler. Attempts 1 и 2 прерываемые, attempt 3 — обычный
-и завершает немедленную цепочку. С выключенной опцией автоматических немедленных повторов нет.
-Сохраняются target, inputs и SHA/ref исходного workflow; VM и четыре runner создаются заново,
-поскольку локальный диск Selectel при вытеснении теряется. Ошибки обработки, обычное выключение,
-ручная отмена и недоступность API не запускают такие повторы. Плановые повторы checker остаются.
-
-GitHub-hosted watchdog наблюдает за VM до окончания downloader и всех включённых consumer.
-Причина завершения и возраст VM сохраняются в небольших `selectel-attempt-*` artifacts
-без credentials, адресов и cloud identifiers. Четырёхчасовой дедлайн каждой VM сохраняется.
+соберёт и проверит snapshot, после чего удалит VM. Используется только Aeza Moscow
+Shared MSKs-5: 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe, Ubuntu 24.04, €0,53/час.
+Provision проверяет свободный shared/hourly slot, баланс и котировку до заказа.
+Прерываемых VM, выбора региона и немедленных автоматических rerun нет.
 
 ## Проверка новых версий
 
@@ -188,8 +166,7 @@ chain для объявленной default language, затем сравнив�
 Scheduled run каждый час проверяет все семь targets и автоматически dispatch'ит основной
 pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов; по
 умолчанию включены все семь targets и `dispatch_pipelines`, поэтому найденные новые версии сразу
-запускают production pipeline. Input `selectel_location` выбирает общий пул Selectel для всех
-запускаемых targets: `ru-9a` по умолчанию, `ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c` или `ru-8a`. Scheduled run использует `ru-9a`.
+запускают production pipeline. Все targets используют тот же Aeza MSKs-5.
 Для dry-run нужно явно выключить `dispatch_pipelines`.
 
 При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же
@@ -294,52 +271,30 @@ ID. Затем GitHub Git Database API создаёт один final version com
 
 ## Cleanup и безопасность
 
-- VM получает четыре одноразовые JIT-конфигурации с отдельными HOME и runner directories.
-- GitHub App выпускает короткоживущие installation tokens: `Administration: write` только для
-  регистрации runner и `Contents: write` только для выбранного data-репозитория.
-- `GH_APP_PRIVATE_KEY` хранится как repository-level Actions secret только в оркестраторе и явно
-  передаётся reusable publisher workflows. `SELECTEL_OS_PASSWORD` хранится только в Environment
-  `selectel`; Telegram credentials — только в Environment `telegram`.
-- ClickHouse и S3 secrets/variables uploader хранятся только в Environment
-  `wotstat-assets-uploader` и используются лишь его reusable job. Для доступа к environment secrets
-  caller передаёт `secrets: inherit`; поэтому project-owned uploader workflow входит в trusted
-  boundary всех caller secrets, хотя обращается только к своим трём credentials.
-- У security group нет ingress rules. GitHub Actions Runner скачивается с официального release URL
-  и проверяется по SHA-256.
-- Основной cleanup выполняется с `always()` после ошибок downloader и publisher. Reconciler
-  идемпотентно ищет только ресурсы с точными ownership-маркерами в `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2`.
-- До установки runner cloud-init вооружает systemd timer с абсолютным дедлайном через четыре часа.
-  В дедлайн VM аутентифицируется отдельным истекающим OpenStack application credential, которому
-  разрешён только `DELETE` точного UUID этой VM, и запрашивает собственное удаление. Пароль
-  Selectel service user на VM не передаётся.
-- Штатный cleanup удаляет emergency credential только после успешного удаления или подтверждённого
-  отсутствия VM. Если сработал локальный kill switch, direct public port, security group и runner
-  registrations позднее удаляет обычный reconciler.
-- Основной run всегда отправляет Telegram-отчёт после cleanup. Recovery alert приходит только если
-  reconciler машинно подтвердил `deleted_count > 0`.
-- Для обычного ручного run reconciler стартует по `workflow_run`. Если snapshot был запущен
-  checker'ом или перезапущен через repository `GITHUB_TOKEN`, основной workflow после cleanup и отчётов явно создаёт
-  эквивалентный manual reconciler run: GitHub не порождает следующий `workflow_run` в такой
-  token-originated цепочке.
-  Такой же явный путь предусмотрен для вытесненной или отменённой прерываемой попытки.
-  Только подтверждённое вытеснение допускает полный rerun после успешной очистки.
+Aeza API key хранится в Environment `aeza` и root-файле `0600` на временной VM:
+это общий ключ аккаунта, ограничить его одним сервером нельзя. Bootstrap загружается
+через одноразовый SSH-ключ; до запуска runner systemd вооружает четырёхчасовой timer,
+а nftables закрывает ingress. SSH-ключ удаляется, SSH отключается.
+Каждый runner имеет отдельного Unix-пользователя и HOME, sudo есть только у downloader.
+Архив runner сверяется по SHA-256 официального release asset.
 
-Checker запускается по cron каждый час без отдельной telemetry задержек schedule. Повторы
-неуспешной версии выполняются тем же checker по расписанию из status, без отдельного retry
-scheduler. Внешний status store отсутствует: Git-история региональных status-файлов является
-единственным источником истории страницы, отдельная база или накопительный log-файл не создаются.
-Загрузка в S3 и ClickHouse пока использует временные namespaces uploader. Production S3 assets
-пишутся в `wot` и `mt`, а public-test targets изолированы в `wot-test`/`mt-test`; uploader runs не
-сериализуются.
+Cleanup выполняется с `always()` и подтверждает `deleted`/404 после асинхронного DELETE
+услуги. Reconciler ищет точное имя с hash репозитория, Run ID/attempt и проверяет тариф
+и почасовой payment term. SSH-ключ удаляется после VM; сбой GitHub не мешает удалению
+платной услуги. Watchdog и локальный timer используют один абсолютный дедлайн.
+Для token-originated runs сохраняется явный dispatch reconciler. Recovery alert
+отправляется только при подтверждённом `deleted_count > 0`.
+
+GitHub App, consumer contracts, secrets uploader, Telegram и Git-история status остаются
+прежними. Неуспешные версии повторяются существующим checker по retry state.
 
 ## Настройка и проверка
 
-Полная настройка Selectel, GitHub App, Environments, variables и Telegram описана в
+Полная настройка Aeza, GitHub App, Environments, variables и Telegram описана в
 [`setup.md`](setup.md). `Process game release` сразу создаёт тарифицируемые ресурсы;
 `Check game releases` по умолчанию dispatch'ит production pipeline для найденных новых версий.
 
 ```text
-.github/actions/setup-openstack/
 .github/scripts/
 .github/workflows/check-game-releases.yml
 .github/workflows/deploy-status-page.yml
@@ -357,7 +312,7 @@ tests/
 docs/setup.md
 ```
 
-Локальные проверки не обращаются к GitHub или Selectel:
+Локальные проверки не обращаются к GitHub или Aeza:
 
 ```bash
 ./scripts/check.sh

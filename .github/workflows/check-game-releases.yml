@@ -4,7 +4,7 @@ run-name: >-
   ${{ github.event_name == 'schedule' && 'scheduled dispatch'
       || inputs.dispatch_pipelines && 'manual dispatch'
       || 'dry-run' }}
-  · ${{ inputs.selectel_location || 'ru-9a' }} · @${{ github.actor }}
+  · Aeza MSKs-5 · @${{ github.actor }}
 
 on:
   schedule:
@@ -55,26 +55,6 @@ on:
         description: Ignore retry delay for all mismatched releases
         required: true
         default: false
-        type: boolean
-      selectel_location:
-        description: Selectel pool segment (ru-2c/ru-8a/ru-9a use HighFreq without dedicated cores)
-        required: true
-        default: ru-9a
-        type: choice
-        options:
-          - ru-7a
-          - ru-7b
-          - ru-3b
-          - ru-2c
-          - ru-6a
-          - ru-6b
-          - ru-6c
-          - ru-8a
-          - ru-9a
-      preemptible:
-        description: Use preemptible VMs (two attempts, then one ordinary VM)
-        required: true
-        default: true
         type: boolean
 
 permissions:
@@ -259,8 +239,6 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_NAME: ${{ steps.compare.outputs.release_name }}
-          SELECTEL_LOCATION: ${{ inputs.selectel_location || 'ru-9a' }}
-          SELECTEL_PREEMPTIBLE: ${{ github.event_name == 'schedule' || inputs.preemptible }}
           TARGET: ${{ matrix.target }}
         run: |
           set -Eeuo pipefail
@@ -269,8 +247,6 @@ jobs:
             --field target="${TARGET}" \
             --field client_type=sd \
             --field languages=ALL \
-            --field selectel_location="${SELECTEL_LOCATION}" \
-            --field preemptible="${SELECTEL_PREEMPTIBLE}" \
             --field detected_release_name="${RELEASE_NAME}" \
             --field publish_wot_src=true \
             --field publish_wot_gui_assets=true \

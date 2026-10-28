@@ -6,138 +6,44 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts import emergency_self_destruct as watchdog
-
-SERVER_ID = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
-CREDENTIAL_ID = "123e4567-e89b-12d3-a456-426614174000"
+from scripts import emergency_self_destruct as emergency
 
 
-def test_load_config_requires_https_and_a_valid_region(tmp_path: Path) -> None:
-    path = tmp_path / "watchdog.json"
-    path.write_text(
+@pytest.mark.parametrize("status", ["active", "deleted", "missing", "wrong_owner"])
+def test_emergency_deletion_checks_identity_and_confirms_async_completion(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
         json.dumps(
             {
-                "auth_url": "https://cloud.api.selcloud.ru/identity/v3",
-                "region": "ru-7",
+                "api_key": "dummy-secret",
+                "server_id": "42",
+                "server_name": "owned-attempt",
+                "product_id": 157,
             }
-        ),
-        encoding="utf-8",
+        )
     )
-
-    config = watchdog.load_config(path)
-
-    assert config == watchdog.EmergencyConfig(
-        auth_url="https://cloud.api.selcloud.ru/identity/v3",
-        region="ru-7",
-    )
-
-
-def test_load_target_reads_only_instance_specific_metadata() -> None:
-    metadata = {
-        "uuid": SERVER_ID,
-        "meta": {
-            "gup_emergency_credential_id": CREDENTIAL_ID,
-            "gup_emergency_credential_secret": "one-time-secret",
-        },
+    server = {
+        "name": "other" if status == "wrong_owner" else "owned-attempt",
+        "productId": 157,
+        "paymentTerm": "hour",
+        "status": status,
     }
-
-    with patch.object(watchdog, "request_json", return_value=(200, metadata, {})):
-        target = watchdog.load_target()
-
-    assert target == watchdog.EmergencyTarget(
-        server_id=SERVER_ID,
-        application_credential_id=CREDENTIAL_ID,
-        application_credential_secret="one-time-secret",
-    )
-
-
-def test_select_compute_endpoint_requires_one_public_endpoint_in_the_configured_region() -> None:
-    token_payload = {
-        "token": {
-            "catalog": [
-                {
-                    "type": "compute",
-                    "endpoints": [
-                        {
-                            "interface": "public",
-                            "region_id": "ru-7",
-                            "url": "https://ru-7.cloud.api.selcloud.ru/compute/v2.1",
-                        },
-                        {
-                            "interface": "public",
-                            "region_id": "ru-9",
-                            "url": "https://ru-9.cloud.api.selcloud.ru/compute/v2.1",
-                        },
-                    ],
-                }
-            ]
-        }
-    }
-
-    assert watchdog.select_compute_endpoint(token_payload, "ru-7") == (
-        "https://ru-7.cloud.api.selcloud.ru/compute/v2.1"
-    )
-    with pytest.raises(watchdog.EmergencySelfDestructError):
-        watchdog.select_compute_endpoint(token_payload, "ru-8")
-
-
-def test_authentication_and_delete_use_the_application_credential_and_exact_server() -> None:
-    config = watchdog.EmergencyConfig(
-        auth_url="https://cloud.api.selcloud.ru/identity/v3",
-        region="ru-7",
-    )
-    target = watchdog.EmergencyTarget(
-        server_id=SERVER_ID,
-        application_credential_id=CREDENTIAL_ID,
-        application_credential_secret="one-time-secret",
-    )
-    token_payload = {
-        "token": {
-            "catalog": [
-                {
-                    "type": "compute",
-                    "endpoints": [
-                        {
-                            "interface": "public",
-                            "region": "ru-7",
-                            "url": "https://ru-7.cloud.api.selcloud.ru/compute/v2.1",
-                        }
-                    ],
-                }
-            ]
-        }
-    }
-
     with patch.object(
-        watchdog,
-        "request_json",
+        emergency,
+        "request",
         side_effect=[
-            (201, token_payload, {"X-Subject-Token": "short-lived-token"}),
-            (204, None, {}),
+            (404, None) if status == "missing" else (200, server),
+            (204, None),
         ],
     ) as request:
-        token, endpoint = watchdog.authenticate(config, target)
-        watchdog.delete_server(endpoint, target.server_id, token)
-
-    authentication = request.call_args_list[0]
-    assert authentication.args == (
-        "POST",
-        "https://cloud.api.selcloud.ru/identity/v3/auth/tokens",
-    )
-    assert authentication.kwargs["body"] == {
-        "auth": {
-            "identity": {
-                "methods": ["application_credential"],
-                "application_credential": {
-                    "id": CREDENTIAL_ID,
-                    "secret": "one-time-secret",
-                },
-            }
-        }
-    }
-    deletion = request.call_args_list[1]
-    assert deletion.args == (
-        "DELETE",
-        f"https://ru-7.cloud.api.selcloud.ru/compute/v2.1/servers/{SERVER_ID}",
-    )
-    assert deletion.kwargs["headers"] == {"X-Auth-Token": "short-lived-token"}
+        if status in {"active", "wrong_owner"}:
+            with pytest.raises(emergency.EmergencySelfDestructError):
+                emergency.self_destruct(config)
+        else:
+            emergency.self_destruct(config)
+    assert request.call_count == (2 if status == "active" else 1)
+    if status == "active":
+        assert request.call_args.args == ("DELETE", "42", "dummy-secret")

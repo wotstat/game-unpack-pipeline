@@ -15,8 +15,8 @@ runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Teleg
 
 ```text
 manual workflow_dispatch
-  → provision одной VM, direct public IP и egress-only security group в Selectel
-  → systemd kill switch удаляет VM через Selectel API после четырёх часов
+  → provision одной почасовой Aeza MSKs-5 VM и одноразового SSH-ключа
+  → SSH bootstrap вооружает systemd kill switch и закрывает ingress через nftables
   → четыре JIT runner в game-unpack-pipeline: downloader, wot-src, wot-gui-assets и wotstat-assets
   → встроенные downloader stages на downloader runner
   → sealed snapshot на локальном диске VM
@@ -25,7 +25,7 @@ manual workflow_dispatch
   → cleanup с always()
   → параллельно запись результата run в status и итоговый Telegram-отчёт
   → после status commit сборка и deployment GitHub Pages
-  → workflow_run reconciler в ru-7, ru-3, ru-9, ru-6, ru-8 и ru-2
+  → workflow_run reconciler подтверждает удаление услуги Aeza и SSH-ключа
   → recovery alert только при deleted_count > 0
 ```
 
@@ -36,7 +36,7 @@ targets, сравнивает `release_name` с `status/<target>.json` и в dis
 dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет
-target, client type, languages, ручной выбор `selectel_location`, boolean `preemptible`
+target, client type, languages
 и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
@@ -45,7 +45,7 @@ target, client type, languages, ручной выбор `selectel_location`, boo
 - `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,
   client/VFS/readable pipeline, Python/XML/MO/web transforms, stubs, seal и verify `GameSnapshot`.
 - `.github/workflows`, `.github/scripts`, `scripts`, `status-page`: production entrypoint, stage
-  execution и telemetry, Selectel lifecycle, JIT runner bootstrap, publisher calls,
+  execution и telemetry, Aeza lifecycle, JIT runner bootstrap, publisher calls,
   cleanup/reconciliation и генерация GitHub Pages.
 - [`wotstat/wot-src`](https://github.com/wotstat/wot-src), локально обычно `../wot-src`: reusable
   publication workflow, независимая проверка snapshot и проекция исходников, XML/PO, AS3, stubs и
@@ -68,25 +68,17 @@ workflow или отдельный репозиторий и не перенос
 - `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
-  использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной input `selectel_location`
-  задаёт общий пул для всех запускаемых targets; cron использует `ru-9a`.
-  `preemptible: true` по умолчанию в основном workflow и checker; cron также включает его.
-  Если выключить, VM обычная и немедленных автоматических повторов нет.
-- При включённом `preemptible` первые две полные попытки одного Actions Run прерываемые,
-  третья — обычная. Полный rerun с теми же SHA/ref разрешён только после подтверждённого
-  вытеснения и успешного reconciler. Обычная попытка завершает немедленную цепочку;
-  существующее расписание checker для неуспешной версии сохраняется.
-  Подтверждение требует точных ownership-маркеров, `gup_boot_disk=local`, выбранного
-  режима, системного тега `preemptible` и `SHELVED_OFFLOADED`/`EXPIRED`. `SHUTOFF`,
-  отсутствие VM, ошибки API, NoValidHost и ошибки обработки не считаются вытеснением.
-  Чтение и создание используют compute microversion 2.72. Локальный диск теряется,
-  поэтому каждая попытка создаёт новые VM/JIT runner и собирает snapshot заново.
-  Runtime watchdog на стандартном GitHub-hosted runner опрашивает VM до завершения
-  downloader и включённых consumer в пределах исходного четырёхчасового дедлайна.
-  Артефакты `selectel-attempt-<run_id>-<run_attempt>-provision|monitor` содержат только
-  несекретную причину завершения, режим и возраст VM. Повторы manual/bot reconciliation
-  сериализованы по source Run ID/attempt, чтобы дубли не отменяли ожидающую
-  reconciliation следующего attempt; устаревшая попытка не может запустить новый rerun.
+  использует default branch, `sd`, `ALL` и все три snapshot consumer.
+- Единственный профиль — Aeza Moscow Shared `MSKs-5`, product ID `157`, group `2`:
+  16 vCPU, 32 ГБ RAM, 480 ГБ NVMe, ОС `ubuntu_2404`. Заказ оплачивается с баланса,
+  `term: hour`, `termCount: 1`, `autoProlong: true`. Preflight проверяет доступность,
+  котировку не выше €0,53/час, баланс на четыре часа и shared/hourly account limits.
+  При нехватке лимитов действует существующий checker retry. Выбора региона, preemptible,
+  немедленных полных rerun и Selectel fallback нет.
+- Runtime watchdog на GitHub-hosted runner отслеживает VM до завершения downloader и
+  включённых consumer в пределах исходного четырёхчасового дедлайна. Артефакты
+  `aeza-attempt-<run_id>-<attempt>-provision|monitor` содержат только provider, тариф,
+  почасовой режим, reason и timestamp.
 - Checker не создаёт downloader Run и не скачивает payload: lightweight probe запрашивает metadata,
   затем один patches chain для объявленной default language. Отсутствующий или некорректный status
   блокирует target; сбои targets изолированы через matrix `fail-fast: false`.
@@ -124,14 +116,7 @@ workflow или отдельный репозиторий и не перенос
   20 минут с момента входа в хвост. Сетевые таймауты, ограниченные повторы, пять минут без полезного
   прогресса обычного HTTP, лимит download-шага 60 минут и четырёхчасовой kill switch сохраняются.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
-  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`. `selectel_location`
-  позволяет вручную выбрать `ru-9a` (по умолчанию), резервный `ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c` или `ru-8a`
-  в основном workflow и checker; cron checker использует default `ru-9a`.
-  Автоматического переключения пулов нет.
-  Для `ru-2`/`ru-3`/`ru-6`/`ru-8`/`ru-9` образ берётся
-  из optional variable `SELECTEL_IMAGE_ID_RU_2`/`SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_6`/`SELECTEL_IMAGE_ID_RU_8`/`SELECTEL_IMAGE_ID_RU_9`
-  либо по уникальному имени
-  `Ubuntu 24.04 LTS 64-bit` в выбранном region.
+  `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,
   snapshot identity и descriptor digest.
 - Publisher lifecycle принадлежит reusable workflow data-репозитория и вызывается прямым
@@ -159,38 +144,30 @@ workflow или отдельный репозиторий и не перенос
 - Каждый runner имеет уникальные name/label на основе `run_id`/`run_attempt`, отдельного
   Unix-пользователя, HOME, runner directory и одноразовую JIT-конфигурацию. Только downloader имеет
   `sudo`.
-- Основной пул `ru-9a` и ручной резерв `ru-8a` используют HighFreq без выделенных ядер
-  `HFL1.16-32768-240` (16 vCPU, 32 ГБ RAM, 240 ГБ local disk).
-  Ручной резерв `ru-2c` использует `HFL1.8-16384-240`
-  (8 vCPU, 16 ГБ RAM, 240 ГБ local disk, без выделенных ядер).
-  Резервный flavor в `ru-7a`, `ru-7b`, `ru-3b` и `ru-6c` зафиксирован как HighFreq с выделенными ядрами
-  `HFL2.16-32768-256-AMD` (16 vCPU, 32 ГБ RAM, 256 ГБ local disk).
-  `ru-6a` использует `HFL2.8-32768-256-AMD`, `ru-6b` — `HFL2.8-32768-256-INTEL`
-  (оба: 8 vCPU, 32 ГБ RAM, 256 ГБ local disk, выделенные ядра).
-  Flavor определяется только выбранным сегментом; Standard и произвольный выбор flavor не поддерживаются.
-- Cleanup выполняется после ошибок всех consumer. Reconciler идемпотентен, ищет ресурсы по
-  точным ownership-маркерам и проверяет `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2`. Перед удалением общего
-  emergency credential reconciler подтверждает отсутствие VM во всех шести region; отсутствие
-  только в текущем region не разрешает удалить credential ещё живой VM в другом пуле.
-- При статусе VM `ERROR` provision до cleanup выводит только `fault.code` и очищенный
-  `fault.message`. Из сообщения удаляются известные secrets/JIT-конфигурации, credentials по
-  именованным полям и account/project identifiers; control characters экранируются. `fault.details`,
-  user data и полный server payload не выводятся.
+- Cleanup выполняется после ошибок всех consumer и удаляет платную услугу независимо от
+  ошибок GitHub. Reconciler идемпотентен: точное имя содержит hash репозитория и Run ID/attempt;
+  до удаления сверяются имя, product ID и `paymentTerm: hour`. У SSH-ключа дополнительно
+  сверяется полный ownership descriptor в комментарии public key. HTTP 204 только ставит
+  удаление в очередь: cleanup подтверждает `deleted`/404, затем удаляет SSH-ключ.
+- API service payload, `secureParameters`, пароли и account identifiers не выводятся.
+  Диагностика ошибок содержит HTTP status без тела provider response.
 - Ошибки torrent descriptor содержат исходный и известный конечный URL. Userinfo, query и fragment
   удаляются, включая URL в транспортной ошибке; control characters экранируются.
-- До bootstrap runner cloud-init вооружает абсолютный systemd timer на четыре часа. Для VM создаётся
-  отдельный restricted OpenStack application credential, разрешающий только `DELETE` точного UUID
-  этой VM; credential истекает через час после дедлайна для повторных попыток. Штатный cleanup и
-  reconciler удаляют credential по детерминированным name/description только после успешной очистки
-  или подтверждённого отсутствия VM. Самоудаление VM не очищает direct public port, security group и
-  runner registrations — эти хвосты принадлежат последующему reconciler.
-- Для ручного snapshot run reconciler запускается через `workflow_run`. Snapshot run, созданный
-  checker или перезапущенный через repository `GITHUB_TOKEN`, после завершения cleanup и отчётов
-  явно dispatch'ит reconciler, потому что
-  GitHub подавляет последующий `workflow_run` для token-originated chain. Оба пути передают исходные
-  `run_id`/`run_attempt`; reconciliation остаётся идемпотентной.
-  Для подтверждённого вытеснения и отменённой прерываемой попытки также предусмотрен
-  явный dispatch. Ручная отмена без успешного шага отмены из VM monitor не запускает rerun.
+- Bootstrap выполняется через временный Ed25519 SSH-ключ с `autoAssign: false`.
+  Приватный ключ существует только во временном каталоге provisioner; host key использует
+  отдельный known_hosts с `accept-new`, изменения host key запрещены. JIT и API key передаются
+  через SSH stdin, не argv или user data. Заказ и bootstrap не повторяются после неизвестного
+  результата. Reconciler находит ресурсы без provision outputs.
+- До установки runner вооружается абсолютный systemd timer на четыре часа от начала аренды.
+  Root-файл `0600` содержит общий `AEZA_API_KEY`, ID и имя конкретной VM для kill switch;
+  ограничений одним сервером/TTL Aeza не предоставляет, этот риск согласован пользователем.
+  Аварийный скрипт проверяет ownership и повторяет DELETE/проверку до подтверждения удаления.
+- До старта runner nftables закрывает ingress/forward, разрешает established/related,
+  loopback и необходимые IPv6 control messages; SSH отключается, authorized_keys удаляется.
+  Первичный SSH-доступ необходим до установки firewall.
+- Для ручного run reconciler вызывается через `workflow_run`. Token-originated runs и
+  отменённые runs явно dispatch'ят его после cleanup и отчётов. Входы source Run ID/attempt
+  сохраняются; reconciliation сериализована по этой паре без отмены.
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
   target, downloader `readable_version` в формате `x.x.x.x #xxx`, client type, языками и consumer
   state. Введённый `ALL` сохраняется в заголовке буквально, а последняя строка показывает полную
@@ -208,19 +185,20 @@ workflow или отдельный репозиторий и не перенос
   `game-unpack-pipeline` и явно передаётся обоим reusable publisher workflows.
   Вызов uploader использует `secrets: inherit`, поэтому его project-owned reusable workflow также
   входит в trusted boundary caller secrets, хотя `GH_APP_PRIVATE_KEY` не использует.
-  `SELECTEL_OS_PASSWORD` хранится только в Environment `selectel`.
+  `AEZA_API_KEY` хранится только в Environment `aeza`. Старые Environment `selectel`,
+  его secrets и variables `SELECTEL_*` сохранены для отката; текущий код их не читает.
   `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` — только в Environment `telegram`.
 - `CLICKHOUSE_PASSWORD`, `AWS_ACCESS_KEY_ID` и `AWS_SECRET_ACCESS_KEY` uploader хранятся как
   Environment secrets `wotstat-assets-uploader` в `game-unpack-pipeline`. `CLICKHOUSE_HOST`,
   `CLICKHOUSE_USER`, `AWS_REGION`, `AWS_ENDPOINT_URL` и `AWS_BUCKET` хранятся как variables того же
   Environment.
-- JIT-конфигурации, installation tokens и emergency application credential считаются секретами даже
-  при коротком TTL. `SELECTEL_OS_PASSWORD` никогда не передаётся на VM.
+- JIT-конфигурации, installation tokens, SSH private keys и Aeza API key считаются секретами.
+  `AEZA_API_KEY` на VM доступен только root для аварийного удаления.
 - Не добавлять credentials, project/account identifiers, runner configs или tokens в код,
   fixtures, документацию, summaries и логи.
-- Реальные Selectel и GitHub mutations выполнять только по явной задаче пользователя. Локальные
+- Реальные Aeza и GitHub mutations выполнять только по явной задаче пользователя. Локальные
   unit/lint checks безопасны и не обращаются к облаку.
-- Не ослаблять masking, отсутствие ingress, разделение Unix-пользователей, digest check runner
+- Не ослаблять masking, отсутствие ingress после bootstrap, разделение Unix-пользователей, digest check runner
   archive или ownership checks ради упрощения.
 
 ## Что не входит в систему

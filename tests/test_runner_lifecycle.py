@@ -4,82 +4,35 @@ import base64
 import http.client
 import io
 import json
-import os
-import re
-import tempfile
+import time
 import unittest
-from datetime import UTC, datetime, timedelta
+import urllib.error
+import urllib.request
+from datetime import UTC, datetime
+from email.message import Message
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
+
+import pytest
+import yaml
 
 from scripts import runner_lifecycle as lifecycle
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).parents[1]
+IDENTITY = lifecycle.ResourceIdentity("owner/pipeline", "12345", "2", "manual-12345-2")
+CONFIG = lifecycle.AezaConfig("dummy-private-api-key")
 
 
-class ResourceIdentityTests(unittest.TestCase):
-    def test_builds_deterministic_names_and_ownership_descriptor(self) -> None:
-        identity = lifecycle.ResourceIdentity(
-            repository="wotstat/game-unpack-pipeline",
-            run_id="123456",
-            run_attempt="2",
-            instance_key="manual-123456-2",
-        )
-
-        self.assertEqual(identity.server_name, "gup-manual-123456-2")
-        self.assertEqual(identity.security_group_name, "gup-manual-123456-2-sg")
-        self.assertEqual(
-            identity.emergency_credential_name,
-            "gup-manual-123456-2-self-destruct",
-        )
-        self.assertEqual(identity.scope_label, "gup-run-123456-2")
-        self.assertEqual(
-            identity.descriptor,
-            "game-unpack-pipeline;repository=wotstat/game-unpack-pipeline;"
-            "run_id=123456;run_attempt=2;instance_key=manual-123456-2",
-        )
-        self.assertEqual(
-            identity.emergency_credential_description,
-            f"{identity.descriptor};purpose=emergency-self-destruct",
-        )
-
-        downloader = identity.runner("downloader")
-        assets = identity.runner("wot-gui-assets")
-        source = identity.runner("wot-src")
-        uploader = identity.runner("wotstat-assets")
-        self.assertEqual(downloader.name, "gup-manual-123456-2-downloader")
-        self.assertEqual(downloader.label, "gup-manual-123456-2-downloader")
-        self.assertEqual(downloader.repository, "wotstat/game-unpack-pipeline")
-        self.assertEqual(assets.name, "gup-manual-123456-2-wot-gui-assets")
-        self.assertEqual(assets.repository, "wotstat/game-unpack-pipeline")
-        self.assertEqual(source.name, "gup-manual-123456-2-wot-src")
-        self.assertEqual(source.repository, "wotstat/game-unpack-pipeline")
-        self.assertEqual(uploader.name, "gup-manual-123456-2-wotstat-assets")
-        self.assertEqual(uploader.repository, "wotstat/game-unpack-pipeline")
-        self.assertEqual(downloader.scope_label, assets.scope_label)
-        self.assertEqual(downloader.scope_label, source.scope_label)
-        self.assertEqual(downloader.scope_label, uploader.scope_label)
-
-    def test_rejects_unsafe_instance_keys(self) -> None:
-        rejected = ["", "UPPER", "-leading", "trailing-", "has space", "a" * 49]
-        for value in rejected:
-            with self.subTest(value=value), self.assertRaises(lifecycle.LifecycleError):
-                lifecycle.validate_instance_key(value)
-
-    def test_accepts_single_character_and_full_length_keys(self) -> None:
-        self.assertEqual(lifecycle.validate_instance_key("a"), "a")
-        full_length = "a" + "b" * 46 + "9"
-        self.assertEqual(len(full_length), 48)
-        self.assertEqual(lifecycle.validate_instance_key(full_length), full_length)
-
-
-class IdentifierTests(unittest.TestCase):
-    def test_accepts_openstack_and_selectel_uuid_forms(self) -> None:
-        dashed = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
-        compact = dashed.replace("-", "")
-        self.assertIsNotNone(lifecycle.UUID_RE.fullmatch(dashed))
-        self.assertIsNotNone(lifecycle.UUID_RE.fullmatch(compact))
-        self.assertEqual(lifecycle.normalized_uuid(dashed), compact)
+def server(**changes: Any) -> dict[str, Any]:
+    return {
+        "id": 42,
+        "name": IDENTITY.server_name,
+        "productId": 157,
+        "paymentTerm": "hour",
+        "status": "active",
+        **changes,
+    }
 
 
 class JobRoutingTests(unittest.TestCase):
@@ -102,325 +55,6 @@ class JobRoutingTests(unittest.TestCase):
         )
 
 
-class OwnershipTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.identity = lifecycle.ResourceIdentity(
-            repository="wotstat/game-unpack-pipeline",
-            run_id="123456",
-            run_attempt="2",
-            instance_key="manual-123456-2",
-        )
-
-    def test_accepts_mapping_and_serialized_server_properties(self) -> None:
-        properties = {
-            "gup_repository": self.identity.repository,
-            "gup_run_id": self.identity.run_id,
-            "gup_run_attempt": self.identity.run_attempt,
-            "gup_instance_key": self.identity.instance_key,
-        }
-        mapping_server = {"name": self.identity.server_name, "properties": properties}
-        serialized_server = {
-            "name": self.identity.server_name,
-            "properties": ", ".join(f"{key}='{value}'" for key, value in properties.items()),
-        }
-
-        self.assertTrue(lifecycle.server_has_ownership_markers(mapping_server, self.identity))
-        self.assertTrue(lifecycle.server_has_ownership_markers(serialized_server, self.identity))
-
-    def test_rejects_server_with_only_matching_name(self) -> None:
-        server = {"name": self.identity.server_name, "properties": {}}
-        self.assertFalse(lifecycle.server_has_ownership_markers(server, self.identity))
-
-
-class CloudConfigTests(unittest.TestCase):
-    def test_jit_configs_are_encoded_and_runners_use_isolated_users(self) -> None:
-        template = (ROOT / "scripts" / "bootstrap-actions-runner.sh").read_text()
-        assets_jit_config = "sensitive-assets-jit-configuration"
-        downloader_jit_config = "sensitive-downloader-jit-configuration"
-        source_jit_config = "sensitive-source-jit-configuration"
-        uploader_jit_config = "sensitive-uploader-jit-configuration"
-        cloud_config = lifecycle.render_cloud_config(
-            template,
-            emergency_auth_url="https://cloud.api.selcloud.ru/identity/v3",
-            emergency_deadline=datetime(2026, 8, 31, 1, 30, tzinfo=UTC),
-            emergency_region="ru-7",
-            emergency_script="#!/usr/bin/env python3\nprint('emergency watchdog')\n",
-            runner_download_url=(
-                "https://github.com/actions/runner/releases/download/v2.999.0/"
-                "actions-runner-linux-x64-2.999.0.tar.gz"
-            ),
-            runner_sha256="a" * 64,
-            runner_version="2.999.0",
-            runner_jit_configs={
-                "downloader": downloader_jit_config,
-                "wot-gui-assets": assets_jit_config,
-                "wot-src": source_jit_config,
-                "wotstat-assets": uploader_jit_config,
-            },
-        )
-
-        self.assertTrue(cloud_config.startswith("#cloud-config\n"))
-        self.assertNotIn(downloader_jit_config, cloud_config)
-        self.assertNotIn(assets_jit_config, cloud_config)
-        self.assertNotIn(source_jit_config, cloud_config)
-        self.assertNotIn(uploader_jit_config, cloud_config)
-        encoded = re.search(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
-        self.assertIsNotNone(encoded)
-        assert encoded is not None
-        bootstrap = base64.b64decode(encoded.group(1)).decode()
-        self.assertIn(
-            "DOWNLOADER_RUNNER_JIT_CONFIG=sensitive-downloader-jit-configuration",
-            bootstrap,
-        )
-        self.assertIn(
-            "WOT_GUI_ASSETS_RUNNER_JIT_CONFIG=sensitive-assets-jit-configuration",
-            bootstrap,
-        )
-        self.assertIn(
-            "WOT_SRC_RUNNER_JIT_CONFIG=sensitive-source-jit-configuration",
-            bootstrap,
-        )
-        self.assertIn(
-            "WOTSTAT_ASSETS_RUNNER_JIT_CONFIG=sensitive-uploader-jit-configuration",
-            bootstrap,
-        )
-        self.assertIn("WOT_GUI_ASSETS_RUNNER_JIT_CONFIG", bootstrap)
-        self.assertIn("unset \\\n", bootstrap)
-        self.assertIn("User=game-downloader", bootstrap)
-        self.assertIn("User=wot-gui-assets-publisher", bootstrap)
-        self.assertIn("User=wot-src-publisher", bootstrap)
-        self.assertIn("User=wotstat-assets-uploader", bootstrap)
-        self.assertIn(
-            "apt-get install --yes --no-install-recommends git",
-            bootstrap,
-        )
-        self.assertIn(
-            "install -d -o game-downloader -g game-downloader -m 0700 \\\n"
-            "  /run/actions-runner/downloader",
-            bootstrap,
-        )
-        self.assertIn(
-            "install -d -o wot-gui-assets-publisher -g wot-gui-assets-publisher -m 0700 \\\n"
-            "  /run/actions-runner/wot-gui-assets",
-            bootstrap,
-        )
-        self.assertIn(
-            "install -d -o wot-src-publisher -g wot-src-publisher -m 0700 \\\n"
-            "  /run/actions-runner/wot-src",
-            bootstrap,
-        )
-        self.assertIn(
-            "install -d -o wotstat-assets-uploader -g wotstat-assets-uploader -m 0700 \\\n"
-            "  /run/actions-runner/wotstat-assets",
-            bootstrap,
-        )
-        self.assertIn(
-            'readonly jit_config_file="/run/actions-runner/${role}/jit-config"',
-            bootstrap,
-        )
-        self.assertNotIn("/run/actions-runner-${role}-jit-config", bootstrap)
-        self.assertIn("game-downloader ALL=(ALL) NOPASSWD: ALL", bootstrap)
-        self.assertNotIn("wot-gui-assets-publisher ALL=", bootstrap)
-        self.assertNotIn("wot-src-publisher ALL=", bootstrap)
-        self.assertNotIn("wotstat-assets-uploader ALL=", bootstrap)
-        self.assertNotIn("RUNNER_ALLOW_RUNASROOT", bootstrap)
-        self.assertNotIn("set -x", bootstrap)
-        self.assertIn("permissions: '0700'", cloud_config)
-        self.assertIn("path: /usr/local/sbin/gup-emergency-self-destruct", cloud_config)
-        self.assertIn("path: /etc/systemd/system/gup-emergency-self-destruct.timer", cloud_config)
-
-        encoded_files = re.findall(r"^    content: (\S+)$", cloud_config, re.MULTILINE)
-        decoded_files = [base64.b64decode(value).decode() for value in encoded_files]
-        self.assertTrue(
-            any("OnCalendar=2026-08-31 01:30:00 UTC" in value for value in decoded_files)
-        )
-        self.assertTrue(any("emergency watchdog" in value for value in decoded_files))
-        self.assertTrue(
-            any(
-                value
-                == ('{"auth_url":"https://cloud.api.selcloud.ru/identity/v3","region":"ru-7"}')
-                for value in decoded_files
-            )
-        )
-        self.assertLess(
-            bootstrap.index("systemctl enable --now gup-emergency-self-destruct.timer"),
-            bootstrap.index("curl \\\n"),
-        )
-
-    def test_emergency_schedule_uses_four_hours_plus_one_hour_retry_grace(self) -> None:
-        now = datetime(2026, 8, 30, 12, 0, 0, 123456, tzinfo=UTC)
-
-        deadline, expiration = lifecycle.emergency_schedule(now)
-
-        self.assertEqual(deadline, datetime(2026, 8, 30, 16, 0, tzinfo=UTC))
-        self.assertEqual(expiration - deadline, timedelta(hours=1))
-
-
-class EmergencyCredentialTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.identity = lifecycle.ResourceIdentity(
-            repository="wotstat/game-unpack-pipeline",
-            run_id="123456",
-            run_attempt="2",
-            instance_key="manual-123456-2",
-        )
-
-    def test_creation_is_restricted_to_deleting_the_exact_server(self) -> None:
-        server_id = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
-        credential_id = "123e4567-e89b-12d3-a456-426614174000"
-        result = Mock(stdout=f'{{"id":"{credential_id}","secret":"one-time-secret"}}')
-
-        with patch.object(lifecycle, "openstack", return_value=result) as openstack:
-            actual_id, secret = lifecycle.create_emergency_application_credential(
-                Mock(),
-                self.identity,
-                server_id,
-                datetime(2026, 8, 30, 17, 0, tzinfo=UTC),
-            )
-
-        self.assertEqual((actual_id, secret), (credential_id, "one-time-secret"))
-        arguments = openstack.call_args.args[1]
-        self.assertIn("--restricted", arguments)
-        self.assertEqual(arguments[arguments.index("--role") + 1], "member")
-        access_rules = json.loads(arguments[arguments.index("--access-rules") + 1])
-        self.assertEqual(
-            access_rules,
-            [
-                {
-                    "method": "DELETE",
-                    "path": f"/v2.1/servers/{server_id}",
-                    "service": "compute",
-                }
-            ],
-        )
-
-    def test_deletion_refuses_a_credential_without_matching_ownership(self) -> None:
-        credential_id = "123e4567-e89b-12d3-a456-426614174000"
-        listed = Mock(
-            returncode=0,
-            stdout=f'\n[{{"ID":"{credential_id}","Name":"{self.identity.emergency_credential_name}"}}]',
-        )
-        shown = Mock(
-            returncode=0,
-            stdout=(
-                f'{{"id":"{credential_id}",'
-                f'"name":"{self.identity.emergency_credential_name}",'
-                '"description":"somebody-else"}'
-            ),
-        )
-
-        with (
-            patch.object(lifecycle, "openstack", side_effect=[listed, shown]),
-            self.assertRaises(lifecycle.LifecycleError),
-        ):
-            lifecycle.delete_emergency_application_credentials(Mock(), self.identity)
-
-
-class ProvisionOrderingTests(unittest.TestCase):
-    def test_waits_for_active_before_publishing_emergency_metadata(self) -> None:
-        arguments = Mock(instance_key="manual-123456-2")
-        config = Mock(
-            password="not-a-real-secret",
-            auth_url="https://cloud.api.selcloud.ru/identity/v3",
-            region_name="ru-7",
-        )
-        server_id = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
-        credential_id = "123e4567-e89b-12d3-a456-426614174000"
-        server_is_active = False
-
-        def mark_server_active(*_args: object, **_kwargs: object) -> None:
-            nonlocal server_is_active
-            server_is_active = True
-
-        def publish_emergency_metadata(*_args: object, **_kwargs: object) -> None:
-            self.assertTrue(
-                server_is_active,
-                "emergency metadata must not be written while the server is BUILDING",
-            )
-
-        environment = {
-            "GITHUB_APP_TOKEN": "test-app-token",
-            "GITHUB_PUBLIC_TOKEN": "test-public-token",
-            "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
-            "GITHUB_RUN_ATTEMPT": "2",
-            "GITHUB_RUN_ID": "123456",
-        }
-        with (
-            patch.dict(os.environ, environment, clear=True),
-            patch.object(lifecycle.SelectelConfig, "from_environment", return_value=config),
-            patch.object(lifecycle, "add_mask"),
-            patch.object(lifecycle, "write_output"),
-            patch.object(lifecycle, "append_summary"),
-            patch.object(lifecycle, "preflight"),
-            patch.object(
-                lifecycle,
-                "emergency_schedule",
-                return_value=(
-                    datetime(2026, 8, 31, 12, 0, tzinfo=UTC),
-                    datetime(2026, 8, 31, 13, 0, tzinfo=UTC),
-                ),
-            ),
-            patch.object(lifecycle, "create_security_group", return_value="security-group-id"),
-            patch.object(
-                lifecycle,
-                "create_public_port",
-                return_value=("public-port-id", "192.0.2.1"),
-            ),
-            patch.object(
-                lifecycle,
-                "resolve_runner_package",
-                return_value=("https://example.test/runner.tgz", "a" * 64, "2.999.0"),
-            ),
-            patch.object(
-                lifecycle,
-                "create_jit_runner",
-                side_effect=[
-                    ("1", "downloader-jit"),
-                    ("2", "gui-assets-jit"),
-                    ("3", "source-jit"),
-                    ("4", "uploader-jit"),
-                ],
-            ),
-            patch.object(lifecycle, "render_cloud_config", return_value="#cloud-config\n"),
-            patch.object(lifecycle, "create_server", return_value=server_id),
-            patch.object(
-                lifecycle,
-                "create_emergency_application_credential",
-                return_value=(credential_id, "emergency-secret"),
-            ),
-            patch.object(
-                lifecycle,
-                "wait_for_server_active",
-                side_effect=mark_server_active,
-            ) as wait_active,
-            patch.object(
-                lifecycle,
-                "set_server_emergency_credentials",
-                side_effect=publish_emergency_metadata,
-            ),
-            patch.object(lifecycle, "wait_for_runner_online"),
-            patch.object(lifecycle, "show_console_log"),
-        ):
-            lifecycle.provision(arguments)
-
-        wait_active.assert_called_once_with(
-            config,
-            server_id,
-            timeout_seconds=300,
-            identity=lifecycle.ResourceIdentity(
-                "wotstat/game-unpack-pipeline", "123456", "2", "manual-123456-2"
-            ),
-            sensitive_values=(
-                "test-app-token",
-                "test-public-token",
-                "downloader-jit",
-                "gui-assets-jit",
-                "source-jit",
-                "uploader-jit",
-            ),
-        )
-
-
 class SanitizerTests(unittest.TestCase):
     def test_redacts_known_token_shapes_and_jit_lines(self) -> None:
         registration_token = "ghs" + "_" + "a" * 40
@@ -440,142 +74,6 @@ class SanitizerTests(unittest.TestCase):
         self.assertNotIn("very-secret", result)
         self.assertNotIn("also-secret", result)
         self.assertNotIn("known-value", result)
-
-
-class ServerStatusTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.config = lifecycle.SelectelConfig(
-            auth_url="https://api.example.test/identity/v3",
-            username="test-user",
-            password="test-password",
-            user_domain_name="test-domain",
-            project_id="00000000-0000-0000-0000-000000000001",
-            region_name="ru-7",
-            availability_zone="ru-7b",
-            image_id="test-image",
-            flavor_id="test-flavor",
-            public_network_api_url="https://api.example.test/public-network",
-        )
-
-    def test_error_reports_fault_code_and_message(self) -> None:
-        result = Mock(
-            returncode=0,
-            stdout=json.dumps(
-                {"status": "ERROR", "fault": {"code": 500, "message": "No valid host was found."}}
-            ),
-        )
-        with (
-            patch.object(lifecycle, "openstack", return_value=result),
-            self.assertRaises(lifecycle.LifecycleError) as raised,
-        ):
-            lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
-
-        self.assertIn("fault.code=500", str(raised.exception))
-        self.assertIn('fault.message="No valid host was found."', str(raised.exception))
-
-    def test_fault_redacts_secrets_and_identifiers_and_cannot_inject_log_commands(self) -> None:
-        project_id = self.config.project_id
-        known_values = [
-            self.config.password,
-            self.config.username,
-            self.config.user_domain_name,
-            project_id,
-            project_id.replace("-", ""),
-            "test-app-value",
-            "test-public-value",
-            "test-jit-value",
-        ]
-        unknown_values = [
-            "unrecognized-value",
-            "test-authorization",
-            "test-quoted-auth",
-            "encoded-bootstrap",
-        ]
-        fault = {
-            "code": 500,
-            "message": (
-                "No valid host: "
-                + " ".join(known_values)
-                + '; token="unrecognized-value"; Authorization: Bearer test-authorization; '
-                + "'Authorization': 'Bearer test-quoted-auth'; "
-                + "user_data='encoded-bootstrap'\n::warning::injected\r\x1b[31m"
-            ),
-            "details": "private diagnostic details must not be logged",
-        }
-        result = Mock(returncode=0, stdout=json.dumps({"status": "ERROR", "fault": fault}))
-        output = io.StringIO()
-        with (
-            patch.object(lifecycle, "openstack", return_value=result),
-            patch("sys.stderr", output),
-            patch("sys.stdout", output),
-            self.assertRaises(lifecycle.LifecycleError) as raised,
-        ):
-            lifecycle.wait_for_server_active(
-                self.config,
-                "test-server",
-                timeout_seconds=10,
-                sensitive_values=known_values[5:],
-            )
-
-        diagnostic = str(raised.exception) + output.getvalue()
-        self.assertIn("fault.code=500", diagnostic)
-        self.assertIn("No valid host", diagnostic)
-        for value in [*known_values, *unknown_values, fault["details"]]:
-            self.assertNotIn(value, diagnostic)
-        self.assertNotIn("\n", diagnostic)
-        self.assertNotIn("\r", diagnostic)
-        self.assertNotIn("\x1b", diagnostic)
-
-    def test_missing_or_malformed_fault_preserves_the_vm_error(self) -> None:
-        for fault in (None, {}, "invalid", {"code": "secret-code", "message": ["secret"]}):
-            with self.subTest(fault=fault):
-                result = Mock(
-                    returncode=0,
-                    stdout=json.dumps({"status": "ERROR", "fault": fault}),
-                )
-                with (
-                    patch.object(lifecycle, "openstack", return_value=result),
-                    self.assertRaises(lifecycle.LifecycleError) as raised,
-                ):
-                    lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
-
-                self.assertIn("Selectel server entered ERROR state", str(raised.exception))
-                self.assertIn("fault.code=unavailable", str(raised.exception))
-                self.assertIn('fault.message="unavailable"', str(raised.exception))
-                self.assertNotIn("secret", str(raised.exception))
-
-    def test_active_server_does_not_report_fault(self) -> None:
-        result = Mock(returncode=0, stdout='{"status":"ACTIVE"}')
-        with (
-            patch.object(lifecycle, "openstack", return_value=result) as openstack,
-            patch.object(lifecycle, "append_summary"),
-        ):
-            lifecycle.wait_for_server_active(self.config, "test-server", timeout_seconds=10)
-
-        openstack.assert_called_once()
-
-
-class SelectelConfigTests(unittest.TestCase):
-    def test_reads_compact_project_id(self) -> None:
-        environment = {
-            "SELECTEL_OS_AUTH_URL": "https://cloud.api.selcloud.ru/identity/v3",
-            "SELECTEL_OS_USERNAME": "service-user",
-            "SELECTEL_OS_PASSWORD": "not-a-real-secret",
-            "SELECTEL_OS_USER_DOMAIN_NAME": "123456",
-            "SELECTEL_OS_PROJECT_ID": "497f6eca62764993bfeb53cbbbba6f08",
-            "SELECTEL_OS_REGION_NAME": "ru-9",
-            "SELECTEL_AVAILABILITY_ZONE": "ru-9a",
-            "SELECTEL_IMAGE_ID": "image-id",
-            "SELECTEL_FLAVOR_ID": "1312",
-            "SELECTEL_PUBLIC_NETWORK_API_URL": (
-                "https://ru-9.cloud.api.selcloud.ru/public-network"
-            ),
-        }
-        with patch.dict(os.environ, environment, clear=True):
-            config = lifecycle.SelectelConfig.from_environment()
-
-        self.assertEqual(config.project_id, environment["SELECTEL_OS_PROJECT_ID"])
-        self.assertEqual(config.region_name, "ru-9")
 
 
 class HttpJsonTests(unittest.TestCase):
@@ -604,312 +102,202 @@ class HttpJsonTests(unittest.TestCase):
         sleep.assert_called_once()
 
 
-class CleanupReportingTests(unittest.TestCase):
-    def test_reports_deletions_even_when_later_cleanup_fails(self) -> None:
-        arguments = Mock(
-            instance_key="manual-123456-2",
-            run_id="123456",
-            run_attempt="2",
-            diagnostics=False,
-            downloader_runner_id="1",
-            wot_gui_assets_runner_id="2",
-            wot_src_runner_id="3",
-            wotstat_assets_runner_id="4",
-            server_id="",
-            port_id="",
-            security_group_id="",
-            emergency_credential_id="",
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"name": "other-attempt"},
+        {"productId": 156},
+        {"paymentTerm": "month"},
+    ],
+)
+def test_delete_rejects_explicit_service_without_ownership(changes: dict[str, Any]) -> None:
+    with (
+        patch.object(lifecycle, "owned_servers", return_value=[]),
+        patch.object(lifecycle, "get_server", return_value=server(**changes)),
+        patch.object(lifecycle.AezaConfig, "request") as request,
+        pytest.raises(lifecycle.LifecycleError, match="ownership"),
+    ):
+        lifecycle.delete_servers(CONFIG, IDENTITY, "42", deleted_resources=[])
+    request.assert_not_called()
+
+
+def test_both_aeza_list_and_detail_shapes_have_the_same_ownership() -> None:
+    detail = server()
+    summary = server(product={"id": 157})
+    del summary["productId"]
+    assert lifecycle.server_has_ownership_markers(detail, IDENTITY)
+    assert lifecycle.server_has_ownership_markers(summary, IDENTITY)
+    other = lifecycle.ResourceIdentity("another/pipeline", "12345", "2", "manual-12345-2")
+    assert IDENTITY.server_name != other.server_name
+
+
+def test_delete_waits_for_actual_deletion_after_204() -> None:
+    deleted: list[str] = []
+    with (
+        patch.object(lifecycle, "owned_servers", return_value=[server()]),
+        patch.object(
+            lifecycle, "get_server", side_effect=[server(), server(), server(status="deleted")]
+        ),
+        patch.object(lifecycle.AezaConfig, "request", return_value=(204, None, {})) as request,
+        patch.object(time, "sleep"),
+    ):
+        lifecycle.delete_servers(CONFIG, IDENTITY, deleted_resources=deleted)
+    assert deleted == ["aeza-service:42"]
+    request.assert_called_once()
+
+
+def test_unknown_delete_result_is_reconciled() -> None:
+    deleted: list[str] = []
+    with (
+        patch.object(lifecycle, "owned_servers", return_value=[server()]),
+        patch.object(lifecycle, "get_server", side_effect=[server(), None]),
+        patch.object(
+            lifecycle.AezaConfig,
+            "request",
+            side_effect=lifecycle.TransientLifecycleError("lost response"),
+        ),
+    ):
+        lifecycle.delete_servers(CONFIG, IDENTITY, deleted_resources=deleted)
+    assert deleted == ["aeza-service:42"]
+
+
+def test_paid_order_is_hourly_and_post_is_never_replayed() -> None:
+    with (
+        patch.object(lifecycle, "aeza_items", return_value=[]),
+        patch.object(
+            lifecycle.AezaConfig,
+            "request",
+            side_effect=lifecycle.TransientLifecycleError("lost response"),
+        ) as request,
+        pytest.raises(lifecycle.TransientLifecycleError),
+    ):
+        lifecycle.create_server(CONFIG, IDENTITY, "17")
+    request.assert_called_once()
+    order = request.call_args.kwargs["body"]["orders"][0]
+    assert order["term"] == "hour"
+    assert order["termCount"] == 1
+    assert order["autoProlong"] is True
+    assert order["productId"] == 157
+    assert order["sshKeyIds"] == [17]
+
+
+def test_aeza_pagination_does_not_lose_attempt_resources() -> None:
+    with patch.object(
+        lifecycle.AezaConfig,
+        "request",
+        side_effect=[
+            (200, {"items": [{"id": 1}], "total": 2}, {}),
+            (200, {"items": [{"id": 2}], "total": 2}, {}),
+        ],
+    ) as request:
+        assert lifecycle.aeza_items(CONFIG, "services") == [{"id": 1}, {"id": 2}]
+    assert "offset=1" in request.call_args.args[1]
+
+
+def test_cleanup_attempts_all_runners_after_cloud_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_APP_TOKEN", "dummy")
+    with (
+        patch.object(lifecycle.AezaConfig, "from_environment", return_value=CONFIG),
+        patch.object(lifecycle, "build_identity", return_value=IDENTITY),
+        patch.object(lifecycle, "delete_servers", side_effect=lifecycle.LifecycleError("API down")),
+        patch.object(lifecycle, "delete_ssh_keys") as keys,
+        patch.object(lifecycle, "delete_github_runners") as runners,
+    ):
+        args = lifecycle.build_parser().parse_args(
+            ["cleanup", "--instance-key", IDENTITY.instance_key]
         )
-        config = Mock(password="not-a-real-secret")
-
-        def record_runner(
-            *_args: object,
-            deleted_resources: list[str] | None = None,
-            **_kwargs: object,
-        ) -> None:
-            assert deleted_resources is not None
-            deleted_resources.append("github-runner")
-
-        def record_server(
-            *_args: object,
-            deleted_resources: list[str] | None = None,
-            **_kwargs: object,
-        ) -> None:
-            assert deleted_resources is not None
-            deleted_resources.append("selectel-server")
-
-        def record_port(
-            *_args: object,
-            deleted_resources: list[str] | None = None,
-            **_kwargs: object,
-        ) -> None:
-            assert deleted_resources is not None
-            deleted_resources.append("selectel-public-port")
-
-        def delete_security_group(
-            *_args: object,
-            deleted_resources: list[str] | None = None,
-            **_kwargs: object,
-        ) -> None:
-            assert deleted_resources is not None
-            deleted_resources.append("selectel-security-group")
-            raise lifecycle.LifecycleError("simulated post-delete failure")
-
-        def record_emergency_credential(
-            *_args: object,
-            deleted_resources: list[str] | None = None,
-            **_kwargs: object,
-        ) -> None:
-            assert deleted_resources is not None
-            deleted_resources.append("selectel-application-credential")
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            output_path = Path(temporary_directory) / "github-output"
-            environment = {
-                "GITHUB_APP_TOKEN": "test-token",
-                "GITHUB_OUTPUT": str(output_path),
-                "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
-            }
-            with (
-                patch.dict(os.environ, environment, clear=True),
-                patch.object(
-                    lifecycle.SelectelConfig,
-                    "from_environment",
-                    return_value=config,
-                ),
-                patch.object(lifecycle, "delete_github_runners", side_effect=record_runner),
-                patch.object(lifecycle, "delete_servers", side_effect=record_server),
-                patch.object(lifecycle, "selectel_token", return_value="selectel-token"),
-                patch.object(lifecycle, "delete_public_ports", side_effect=record_port),
-                patch.object(
-                    lifecycle,
-                    "delete_security_groups",
-                    side_effect=delete_security_group,
-                ),
-                patch.object(
-                    lifecycle,
-                    "delete_emergency_application_credentials",
-                    side_effect=record_emergency_credential,
-                ),
-                self.assertRaises(lifecycle.LifecycleError),
-            ):
-                lifecycle.cleanup(arguments)
-
-            self.assertEqual(output_path.read_text(encoding="utf-8"), "deleted_count=8\n")
-
-    def test_retains_emergency_credential_when_server_cleanup_fails(self) -> None:
-        arguments = Mock(
-            instance_key="manual-123456-2",
-            run_id="123456",
-            run_attempt="2",
-            diagnostics=False,
-            downloader_runner_id="",
-            wot_gui_assets_runner_id="",
-            wot_src_runner_id="",
-            wotstat_assets_runner_id="",
-            server_id="",
-            port_id="",
-            security_group_id="",
-            emergency_credential_id="",
-        )
-        environment = {
-            "GITHUB_APP_TOKEN": "test-token",
-            "GITHUB_REPOSITORY": "wotstat/game-unpack-pipeline",
-        }
-
-        with (
-            patch.dict(os.environ, environment, clear=True),
-            patch.object(
-                lifecycle.SelectelConfig,
-                "from_environment",
-                return_value=Mock(password="not-a-real-secret"),
-            ),
-            patch.object(lifecycle, "delete_github_runners"),
-            patch.object(
-                lifecycle,
-                "delete_servers",
-                side_effect=lifecycle.LifecycleError("compute API unavailable"),
-            ),
-            patch.object(lifecycle, "selectel_token", return_value="selectel-token"),
-            patch.object(lifecycle, "delete_public_ports"),
-            patch.object(lifecycle, "delete_security_groups"),
-            patch.object(
-                lifecycle, "delete_emergency_application_credentials"
-            ) as delete_credential,
-            self.assertRaises(lifecycle.LifecycleError),
-        ):
-            lifecycle.cleanup(arguments)
-
-        delete_credential.assert_not_called()
+        with pytest.raises(lifecycle.LifecycleError, match="Cleanup incomplete"):
+            lifecycle.cleanup(args)
+    assert runners.call_count == 4
+    keys.assert_not_called()
 
 
-class WorkflowContractTests(unittest.TestCase):
-    def test_dispatch_exposes_only_production_inputs(self) -> None:
-        workflow = (ROOT / ".github/workflows/process-game-release.yml").read_text(encoding="utf-8")
-
-        for removed_input in (
-            "benchmark_percent:",
-            "light:",
-            "runner_profile:",
-            "until:",
-            "workers:",
-        ):
-            self.assertNotIn(removed_input, workflow)
-        self.assertIn(
-            "      publish_wot_src:\n"
-            "        description: Publish the snapshot to wot-src\n"
-            "        required: true\n"
-            "        default: true\n"
-            "        type: boolean",
-            workflow,
-        )
-        self.assertIn(
-            "      publish_wot_gui_assets:\n"
-            "        description: Publish the snapshot to wot-gui-assets\n"
-            "        required: true\n"
-            "        default: true\n"
-            "        type: boolean",
-            workflow,
-        )
-        self.assertIn(
-            "      publish_wotstat_assets:\n"
-            "        description: Upload the snapshot with wotstat-assets-uploader\n"
-            "        required: true\n"
-            "        default: true\n"
-            "        type: boolean",
-            workflow,
-        )
-        self.assertIn("if: inputs.publish_wot_src &&", workflow)
-        self.assertIn("if: inputs.publish_wot_gui_assets &&", workflow)
-        self.assertIn("if: inputs.publish_wotstat_assets &&", workflow)
-        self.assertIn("WOT_SRC_PUBLISH_EXPECTED_RESULT", workflow)
-        self.assertIn("WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT", workflow)
-        self.assertIn("WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT", workflow)
-        self.assertIn(
-            "      selectel_location:\n"
-            "        description: Selectel pool segment "
-            "(ru-2c/ru-8a/ru-9a use HighFreq without dedicated cores)\n"
-            "        required: true\n"
-            "        default: ru-9a\n"
-            "        type: choice\n"
-            "        options:\n"
-            "          - ru-7a\n"
-            "          - ru-7b\n"
-            "          - ru-3b\n"
-            "          - ru-2c\n"
-            "          - ru-6a\n"
-            "          - ru-6b\n"
-            "          - ru-6c\n"
-            "          - ru-8a\n"
-            "          - ru-9a",
-            workflow,
-        )
-        self.assertIn(
-            "SELECTEL_AVAILABILITY_ZONE: ${{ inputs.selectel_location || 'ru-9a' }}", workflow
-        )
-        self.assertIn(
-            "inputs.selectel_location == 'ru-3b' && 'ru-3'\n"
-            "        || inputs.selectel_location == 'ru-2c' && 'ru-2'\n"
-            "        || startsWith(inputs.selectel_location, 'ru-6') && 'ru-6'\n"
-            "        || inputs.selectel_location == 'ru-8a' && 'ru-8'\n"
-            "        || (inputs.selectel_location || 'ru-9a') == 'ru-9a' && 'ru-9' || 'ru-7'",
-            workflow,
-        )
-        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_2 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn("https://ru-2.cloud.api.selcloud.ru/public-network", workflow)
-        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_3 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_6 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_8 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn("vars.SELECTEL_IMAGE_ID_RU_9 || 'Ubuntu 24.04 LTS 64-bit'", workflow)
-        self.assertIn("https://ru-6.cloud.api.selcloud.ru/public-network", workflow)
-        self.assertIn("https://ru-8.cloud.api.selcloud.ru/public-network", workflow)
-        self.assertIn("https://ru-9.cloud.api.selcloud.ru/public-network", workflow)
-        self.assertIn(
-            "SELECTEL_FLAVOR_ID: >-\n"
-            "    ${{ (inputs.selectel_location == 'ru-8a' || "
-            "(inputs.selectel_location || 'ru-9a') == 'ru-9a')\n"
-            "        && 'HFL1.16-32768-240'\n"
-            "        || inputs.selectel_location == 'ru-2c' && 'HFL1.8-16384-240'\n"
-            "        || inputs.selectel_location == 'ru-6a' && 'HFL2.8-32768-256-AMD'\n"
-            "        || inputs.selectel_location == 'ru-6b' && 'HFL2.8-32768-256-INTEL'\n"
-            "        || 'HFL2.16-32768-256-AMD' }}",
-            workflow,
-        )
-        self.assertNotIn("vars.SELECTEL_FLAVOR_ID", workflow)
-        self.assertIn(
-            "  download:\n"
-            "    name: Download and unpack (manual-${{ github.run_id }}-${{ github.run_attempt }})",
-            workflow,
-        )
-        self.assertNotIn("wotstat/game-snapshot-builder", workflow)
-        self.assertIn("run: bash .github/scripts/run-stage.sh snapshot", workflow)
-
-    def test_provisions_and_calls_all_snapshot_consumers(self) -> None:
-        workflow = (ROOT / ".github/workflows/process-game-release.yml").read_text(encoding="utf-8")
-
-        self.assertIn('PYTHONUNBUFFERED: "1"', workflow)
-        self.assertIn("downloader_runner_label", workflow)
-        self.assertIn("wot_gui_assets_runner_label", workflow)
-        self.assertIn("wot_src_runner_label", workflow)
-        self.assertIn("wotstat_assets_runner_label", workflow)
-        self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", workflow)
-        self.assertNotIn("WOT_SRC_REPOSITORY", workflow)
-        self.assertNotIn("permission-actions: write", workflow)
-        self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", workflow)
-        self.assertIn("--downloader-runner-id", workflow)
-        self.assertIn("--wot-gui-assets-runner-id", workflow)
-        self.assertIn("--wot-src-runner-id", workflow)
-        self.assertIn("--wotstat-assets-runner-id", workflow)
-        self.assertIn("--emergency-credential-id", workflow)
-        self.assertIn("emergency_self_destruct_at", workflow)
-        self.assertNotIn("dispatch-publication", workflow)
-        self.assertIn(
-            "uses: wotstat/wot-src/.github/workflows/publish-snapshot.yml@main",
-            workflow,
-        )
-        self.assertIn(
-            "uses: wotstat/wot-gui-assets/.github/workflows/publish-snapshot.yml@main",
-            workflow,
-        )
-        self.assertIn(
-            "uses: wotstat/wotstat-assets-uploader/.github/workflows/upload-snapshot.yml@main",
-            workflow,
-        )
-        self.assertEqual(
-            workflow.count("secrets:\n      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}"),
-            2,
-        )
-        self.assertEqual(workflow.count("secrets: inherit"), 1)
-        self.assertFalse((ROOT / ".github/workflows/publish-snapshot.yml").exists())
-        self.assertIn("publish-wot-gui-assets:", workflow)
-        self.assertIn("publish-wot-src:", workflow)
-        self.assertIn("publish-wotstat-assets:", workflow)
-        self.assertNotIn("configuration_environment", workflow)
-        self.assertNotIn("wotstat-assets-tmp", workflow)
-        self.assertIn("notify:", workflow)
-        self.assertIn("needs.cleanup.outputs.deleted_count", workflow)
-        self.assertIn("secrets.TELEGRAM_BOT_TOKEN", workflow)
-        self.assertIn("secrets.TELEGRAM_CHAT_ID", workflow)
-        self.assertIn("environment: telegram", workflow)
-        self.assertIn("READABLE_VERSION: ${{ needs.download.outputs.readable_version }}", workflow)
-        self.assertNotIn("VERSION_NAME: ${{ needs.download.outputs.version_name }}", workflow)
-        self.assertIn("actions: read", workflow)
-        self.assertIn("GH_REPO: ${{ github.repository }}", workflow)
-        self.assertIn("PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}", workflow)
-        self.assertIn("format: html", workflow)
-        self.assertIn("message: ${{ steps.report.outputs.message }}", workflow)
-
-        reconciler = (ROOT / ".github/workflows/reconcile-release-resources.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("game-unpack-pipeline,wot-src,wot-gui-assets", reconciler)
-        self.assertNotIn("WOT_GUI_ASSETS_REPOSITORY", reconciler)
-        self.assertNotIn("WOT_SRC_REPOSITORY", reconciler)
-        self.assertIn("for selectel_region in ru-7 ru-3 ru-9 ru-6 ru-8 ru-2; do", reconciler)
-        self.assertIn("--credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8 ru-2", reconciler)
-        self.assertIn("fromJSON(needs.reconcile.outputs.deleted_count || '0') > 0", reconciler)
-        self.assertIn("environment: telegram", reconciler)
+def test_bootstrap_arms_timer_before_runner_and_keeps_secrets_out_of_argv() -> None:
+    configs = {role: f"secret-jit-{role}" for role in lifecycle.ROLES}
+    script = lifecycle.render_bootstrap(
+        IDENTITY,
+        CONFIG,
+        "42",
+        datetime(2026, 10, 28, 21, tzinfo=UTC),
+        ("https://github.com/actions/runner", "a" * 64, "2.338.0"),
+        configs,
+    )
+    encoded = script.split("base64.b64decode('")[1].split("'")[0]
+    files = json.loads(base64.b64decode(encoded))
+    assert CONFIG.api_key not in script
+    assert all(value not in script for value in configs.values())
+    assert (
+        "OnCalendar=2026-10-28 21:00:00 UTC"
+        in files["/etc/systemd/system/gup-emergency-self-destruct.timer"]
+    )
+    assert script.index("enable --now gup-emergency") < script.index("systemd-run")
+    bootstrap = files["/usr/local/sbin/bootstrap-actions-runner"]
+    assert bootstrap.index("policy drop") < bootstrap.index("useradd")
+    assert "ct state established,related accept" in bootstrap
+    assert "sha256sum --check --strict" in bootstrap
+    for name in (
+        "game-downloader",
+        "wot-src-publisher",
+        "wot-gui-assets-publisher",
+        "wotstat-assets-uploader",
+    ):
+        assert f"User={name}" in bootstrap
+    assert "StandardOutput=journal+console" in bootstrap
+    assert "game-downloader ALL=(ALL) NOPASSWD: ALL" in bootstrap
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.parametrize("method,expected_calls", [("POST", 1), ("GET", 4)])
+def test_provider_http_retries_only_safe_methods(method: str, expected_calls: int) -> None:
+    error = urllib.error.HTTPError(
+        "https://provider.invalid/", 502, "bad gateway", Message(), io.BytesIO()
+    )
+    with (
+        patch.object(urllib.request, "urlopen", side_effect=error) as request,
+        patch.object(time, "sleep"),
+        pytest.raises(lifecycle.TransientLifecycleError),
+    ):
+        lifecycle.http_json(method, "https://provider.invalid/", token=CONFIG.api_key)
+    assert request.call_count == expected_calls
+    assert request.call_args.args[0].get_header("X-api-key") == CONFIG.api_key
+
+
+def test_provider_error_never_logs_payload_with_credentials() -> None:
+    raw = json.dumps(
+        {"secureParameters": {"password": "dummy-password"}, "ownerId": 9, "token": CONFIG.api_key}
+    ).encode()
+    error = urllib.error.HTTPError(
+        "https://provider.invalid", 400, "bad", Message(), io.BytesIO(raw)
+    )
+    with (
+        patch.object(urllib.request, "urlopen", side_effect=error),
+        pytest.raises(lifecycle.LifecycleError) as raised,
+    ):
+        lifecycle.http_json("POST", "https://provider.invalid", token=CONFIG.api_key)
+    assert "dummy-password" not in str(raised.value)
+    assert CONFIG.api_key not in str(raised.value)
+
+
+def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/process-game-release.yml").read_text())
+    assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {
+        "target",
+        "client_type",
+        "languages",
+        "detected_release_name",
+        "publish_wot_src",
+        "publish_wot_gui_assets",
+        "publish_wotstat_assets",
+    }
+    jobs = workflow["jobs"]
+    assert jobs["publish-wot-src"]["uses"].endswith("publish-snapshot.yml@main")
+    assert jobs["publish-wot-gui-assets"]["uses"].endswith("publish-snapshot.yml@main")
+    assert jobs["publish-wotstat-assets"]["secrets"] == "inherit"
+    assert jobs["cleanup"]["if"].startswith("always()")
+    assert all(
+        jobs[job]["environment"] == "aeza" for job in ("provision", "queue-watchdog", "cleanup")
+    )
+    reconciler = yaml.safe_load(
+        (ROOT / ".github/workflows/reconcile-release-resources.yml").read_text()
+    )
+    assert "retry-preempted" not in reconciler["jobs"]
+    assert reconciler["concurrency"]["cancel-in-progress"] is False

@@ -1,104 +1,26 @@
 # Настройка и эксплуатация pipeline
 
-Эта инструкция описывает текущий production workflow, автоматический и ручной checker новых версий,
-а также публичную статус-страницу GitHub Pages. В ней нет реальных credentials: пароли и private
-keys нужно вводить непосредственно в GitHub Settings, не отправляя их в issues, commits, чаты или
-логи.
+`Process game release` создаёт одну платную почасовую VM Aeza и четыре одноразовых JIT runner.
+`Check game releases` проверяет все семь targets каждый час (`23 * * * *`) и dispatch'ит
+основной workflow для неопубликованных версий с учётом существующего retry state.
 
-`Process game release` не имеет dry-run режима: сразу после запуска он создаёт тарифицируемую VM и
-direct public IP в Selectel. `Check game releases` по умолчанию проверяет все регионы и dispatch'ит
-production pipeline для найденных новых версий; такой запуск тоже может создать тарифицируемые ресурсы.
+## 1. Aeza и ёмкость
 
-## 1. Selectel project и ёмкость
+Используется только Moscow Shared **MSKs-5**, product ID `157`, group `2`:
+16 vCPU, 32 ГБ RAM, 480 ГБ NVMe и один публичный IPv4. ОС — `ubuntu_2404`.
+Заказ использует `term: hour`, `termCount: 1`, `autoProlong: true` и оплату с баланса.
+Текущая проверенная цена — €0,53/час. Preflight отклоняет более дорогую котировку,
+недоступный тариф, недостаточный баланс на четыре часа и заполненный shared/hourly limit.
 
-1. Создать отдельный Cloud Platform project, например `game-unpack-pipeline`.
-2. Создать отдельного service user, например `game-unpack-pipeline-ci`.
-3. Выдать service user роль `member` только в этом project.
-4. Сохранить пароль service user в менеджере секретов: после создания его нельзя будет прочитать
-   повторно.
-5. Пополнить баланс и проверить квоты проекта.
-6. Для основного region `ru-9` используется уникальный публичный образ
-   `Ubuntu 24.04 LTS 64-bit`; при необходимости задать `SELECTEL_IMAGE_ID_RU_9`.
-   Flavor по умолчанию — HighFreq без выделенных ядер `HFL1.16-32768-240`.
-   `SELECTEL_IMAGE_ID` требуется для ручных резервов в region `ru-7`.
+В аккаунте на 28 октября 2026 доступны две одновременные почасовые VM.
+При нехватке лимита target завершается ошибкой; существующий checker повторяет его
+по расписанию retry. Автоматического переключения тарифов и Selectel fallback нет.
+Выключение VM не прекращает аренду: нужно удалить услугу через API и подтвердить
+`status: deleted` или HTTP 404. Отдельные public port и security group в Aeza не создаются.
 
-Один параллельный pipeline run требует:
-
-- 1 cloud server;
-- 1 direct public IP;
-- 16 vCPU и 32 ГБ RAM для основного профиля;
-- 240 ГБ local disk HighFreq без выделенных ядер `HFL1.16-32768-240`.
-
-Ручные резервы `ru-7a`/`ru-7b`/`ru-3b`/`ru-6c` используют выделенный HighFreq
-`HFL2.16-32768-256-AMD`: 16 vCPU, 32 ГБ RAM и 256 ГБ локального диска.
-В `ru-6a` выбран `HFL2.8-32768-256-AMD`, в `ru-6b` — `HFL2.8-32768-256-INTEL`:
-оба используют выделенные ядра, 8 vCPU, 32 ГБ RAM и 256 ГБ локального диска.
-Квоты на CPU, RAM, локальный диск и direct public IP
-нужно выделить отдельно в выбранном сегменте `ru-6` перед первым запуском.
-
-Для основного пула `ru-9a` и ручного резерва `ru-8a` используется обычный HighFreq без выделенных ядер
-`HFL1.16-32768-240`: на один run нужны свободные 16 vCPU, 32 ГБ RAM, 240 ГБ локального диска
-и один direct public IP. Pipeline подбирает число workers по фактическим CPU.
-
-Контрольный [прерываемый `wot-na` в `ru-9a`](https://github.com/wotstat/game-unpack-pipeline/actions/runs/40166600355)
-25 октября 2026 завершился успешно с первой попытки за 55 мин 30 с: все три consumer,
-cleanup и reconciler успешны; monitor зафиксировал `preempted=false`, `reason=jobs_completed`.
-Основной workflow и checker по умолчанию включают прерываемость.
-
-Ручной резерв `ru-2c` использует `HFL1.8-16384-240` без выделенных ядер: 8 vCPU,
-16 ГБ RAM, 240 ГБ локального диска и один direct public IP. Полный контрольный
-`wot-na` с тремя consumer завершился успешно; замеры и ограничения приведены в
-[отчёте о выборе HighFreq](research/selectel-highfreq-alternatives-2026-10-25.md).
-
-Для `N` одновременно работающих runs нужно умножить потребление выбранного flavor на `N`,
-включая CPU, RAM, локальный диск и direct public IP. Оркестратор не отменяет предыдущий ручной run,
-поэтому лимит реального параллелизма определяется квотами Selectel и балансом аккаунта.
-Подтверждённый 25 октября 2026 лимит локального SSD в `ru-2c` — 320 ГБ: хватает
-только на одну такую VM. Для двух одновременных runs нужно минимум 480 ГБ,
-для семи — 1680 ГБ, а также соответствующие CPU/RAM/IP. Checker dispatch'ит
-разные targets параллельно; в выбранном пуле нужны квоты на суммарное потребление всех runs.
-
-Локальный диск обязателен для текущей архитектуры: snapshot читают четыре runner на одной VM, а после
-cleanup диск удаляется вместе с сервером. Отдельный network volume workflow не создаёт.
-
-Input `selectel_location` в основном workflow и ручном checker позволяет выбрать сегмент пула.
-По умолчанию и для cron checker используется `ru-9a`; `ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`,
-`ru-6a`/`ru-6b`/`ru-6c` и `ru-8a` — ручные резервные варианты:
-
-| Availability zone | OpenStack region | Public Network endpoint |
-| --- | --- | --- |
-| `ru-7a` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
-| `ru-7b` | `ru-7` | `https://ru-7.cloud.api.selcloud.ru/public-network` |
-| `ru-3b` | `ru-3` | `https://ru-3.cloud.api.selcloud.ru/public-network` |
-| `ru-2c` | `ru-2` | `https://ru-2.cloud.api.selcloud.ru/public-network` |
-| `ru-6a` | `ru-6` | `https://ru-6.cloud.api.selcloud.ru/public-network` |
-| `ru-6b` | `ru-6` | `https://ru-6.cloud.api.selcloud.ru/public-network` |
-| `ru-6c` | `ru-6` | `https://ru-6.cloud.api.selcloud.ru/public-network` |
-| `ru-8a` | `ru-8` | `https://ru-8.cloud.api.selcloud.ru/public-network` |
-| `ru-9a` | `ru-9` | `https://ru-9.cloud.api.selcloud.ru/public-network` |
-
-В `ru-3b` (Санкт-Петербург) доступны те же HighFreq-конфигурации с выделенными ядрами, что и
-в `ru-7a` и `ru-7b` (Москва). Оба московских сегмента используют один `SELECTEL_IMAGE_ID` региона `ru-7`.
-`ru-6a`/`ru-6b`/`ru-6c` (Москва) используют отдельный регион `ru-6` и HighFreq
-с выделенными ядрами. Основания выбора и ограничения описаны в
-[исследовании дополнительных пулов](research/selectel-ru6-2026-10-25.md).
-`ru-2c` (Москва), `ru-8a` (Новосибирск) и `ru-9a` (Санкт-Петербург) используют обычный HighFreq без выделенных ядер.
-Дополнительные конфигурации и ограничения описаны в
-[исследовании альтернатив HighFreq](research/selectel-highfreq-alternatives-2026-10-25.md).
-Перед резервным запуском проверить квоты проекта в выбранном регионе на CPU/RAM, локальный диск
-и direct public IP. Preflight выбранного региона проверяет доступность образа, flavor, сегмента
-и свободного direct-IP slot до создания ресурсов. Автоматического переключения пулов нет.
-
-Профили HFL2 в `ru-7a`/`ru-7b`/`ru-3b`/`ru-6a`/`ru-6b`/`ru-6c` соответствуют включённой
-в панели опции **Выделенные ядра**; Hyper-Threading (SMT) остаётся включённым по умолчанию.
-Профили HFL1 в `ru-2c`/`ru-8a`/`ru-9a` используют HighFreq без выделенных ядер. Standard и произвольный выбор
-flavor не поддерживаются.
-
-В [модели оплаты Selectel](https://docs.selectel.ru/cloud-servers/about/payment/)
-учитывается максимальное потребление ресурсов проекта за каждый астрономический час.
-Поэтому даже 50 минут работы могут попасть в два оплачиваемых часа, например с 10:25 до 11:15.
-Более быстрый CPU не гарантирует выполнение всего pipeline в пределах одного такого интервала:
-длительность также зависит от скачивания, публикации и cleanup.
+API-ключ создаётся в настройках аккаунта Aeza. Он имеет права на все услуги аккаунта:
+ограничения одним сервером и срока действия у него нет. Это согласованное ограничение
+переноса. На VM ключ хранится только в root-файле `0600` для аварийного удаления.
 
 ## 2. Repository-level GitHub App
 
@@ -130,36 +52,18 @@ key хранится как repository-level Actions secret `GH_APP_PRIVATE_KEY`
 repository-scoped installation token; checkout сохраняет этот token как credentials для push
 data-ветки.
 
-## 3. GitHub Environment
+## 3. GitHub Environments
 
-В `game-unpack-pipeline` открыть `Settings → Environments` и создать Environment с точным именем
-`selectel`.
+Создать Environment **`aeza`** и сохранить в нём secret **`AEZA_API_KEY`**.
+Provision, runtime watchdog, cleanup и reconciler используют этот Environment.
+Для production разрешить deployment только из `main`; required reviewers не нужны,
+если аварийная очистка должна выполняться без ручного подтверждения.
+Repository secret `GH_APP_PRIVATE_KEY` и variable `GH_APP_CLIENT_ID` остаются прежними.
 
-В **Deployment branches and tags** разрешить только branch `main`. Не включать required reviewers,
-если автоматический `workflow_run` reconciler должен выполнять аварийную очистку без ожидания
-ручного approval.
+Environment `selectel`, его secrets и repository variables `SELECTEL_*` сохранены для
+возможного отката из Git-истории. Текущие workflows их не читают.
 
-Добавить Environment secret:
-
-| Secret | Значение |
-| --- | --- |
-| `SELECTEL_OS_PASSWORD` | Пароль Selectel service user |
-
-Отдельный постоянный secret для emergency self-destruct не нужен. Во время provision service user
-создаёт для конкретной VM restricted OpenStack application credential, передаёт его через metadata
-этой VM и удаляет при штатном cleanup. Credential имеет фиксированный срок действия и не выводится
-в Actions logs или summary.
-
-В `Settings → Secrets and variables → Actions → Secrets` добавить repository secret:
-
-| Secret | Значение |
-| --- | --- |
-| `GH_APP_PRIVATE_KEY` | Полный PEM private key GitHub App |
-
-Self-hosted downloader и reusable consumer jobs не используют Environment `selectel`. Publisher jobs
-получают только явно переданный `GH_APP_PRIVATE_KEY` и не обращаются к `SELECTEL_OS_PASSWORD`.
-
-Создать второй Environment с точным именем `wotstat-assets-uploader`. В **Deployment branches and tags**
+Создать Environment с точным именем `wotstat-assets-uploader`. В **Deployment branches and tags**
 разрешить только branch `main`. Не включать required reviewers, если checker должен автоматически
 запускать uploader; если автоматический запуск не нужен, reviewer можно использовать как ручной gate.
 
@@ -192,31 +96,8 @@ caller, включая техническую доступность `GH_APP_PRI
 
 ## 4. Repository Variables
 
-В `Settings → Secrets and variables → Actions → Variables` добавить:
-
-| Variable | Значение |
-| --- | --- |
-| `GH_APP_CLIENT_ID` | Client ID GitHub App |
-| `SELECTEL_OS_AUTH_URL` | `https://cloud.api.selcloud.ru/identity/v3` |
-| `SELECTEL_OS_USERNAME` | Имя Selectel service user |
-| `SELECTEL_OS_USER_DOMAIN_NAME` | ID аккаунта Selectel |
-| `SELECTEL_OS_PROJECT_ID` | ID отдельного Cloud Platform project |
-| `SELECTEL_IMAGE_ID` | Уникальное имя или UUID Ubuntu 24.04 x64 image для ручных резервов в `ru-7` |
-| `SELECTEL_IMAGE_ID_RU_3` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-3` |
-| `SELECTEL_IMAGE_ID_RU_2` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-2` |
-| `SELECTEL_IMAGE_ID_RU_6` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-6` |
-| `SELECTEL_IMAGE_ID_RU_8` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-8` |
-| `SELECTEL_IMAGE_ID_RU_9` | Необязательное уникальное имя или UUID Ubuntu 24.04 x64 image в `ru-9` |
-
-`SELECTEL_OS_PROJECT_ID` может быть UUID с дефисами или 32 шестнадцатеричными символами. Image и
-фиксированный HighFreq flavor разрешаются OpenStack CLI в выбранном регионе.
-Для `ru-7` используется `SELECTEL_IMAGE_ID`. Для `ru-2`/`ru-3`/`ru-6`/`ru-8`/`ru-9` —
-соответствующая variable `SELECTEL_IMAGE_ID_RU_2`/`SELECTEL_IMAGE_ID_RU_3`/`SELECTEL_IMAGE_ID_RU_6`/
-`SELECTEL_IMAGE_ID_RU_8`/`SELECTEL_IMAGE_ID_RU_9`, если она задана, иначе уникальное имя публичного
-образа `Ubuntu 24.04 LTS 64-bit` в выбранном регионе. UUID образа из `ru-7`
-в резервные регионы не переносится. До создания
-ресурсов preflight проверяет authentication, image, flavor, availability zone и наличие свободного
-direct-public-IP slot; при отсутствующем или неоднозначном имени run завершается на этом этапе.
+Обязательна только прежняя `GH_APP_CLIENT_ID`. Тариф, ОС и URL Aeza API зафиксированы
+в lifecycle-коде. Credentials и account identifiers не хранятся в коде или variables.
 
 ## 5. Telegram-уведомления
 
@@ -239,7 +120,7 @@ direct-public-IP slot; при отсутствующем или неоднозн
 | `TELEGRAM_CHAT_ID` | Числовой ID личного чата, группы или канала |
 
 Обе notification jobs работают на GitHub-hosted runner с Environment `telegram` и не получают
-Selectel credentials из Environment `selectel`. Основной workflow всегда отправляет итоговый отчёт
+Aeza credentials из Environment `aeza`. Основной workflow всегда отправляет итоговый отчёт
 после своей cleanup job. Reconciler отправляет отдельный аварийный alert только если его
 `deleted_count` больше нуля. Используемый `appleboy/telegram-action` закреплён на полном commit SHA
 версии `v1.1.1`.
@@ -257,7 +138,7 @@ deployment использует стандартный Pages flow.
 
 Страница собирается только из публичных `status/<target>.json` и их Git-истории. Для этого build job
 делает checkout с `fetch-depth: 0`, генерирует `_site`, загружает Pages artifact и передаёт его
-deployment job с минимальными `pages: write` и `id-token: write`. Секреты Selectel, Telegram,
+deployment job с минимальными `pages: write` и `id-token: write`. Секреты Aeza, Telegram,
 ClickHouse и S3 в Pages workflow недоступны.
 
 Стандартный URL проекта после первого deployment:
@@ -272,13 +153,7 @@ Workflow автоматически запускается каждый час �
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
-В `selectel_location` выбрать общий пул для всех запускаемых targets: `ru-9a` (по умолчанию),
-`ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c` или `ru-8a`.
-Чтобы сразу повторить найденные неопубликованные версии после ошибок, включить `force_retry`:
-галочка обходит ожидание retry для всех выбранных targets. По умолчанию она выключена. Для запуска
-оставить `dispatch_pipelines` включённым; уже работающие targets и опубликованные версии пропускаются.
-Cron продолжает соблюдать расписание повторов.
-Для dry-run нужно снять `dispatch_pipelines`. В логе появится одно из состояний:
+Все targets используют Aeza Moscow Shared MSKs-5.
 
 - `action=none` — release name совпадает со status;
 - `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;
@@ -313,8 +188,6 @@ patches chain для default language, не создавая workspace и не �
 | `target` | `wot-eu` |
 | `client_type` | `sd` |
 | `languages` | `EN` |
-| `selectel_location` | `ru-9a`; для ручного обхода сбоя пула выбрать `ru-7a`, `ru-7b`, `ru-3b`, `ru-2c`, `ru-6a`, `ru-6b`, `ru-6c` или `ru-8a` |
-| `preemptible` | `true`: две прерываемые попытки и обычная третья при вытеснении; `false`: обычная VM без немедленного retry |
 | `detected_release_name` | оставить пустым |
 | `publish_wot_src` | `true` |
 | `publish_wot_gui_assets` | `true` |
@@ -328,213 +201,58 @@ Consumer можно включать независимо для каждого 
 оставить `publish_wot_src: true`, а два других переключателя выключить. Все три переключателя
 включены по умолчанию; если отключить все, workflow соберёт snapshot без публикации или upload.
 
-## 9. Ожидаемая последовательность jobs
+## 9. Lifecycle и аварийная очистка
 
-1. `Provision` устанавливает pinned `python-openstackclient==10.2.1`, выполняет preflight и создаёт
-   egress-only security group с direct-public port.
-2. Provision резервирует все четыре runner в `game-unpack-pipeline`: downloader и по одному runner
-   для jobs `wot-src`, `wot-gui-assets` и `wotstat-assets-uploader`, затем создаёт VM.
-3. После получения UUID provision создаёт restricted OpenStack application credential с единственным
-   access rule `DELETE` для этой VM. Credential истекает через пять часов: systemd kill switch
-   срабатывает через четыре часа, а дополнительный час оставлен для повторных попыток API.
-4. Cloud-init до скачивания runner вооружает persistent systemd timer на абсолютный четырёхчасовой
-   дедлайн. Затем он скачивает официальный Linux/x64 GitHub Actions Runner, проверяет SHA-256 и
-   запускает четыре systemd service под разными Unix-пользователями.
-5. Provision ждёт статус VM `ACTIVE` и состояние `online` всех четырёх runner.
-6. `Download` checkout’ит текущий `game-unpack-pipeline` и запускает встроенный downloader. Все
-   стадии от `resolve` до `snapshot` видны отдельными Actions steps; metrics и небольшие
-   diagnostic files загружаются как artifact. Если отдельный большой Artifact не поддерживает
-   согласованный parallel Range, downloader удаляет только его range-state и повторяет загрузку
-   обычным HTTP stream. Остальные Artifact продолжают использовать parallel Range; причина,
-   конечный host и отброшенные байты записываются в `parallel-range-fallbacks.json`.
-   Для каждого parallel Range downloader проверяет среднюю скорость по отдельным двухминутным
-   окнам. Если она ниже `128 KiB/s`, незавершённый ответ закрывается, прогресс сохраняется, а
-   следующий запрос продолжает тот же диапазон с первого незаписанного байта. `If-Range`,
-   validator и `Content-Range` проверяются при каждом продолжении. Используется общий лимит
-   четырёх попыток на диапазон и URL, включая сетевые ошибки и повторные HTTP 200; при исчерпании
-   попыток медленный поток продолжает работу. Само замедление не
-   сбрасывает уже записанные диапазоны. Лог содержит номер диапазона, host, измеренную скорость,
-   offset продолжения и номер попытки либо сообщение об исчерпании попыток.
-   Для всех targets средняя суммарная скорость ниже `1 MiB/s` за пять минут выдаёт только
-   предупреждение и не прерывает download. Предупреждение выводится один раз за период замедления;
-   после восстановления скорости новое замедление снова попадает в лог. Для последних 5% действует
-   отсрочка предупреждения на 20 минут с момента входа в этот хвост; повторы Range не продлевают её.
-   Отдельный HTTP read без данных по-прежнему ограничен 60 секундами.
-   Обычный HTTP stream при скорости ниже `256 KiB/s` за пять минут выдаёт предупреждение и
-   продолжает скачивание, сохраняя уже полученный префикс. Пять минут без
-   нового продвижения файла остаются окончательной ошибкой; сетевые повторы не продлевают этот
-   таймер. Вся стадия `download` ограничена 60 минутами.
-7. После seal downloader возвращает version name из WGUS/LSTUS, читаемую версию
-   `x.x.x.x #xxx` из корневого `version.xml`, snapshot ID, абсолютный path и SHA-256 canonical
-   descriptor.
-8. Включённые `Publish wot-src`, `Publish wot-gui-assets` и `Upload wotstat assets` параллельно
-   вызывают reusable workflow соответствующего репозитория через прямой
-   `uses: ...@main`. Jobs входят в основной run, checkout’ят собственный consumer-код через
-   `job.workflow_repository` и `job.workflow_sha` и получают одинаковую snapshot identity.
-   Отключённая job получает статус `skipped` и не считается ошибкой cleanup.
-9. Каждый включённый consumer проверяет sealed handoff. Data publisher создаёт version commit или
-   возвращает `unchanged`; uploader выполняет все loaders и возвращает `uploaded`. Ошибка любого
-   loader делает всю uploader job неуспешной.
-10. `Cleanup` удаляет все runner registrations, VM, direct-public port, security group и emergency
-    application credential. Credential удаляется последним и только после успешной проверки VM.
-11. После cleanup `Record pipeline status` с `always()` перезаписывает `last_run` в
-    `status/<target>.json` и коммитит результат, время, длительность и ссылку на Actions run в
-    default branch. Успех provision, downloader и всех включённых consumer обновляет `release_name`
-    и `readable_version` `x.x.x.x #xxx`; отключённые consumer не участвуют в результате,
-    а пропуск включённого считается ошибкой. Сбои cleanup, queue watchdog и Telegram не меняют
-    этот успех в status, хотя остаются видны в GitHub Actions. При ошибке обработки последняя
-    успешная версия остаётся прежней, а та же неуспешная версия
-    автоматически больше не запускается. Если run создан checker, переданная им
-    `detected_release_name` сохраняется даже при ошибке до `resolve`; точная `readable_version`
-    появляется только после чтения `version.xml` из готового snapshot. Параллельные status-job
-    сериализуются и не отменяют друг друга.
-12. `Deploy public status page` после status commit читает текущие файлы, их полную Git-историю и
-    метаданные последнего завершённого checker run, затем собирает `_site` и публикует Pages artifact.
-    Время проверки не коммитится; checker сам вызывает тот же Pages workflow после своего отчёта.
-    История pipeline не хранится отдельным массивом или набором файлов: каждый status commit становится
-    одной записью временной шкалы.
-13. `Telegram report` параллельно status-job отправляет компактный HTML-отчёт с читаемой версией
-    `x.x.x.x #xxx` или переданной release name при ранней ошибке, target, client type, языками и
-    состоянием всех consumer; `published` ведёт ссылкой на точный commit, а `ALL` сохраняется в
-    заголовке буквально. Полная длительность run от
-    `run_started_at` до формирования отчёта выводится рядом со ссылкой на pipeline.
-14. `Reconcile release resources` после завершения повторяет безопасный поиск и удаление в
-    `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2`. Обычный ручной run запускает его через `workflow_run`; bot-dispatched run
-    явно вызывает тот же workflow после cleanup и отчётов, поскольку GitHub подавляет следующий
-    `workflow_run` в цепочке repository `GITHUB_TOKEN`. Если reconciler вынужден что-либо удалить,
-    приходит отдельный recovery alert.
-    Bot rerun учитывает `github.triggering_actor`; вытесненная/отменённая прерываемая попытка
-    также явно запускает reconciler. После успешной очистки он может выполнить следующий
-    полный attempt в пределах политики прерываемых VM.
-
-Queue watchdog ждёт назначения download job на downloader runner 10 минут. Self-hosted publisher
-job ограничены 60 минутами, uploader — 120 минутами; их состояния и шаги видны непосредственно в
-основном run.
-
-После назначения downloader тот же GitHub-hosted watchdog продолжает наблюдать за VM через
-Selectel API раз в минуту до завершения downloader и включённых consumer. Его общий срок
-ограничен исходным четырёхчасовым дедлайном VM. При подтверждённом вытеснении он сначала
-сохраняет monitoring report, затем отменяет потерявшую VM попытку; обычные cleanup/status/Telegram
-и reconciler выполняются перед следующим полным запуском.
-
-Если runner остановлен и GitHub уже завершил его job как `cancelled` либо `failure`, но явной
-ошибки или таймаута конкретного шага нет, watchdog проверяет VM перед завершением наблюдения.
-На появление окончательного состояния Selectel отводится до двух минут в пределах исходного
-дедлайна VM. Это также применяется к runner включённых consumer. Подтверждённое вытеснение
-сохраняется в report и разрешает обычную цепочку полного retry после reconciler. По истечении
-этого ожидания без подтверждения report получает `runner_interrupted` без разрешения retry;
-успешная работа и явные ошибки шагов завершают наблюдение как `jobs_completed`.
-
-### Прерываемые VM и полные повторы
-
-`preemptible` включён по умолчанию в ручных формах основного workflow и checker, а также в cron.
-Отключение выбирает обычную VM без немедленного retry. При включении:
-
-1. Actions attempt 1 — прерываемая VM.
-2. Если Selectel вытеснил её, после успешного reconciler выполняется полный attempt 2 на новой
-   прерываемой VM с четырьмя новыми JIT runner.
-3. Если вытеснен и attempt 2, полный attempt 3 использует обычную VM. Его сбой завершает цепочку.
-
-Используется full rerun одного Run ID с исходными SHA/ref и inputs. Ручные rerun также увеличивают
-номер attempt; начиная с третьего VM всегда обычная. Другой сегмент автоматически не выбирается.
-Полный повтор начинает скачивание и сборку заново: [Selectel удаляет данные локального диска](https://docs.selectel.ru/cloud-servers/manage/restore-preemptible-server/).
-Существующие плановые повторы checker через 12 часов и далее сохраняются.
-
-Прерывание подтверждается только у своей VM с локальным диском, маркером прерываемости,
-системным тегом `preemptible` и состоянием `SHELVED_OFFLOADED` (`EXPIRED` в панели).
-Обычная заморозка сетевого диска не подходит под эти условия. `SHUTOFF`, NoValidHost, ошибки
-приложения/API и ручная отмена не разрешают немедленный retry. При отменённом run дополнительно
-проверяется успешный шаг отмены из VM monitor. Создание и чтение VM используют microversion 2.72,
-чтобы API возвращал системные теги. Пароль Selectel остаётся только на GitHub-hosted runner.
-
-Для измерения частоты вытеснений сохраняются `selectel-attempt-<run_id>-<attempt>-provision`
-и `selectel-attempt-<run_id>-<attempt>-monitor` artifacts (30 дней): режим, причина завершения,
-время наблюдения и возраст VM. В них нет credentials, IP или облачных UUID. Отсутствующий или
-некорректный report не разрешает retry. Reconciler сериализован по source Run ID/attempt,
-поэтому дубли событий не отменяют ожидающую reconciliation следующего attempt. Перед POST
-контроллер перепроверяет текущий attempt, поэтому повторная reconciliation не создаёт
-дополнительную попытку.
+1. Preflight проверяет каталог, котировку, баланс и лимиты Aeza.
+2. Provision генерирует временный Ed25519 ключ, регистрирует его с `autoAssign: false`
+   и один раз отправляет заказ. Повтор POST после 502/обрыва запрещён: заказ уже мог
+   создать оплачиваемую VM. Reconciler найдёт её без job outputs.
+3. Имя VM содержит hash caller-репозитория, исходные Run ID/attempt и instance key.
+   Перед удалением проверяются точное имя, product ID и почасовой payment term.
+   SSH-ключ дополнительно проверяется по полному ownership descriptor в комментарии public key.
+4. После активации VM provision выпускает четыре JIT-конфигурации и по SSH загружает
+   root-файлы через stdin. Приватный ключ существует только во временном каталоге
+   provisioner. SSH использует отдельный known_hosts с `accept-new`, последующие изменения
+   host key завершают provisioning ошибкой. Запрос bootstrap не повторяется.
+5. До установки runner вооружается systemd timer с абсолютным дедлайном через четыре
+   часа от начала аренды. Аварийный скрипт сверяет ownership и вызывает Aeza DELETE;
+   systemd повторяет проверку до подтверждённого удаления.
+6. Bootstrap устанавливает nftables: входящие и forwarding закрыты, разрешены loopback,
+   established/related и необходимые IPv6 control messages. Одноразовый SSH public key
+   удаляется, SSH отключается. Только затем запускаются runner. Первичный SSH-доступ
+   необходим до установки firewall; cloud-init в этой интеграции не используется.
+7. Архив Actions Runner проверяется по digest официального GitHub release.
+   У runner отдельные Unix user, HOME и directory; sudo есть только у downloader.
+8. Runtime watchdog на GitHub-hosted runner следит за downloader и включёнными consumer
+   в пределах того же дедлайна. При потере VM/дедлайне он отменяет run. После ошибок
+   очередь и основной cleanup удаляют VM и регистрации runner; reconciler повторяет
+   очистку по детерминированным именам. Немедленных полных rerun нет.
+9. HTTP 204 от Aeza DELETE означает постановку в очередь. Cleanup считает ресурс
+   удалённым только после `deleted`/404 и затем удаляет загруженный SSH-ключ.
+   При сбое очистки VM ключ сохраняется для последующей reconciliation.
+10. Для ручных запусков reconciler вызывается через `workflow_run`. Token-originated
+    runs явно dispatch'ят его после cleanup и отчётов. Concurrency сериализована по
+    исходным Run ID/attempt без отмены. Recovery Telegram alert отправляется только при
+    подтверждённом `deleted_count > 0`.
 
 ## 10. Отмена и повторная очистка
 
-Обычная кнопка **Cancel workflow** не должна оставлять инфраструктуру: основной cleanup использует
-`always()`, а после завершения run с branch `main` запускается отдельный `workflow_run` reconciler.
+После отмены запустить `Reconcile release resources`, указав исходные `source_run_id`
+и `source_run_attempt`. Повтор безопасен: чужие имена, тарифы и registrations не удаляются.
+Reconciler продолжает обработку runner, даже если Aeza недоступен, и удаляет платную VM
+независимо от ошибок GitHub. При неуспешной очистке job завершится ошибкой.
 
-Если GitHub Actions полностью недоступен, локальный timer через четыре часа запрашивает удаление
-собственной VM напрямую у Selectel. Это аварийный третий контур, а не полный reconciler: после
-самоудаления VM direct public port и security group могут остаться до восстановления GitHub Actions.
-Внешнего watchdog или отдельного scheduler в архитектуре нет.
+## 11. Диагностика и проверка
 
-Если автоматический reconciler завершился с ошибкой:
-
-1. Скопировать numeric Run ID исходного `Process game release` из URL.
-2. Посмотреть attempt в интерфейсе run; у первого запуска это `1`.
-3. Открыть `Actions → Reconcile release resources → Run workflow` на `main`.
-4. Передать `source_run_id` и `source_run_attempt`.
-5. Повторять manual reconciler безопасно, если Selectel или GitHub API временно недоступны.
-
-Reconciler проверяет `ru-7`, `ru-3`, `ru-9`, `ru-6`, `ru-8` и `ru-2` и удаляет только ресурсы с детерминированными именами и совпавшими
-repository/run/attempt ownership-маркерами. Уже отсутствующий ресурс считается очищенным. При
-ошибке отдельной операции cleanup продолжает удалять остальные ресурсы, а затем завершает job с
-перечнем незавершённых действий.
-
-Emergency application credential относится к общему Identity API. Перед его удалением reconciler
-с `--credential-check-regions ru-7 ru-3 ru-9 ru-6 ru-8 ru-2` подтверждает отсутствие VM во всех шести region.
-Если VM ещё существует в другом регионе или API не позволяет проверить её отсутствие, credential
-сохраняется для systemd kill switch. Штатный cleanup проверяет регион своего run.
-
-Внутри provision, cleanup и reconciler временные ошибки Selectel повторяются с паузами
-5, 15 и 30 секунд. Для HTTP это GET/HEAD/DELETE и получение identity token: сетевые обрывы,
-таймауты и ответы 408/429/500/502/503/504. OpenStack CLI повторяет только чтение и получение
-токена при временных HTTP/connection/TLS EOF ошибках; одна попытка ограничена 60 секундами,
-а все попытки вместе — исходным timeout операции (по умолчанию 180 секунд). Исчерпание
-ретраев сетевой ошибки не считается подтверждением отсутствия ресурса.
-
-Удаление VM, security group и emergency credential обрабатывает неоднозначный результат отдельно:
-после временной ошибки DELETE выполняется проверка того же UUID. Подтверждённое отсутствие завершает
-очистку без увеличения `deleted_count`; существующий ресурс удаляется повторно с паузами 5/15/30 секунд.
-Ошибка проверки состояния не считается отсутствием. Удаление вместе с проверками и паузами ограничено
-timeout операции; ни одна попытка CLI не получает больше 60 секунд. Ownership проверяется перед
-удалением, а ошибки необязательной console diagnostics не прерывают cleanup.
-
-Создание ресурсов целиком не повторяется: Selectel может создать public port и вернуть 502.
-После временной ошибки создания порта pipeline с теми же паузами повторяет поиск по точным
-ownership-маркерам, проверяет project и security group и продолжает с найденным портом.
-Если порт не найден или найдено несколько, provision завершается ошибкой и передаёт очистку
-обычному cleanup. Повторного POST нет даже при пустом списке: результат создания может появиться
-позже. Поля поиска и проверки соответствуют
-[Public Network API](https://docs.selectel.ru/api/cloud-public-network/).
-
-## 11. Диагностика без утечки секретов
-
-Ошибки загрузки torrent descriptor в `plan-acquisition` содержат исходный URL и, если известен,
-адрес фактически неудачного запроса после редиректа. HTTP-ошибки также показывают конечный URL
-ответа. Scheme, host, port и path сохраняются; userinfo, query и fragment удаляются, в том числе
-из URL внутри текста транспортной ошибки. Control characters экранируются. Это позволяет найти
-недоступный CDN без вывода параметров авторизации в логи.
-
-Если VM переходит в `ERROR`, provision до cleanup выводит `fault.code` и `fault.message`
-из ответа `openstack server show`. Например: `fault.code=500; fault.message="No valid host was found."`.
-Числовой код и причина будут видны в ошибке шага `Create VM and wait for runner`; при отсутствии
-полей выводится `unavailable`. Сообщение очищается от известных passwords, tokens, JIT-конфигураций,
-account/project identifiers и именованных credential/user-data значений. Переводы строк и control
-characters экранируются, длина ограничена 4096 символами после очистки. `fault.details`, metadata,
-cloud-init user data и полный server payload в эту диагностику не попадают.
-
-При ошибке cleanup запрашивает serial console и выводит только очищенный хвост. Из него удаляются
-JIT-конфигурации, известные tokens/passwords и распространённые GitHub token formats. Полный console
-log не сохраняется как artifact.
-
-Нельзя вставлять в issue или лог содержимое cloud-init user data, `/run/actions-runner/*/jit-config`,
-GitHub App private key, emergency application credential или Selectel password. Если нужно показать
-сбой, использовать Actions summary, diagnostic artifact downloader и уже очищенный console tail из
-cleanup job.
+Артефакты `aeza-attempt-<run_id>-<attempt>-provision|monitor` содержат только provider,
+тариф, режим оплаты, reason и timestamp. Полные service payloads, `secureParameters`,
+passwords, API keys, SSH private keys и JIT-конфигурации не выводятся.
+Для bootstrap используются systemd units `gup-bootstrap` и
+`gup-emergency-self-destruct.timer`. Локальная команда `./scripts/check.sh` не обращается
+к Aeza или GitHub.
 
 ## Первичные справочники
 
-- [GitHub: generate a JIT configuration for a repository runner](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository)
-- [GitHub: `actions/create-github-app-token`](https://github.com/actions/create-github-app-token)
-- [GitHub: custom workflows for GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
-- [Selectel: Public Network API](https://docs.selectel.ru/api/cloud-public-network/)
-- [OpenStack CLI: `application credential`](https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/application-credentials.html)
-- [OpenStack CLI: `server create`](https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/server.html#server-create)
+- [Aeza API v2 OpenAPI](https://my.aeza.net/api/v2/docs-json)
+- [Aeza Swagger UI](https://my.aeza.net/api/v2/docs)
+- [Почасовые серверы Aeza](https://wiki.aeza.net/ru/cabinet/hourly-servers/)
