@@ -250,6 +250,8 @@ jobs:
         run: bash .github/scripts/run-stage.sh plan-acquisition
 
       - name: Download artifacts
+        env:
+          GAME_DOWNLOADER_DOWNLOAD_WORKERS: "4"
         timeout-minutes: 60
         shell: bash
         run: bash .github/scripts/run-stage.sh download

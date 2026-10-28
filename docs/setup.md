@@ -158,10 +158,11 @@ Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним со�
 выбранных файлов без URL query/credentials. У downloader его внутренняя проверка входит во
 время передачи. После измерений cleanup подтверждает удаление VM, временного SSH-ключа и runner.
 Workflow не публикует snapshot и не меняет production status.
-`diagnose: true` дополнительно сравнивает 1/4/16 downloader workers, экспериментальное
-укрупнение HTTP-блоков и отключение только учёта прогресса. Эти overrides действуют лишь
-в диагностическом worker; проверка содержимого сохраняется. Reconciler также обрабатывает
-завершившиеся benchmark runs.
+Production download и обычный benchmark используют четыре file worker. `diagnose: true`
+дополнительно сравнивает один и 16 file workers. Optional `baseline_sha` принимает полный SHA
+из истории `main` и запускает прежний downloader с 16 workers на той же VM и тех же файлах.
+Исторический импорт проверяется явно; source hash и SHA-256 должны совпасть для всех вариантов.
+Reconciler также обрабатывает завершившиеся benchmark runs.
 
 ## 7. Автоматическая и ручная проверка новых версий
 

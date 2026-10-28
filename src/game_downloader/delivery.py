@@ -10,7 +10,7 @@ import threading
 import time
 import zipfile
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -158,14 +158,11 @@ class _HttpTransferProgress:
 
     def _check(self, now: float) -> float:
         remaining = self._policy.http_no_progress_timeout_seconds - (now - self._last_progress_at)
-        detail = (
-            f"Artifact {self._artifact_id}: {_format_bytes(self._current_bytes)} / "
-            f"{_format_bytes(self._size)} available"
-        )
         if remaining <= 0:
             raise StageExecutionError(
                 "source_unavailable",
-                f"{detail}; HTTP made no forward progress for "
+                f"Artifact {self._artifact_id}: {_format_bytes(self._current_bytes)} / "
+                f"{_format_bytes(self._size)} available; HTTP made no forward progress for "
                 f"{self._policy.http_no_progress_timeout_seconds:g}s",
             )
         self._samples.append((now, self._current_bytes))
@@ -183,7 +180,10 @@ class _HttpTransferProgress:
         ):
             if not self._slow_warning_active:
                 self._observer(
-                    f"Warning: {detail}; HTTP forward progress averaged {_format_rate(speed)} over "
+                    f"Warning: Artifact {self._artifact_id}: "
+                    f"{_format_bytes(self._current_bytes)} / "
+                    f"{_format_bytes(self._size)} available; "
+                    f"HTTP forward progress averaged {_format_rate(speed)} over "
                     f"{elapsed:.1f}s, below the configured {_format_rate(minimum_speed)} "
                     "warning threshold; continuing current stream"
                 )
@@ -518,10 +518,13 @@ class _ParallelArtifactProgress:
                 )
 
     def current(self, index: int) -> int:
-        if self._progress is not None:
-            self._progress.check_active()
+        self.check_active()
         with self._lock:
             return self._current_bytes[index]
+
+    def check_active(self) -> None:
+        if self._progress is not None:
+            self._progress.check_active()
 
     def persist(self) -> None:
         with self._lock:
@@ -532,6 +535,50 @@ class _ParallelArtifactProgress:
                 self._state_path,
                 current_state.model_dump(mode="json"),
             )
+
+
+def _response_chunks(
+    response: httpx.Response,
+    chunk_bytes: int,
+    *,
+    on_received: Callable[[int], None] | None = None,
+) -> Iterator[tuple[bytes, bool]]:
+    """Yield buffered bytes and whether a network read is fully consumed.
+
+    Flush trickles and received prefixes before retrying. The boundary flag keeps
+    Range throughput checks from treating one large read as several slow reads.
+    """
+
+    pending = bytearray()
+    received_bytes = 0
+    flushed_at = time.monotonic()
+    try:
+        for received in response.iter_raw():
+            flush_due = time.monotonic() - flushed_at >= 1
+            received_bytes += len(received)
+            if on_received is not None:
+                on_received(received_bytes)
+            remaining = memoryview(received)
+            while remaining:
+                available = chunk_bytes - len(pending)
+                pending.extend(remaining[:available])
+                remaining = remaining[available:]
+                if len(pending) == chunk_bytes:
+                    yield bytes(pending), not remaining
+                    pending.clear()
+                    flushed_at = time.monotonic()
+            # A slow source must expose useful progress without filling a whole block.
+            if pending and flush_due:
+                yield bytes(pending), True
+                pending.clear()
+                flushed_at = time.monotonic()
+    except httpx.HTTPError:
+        # Preserve the received prefix so a resumed request starts at persisted bytes.
+        if pending:
+            yield bytes(pending), True
+        raise
+    if pending:
+        yield bytes(pending), True
 
 
 def _artifact_cache_key(artifact: AcquisitionArtifact) -> str:
@@ -1388,7 +1435,11 @@ class ArtifactDownloader:
                             self._policy.parallel_range_minimum_throughput_bytes_per_second
                         )
                         check_slow_range = minimum_speed > 0
-                        for received in response.iter_raw():
+                        for received, read_complete in _response_chunks(
+                            response,
+                            self._policy.chunk_bytes,
+                            on_received=lambda _count: progress.check_active(),
+                        ):
                             for offset in range(0, len(received), self._policy.chunk_bytes):
                                 chunk = received[offset : offset + self._policy.chunk_bytes]
                                 written += len(chunk)
@@ -1414,7 +1465,11 @@ class ArtifactDownloader:
                                     len(chunk),
                                     source_host=source_host,
                                 )
-                            if not check_slow_range or written == byte_range.size:
+                            if (
+                                not read_complete
+                                or not check_slow_range
+                                or written == byte_range.size
+                            ):
                                 continue
                             now = time.monotonic()
                             elapsed = now - window_started_at
@@ -1620,7 +1675,19 @@ class ArtifactDownloader:
         source_host: str | None,
     ) -> None:
         written = initial_size
-        for received in response.iter_raw():
+
+        def received_progress(received_bytes: int) -> None:
+            if progress is not None:
+                progress.check_active()
+            current = initial_size + received_bytes
+            if current > expected_size:
+                raise ArtifactCorruptError("web seed sent more bytes than declared")
+            # Keep the idle deadline and throughput window tied to actual network reads.
+            transfer.update(current)
+
+        for received, _read_complete in _response_chunks(
+            response, self._policy.chunk_bytes, on_received=received_progress
+        ):
             for offset in range(0, len(received), self._policy.chunk_bytes):
                 chunk = received[offset : offset + self._policy.chunk_bytes]
                 written += len(chunk)
@@ -1628,7 +1695,6 @@ class ArtifactDownloader:
                     raise ArtifactCorruptError("web seed sent more bytes than declared")
                 output.write(chunk)
                 hasher.update(chunk)
-                transfer.update(written)
                 if progress is not None:
                     progress.update(
                         artifact_id,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import os
 import socket
 import threading
 import zipfile
@@ -297,6 +298,135 @@ def _plan(
             required_free_bytes=len(raw_torrent) + 2 * download_bytes,
         ),
     )
+
+
+@pytest.mark.parametrize("fragment_seconds", [0.0, 2.0], ids=["fast-fragments", "slow-progress"])
+def test_http_fragment_batching_preserves_hashes_and_slow_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fragment_seconds: float,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    now = [0.0]
+    fragment_bytes = 4096
+    block_bytes = 64 * 1024
+    payload = b"fragmented-content" * 8000
+    data = {"/client.bin": payload, "/sd.bin": b"sd", "/locale.bin": b"locale"}
+    updates: list[int] = []
+    original_update = delivery_module._PayloadHasher.update
+    source_digest = hashlib.sha1(payload, usedforsecurity=False).hexdigest()
+
+    class FragmentedStream(httpx.SyncByteStream):
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __iter__(self) -> Iterator[bytes]:
+            for offset in range(0, len(self.body), fragment_bytes):
+                now[0] += fragment_seconds
+                yield self.body[offset : offset + fragment_bytes]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = data[request.url.path]
+        return httpx.Response(
+            200,
+            headers={"Content-Length": str(len(body)), "ETag": '"stable"'},
+            stream=FragmentedStream(body),
+        )
+
+    def counted_update(hasher: delivery_module._PayloadHasher, chunk: bytes) -> None:
+        if hasher._source_hash is not None and hasher._source_hash.value == source_digest:
+            updates.append(len(chunk))
+        original_update(hasher, chunk)
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(delivery_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        monkeypatch.setattr(delivery_module._PayloadHasher, "update", counted_update)
+        result = ArtifactDownloader(
+            DownloadPolicy(max_workers=1, chunk_bytes=block_bytes)
+        ).download(plan, workspace)
+
+    expected_block = block_bytes if fragment_seconds == 0 else fragment_bytes
+    assert updates == [
+        min(expected_block, len(payload) - start)
+        for start in range(0, len(payload), expected_block)
+    ]
+    assert all(item.source_hash_verified for item in result.artifacts)
+    client_file = next(item for item in result.artifacts if item.artifact.part is PartName.CLIENT)
+    assert workspace.blobs.path_for(client_file.blob_sha256).read_bytes() == payload
+
+
+def test_parallel_range_batches_fragmented_writes_at_correct_offsets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    block_bytes = 64 * 1024
+    payload = b"fragmented-content" * 8000
+    data = {"/client.bin": payload, "/sd.bin": b"sd", "/locale.bin": b"locale"}
+    writes: list[tuple[int, int]] = []
+    original_pwrite = os.pwrite
+
+    class FragmentedStream(httpx.SyncByteStream):
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __iter__(self) -> Iterator[bytes]:
+            for offset in range(0, len(self.body), 4096):
+                yield self.body[offset : offset + 4096]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = data[request.url.path]
+        headers = {"Content-Length": str(len(body)), "ETag": '"stable"', "Accept-Ranges": "bytes"}
+        if request.method == "HEAD":
+            return httpx.Response(200, headers=headers)
+        if raw_range := request.headers.get("Range"):
+            start, end = map(int, raw_range.removeprefix("bytes=").split("-"))
+            headers["Content-Range"] = f"bytes {start}-{end}/{len(body)}"
+            headers["Content-Length"] = str(end - start + 1)
+            return httpx.Response(
+                206, headers=headers, stream=FragmentedStream(body[start : end + 1])
+            )
+        return httpx.Response(200, headers=headers, stream=FragmentedStream(body))
+
+    def counted_pwrite(fd: int, chunk: memoryview, offset: int) -> int:
+        writes.append((offset, len(chunk)))
+        return original_pwrite(fd, chunk, offset)
+
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    with _http_fixture(data, disconnect_path=None) as server:
+        plan = _plan(workspace, server)
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "Client", lambda **_kwargs: client)
+        monkeypatch.setattr(delivery_module, "urlsplit", urlsplit_https)
+        monkeypatch.setattr(os, "pwrite", counted_pwrite)
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                chunk_bytes=block_bytes,
+                parallel_range_minimum_bytes=block_bytes,
+                parallel_range_target_bytes=block_bytes,
+                parallel_range_max_segments=2,
+            )
+        ).download(plan, workspace)
+
+    half = len(payload) // 2
+    assert sorted(writes) == [
+        (start + offset, min(block_bytes, half - offset))
+        for start in (0, half)
+        for offset in range(0, half, block_bytes)
+    ]
+    client_file = next(item for item in result.artifacts if item.artifact.part is PartName.CLIENT)
+    assert client_file.transport.parallel_segments == 2
+    assert client_file.source_hash_verified
+    assert workspace.blobs.path_for(client_file.blob_sha256).read_bytes() == payload
 
 
 def test_download_progress_reports_by_time_and_percentage() -> None:
