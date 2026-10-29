@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza ${{ inputs.aeza_server || 'MSKs-5' }} · @${{ github.actor }}
+run-name: Dedicated download control · aria2 vs Python · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -48,17 +48,17 @@ on:
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
-        default: true
+        default: false
         type: boolean
       publish_wot_gui_assets:
         description: Publish the snapshot to wot-gui-assets
         required: true
-        default: true
+        default: false
         type: boolean
       publish_wotstat_assets:
         description: Upload the snapshot with wotstat-assets-uploader
         required: true
-        default: true
+        default: false
         type: boolean
 permissions:
   contents: read
@@ -93,6 +93,21 @@ jobs:
       server_id: ${{ steps.provision.outputs.server_id }}
       server_name: ${{ steps.provision.outputs.server_name }}
     steps:
+      - name: Validate one-off control inputs
+        env:
+          SERVER: ${{ inputs.aeza_server }}
+          TARGET: ${{ inputs.target }}
+          CLIENT_TYPE: ${{ inputs.client_type }}
+          LANGUAGES: ${{ inputs.languages }}
+          PUBLISH_SRC: ${{ inputs.publish_wot_src }}
+          PUBLISH_GUI: ${{ inputs.publish_wot_gui_assets }}
+          PUBLISH_ASSETS: ${{ inputs.publish_wotstat_assets }}
+        run: |
+          set -Eeuo pipefail
+          [[ "${SERVER}" == MSK-5 && "${TARGET}" == wot-eu ]]
+          [[ "${CLIENT_TYPE}" == sd && "${LANGUAGES}" == ALL ]]
+          [[ "${PUBLISH_SRC}" == false && "${PUBLISH_GUI}" == false && "${PUBLISH_ASSETS}" == false ]]
+
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
 
@@ -134,7 +149,7 @@ jobs:
     runs-on:
       - self-hosted
       - ${{ needs.provision.outputs.downloader_runner_label }}
-    timeout-minutes: 360
+    timeout-minutes: 45
     outputs:
       snapshot_id: ${{ steps.result.outputs.snapshot_id }}
       version_name: ${{ steps.result.outputs.version_name }}
@@ -154,6 +169,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Inspect runner
         shell: bash
@@ -209,7 +225,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           "${apt[@]}" update
           "${apt[@]}" install --yes --no-install-recommends \
-            aria2 ca-certificates curl nodejs npm openjdk-17-jre-headless p7zip-full sysstat time unzip
+            aria2 ca-certificates curl fio nodejs npm openjdk-17-jre-headless p7zip-full sysstat time unzip
           "${apt[@]}" clean
           "${privileged[@]}" rm -rf /var/lib/apt/lists/*
 
@@ -260,54 +276,65 @@ jobs:
         shell: bash
         run: bash .github/scripts/run-stage.sh plan-acquisition
 
-      - name: Download artifacts
-        timeout-minutes: 60
+      - name: Dedicated control 1 · aria2
+        if: always() && !cancelled() && steps.resolve.outputs.run_id != ''
+        timeout-minutes: 10
         shell: bash
-        run: bash .github/scripts/run-stage.sh download
+        run: uv run --no-sync python .github/scripts/dedicated-download-control.py compare --case 1
 
-      - name: Verify downloads
-        shell: bash
-        run: bash .github/scripts/run-stage.sh verify
+      - name: Upload control 1 measurements
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dedicated-control-${{ github.run_id }}-${{ github.run_attempt }}-1
+          path: ${{ env.GAME_DOWNLOADER_REPORT_DIR }}/dedicated
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Assemble client
+      - name: Dedicated control 2 · Python
+        if: always() && !cancelled() && steps.resolve.outputs.run_id != ''
+        timeout-minutes: 10
         shell: bash
-        run: bash .github/scripts/run-stage.sh assemble-client
+        run: uv run --no-sync python .github/scripts/dedicated-download-control.py compare --case 2
 
-      - name: Index VFS
-        shell: bash
-        run: bash .github/scripts/run-stage.sh index-vfs
+      - name: Upload control 2 measurements
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dedicated-control-${{ github.run_id }}-${{ github.run_attempt }}-2
+          path: ${{ env.GAME_DOWNLOADER_REPORT_DIR }}/dedicated
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Materialize VFS
+      - name: Dedicated control 3 · Python
+        if: always() && !cancelled() && steps.resolve.outputs.run_id != ''
+        timeout-minutes: 10
         shell: bash
-        run: bash .github/scripts/run-stage.sh materialize-vfs
+        run: uv run --no-sync python .github/scripts/dedicated-download-control.py compare --case 3
 
-      - name: Readable · Plan output
-        shell: bash
-        run: bash .github/scripts/run-stage.sh plan-readable
+      - name: Upload control 3 measurements
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dedicated-control-${{ github.run_id }}-${{ github.run_attempt }}-3
+          path: ${{ env.GAME_DOWNLOADER_REPORT_DIR }}/dedicated
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Readable · Transform Python, XML, translations and web sources
+      - name: Dedicated control 4 · aria2
+        if: always() && !cancelled() && steps.resolve.outputs.run_id != ''
+        timeout-minutes: 10
         shell: bash
-        run: bash .github/scripts/run-stage.sh transform-readable
+        run: uv run --no-sync python .github/scripts/dedicated-download-control.py compare --case 4
 
-      - name: Readable · Decompile ActionScript
-        shell: bash
-        run: bash .github/scripts/run-stage.sh decompile-actionscript
-
-      - name: Readable · Assemble and link tree
-        shell: bash
-        run: bash .github/scripts/run-stage.sh assemble-readable
-
-      - name: Readable · Generate engine stubs
-        shell: bash
-        run: bash .github/scripts/run-stage.sh generate-engine-stubs
-
-      - name: Readable · Finalize references
-        shell: bash
-        run: bash .github/scripts/run-stage.sh finalize-readable
-
-      - name: Seal snapshot
-        shell: bash
-        run: bash .github/scripts/run-stage.sh snapshot
+      - name: Upload control 4 measurements
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dedicated-control-${{ github.run_id }}-${{ github.run_attempt }}-4
+          path: ${{ env.GAME_DOWNLOADER_REPORT_DIR }}/dedicated
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Render downloader report
         id: result
@@ -564,9 +591,17 @@ jobs:
           VM_DELETED: ${{ steps.cleanup.outputs.vm_deleted }}
         run: python3 -m scripts.report_vm_cost
 
+      - name: Expose only this control VM cost
+        if: always()
+        env:
+          VM_COST_CENTS: ${{ steps.cost.outputs.vm_cost_cents }}
+          VM_COST_STATE: ${{ steps.cost.outputs.vm_cost_state }}
+        run: |
+          printf 'CONTROL VM COST: cents=%s state=%s\n' "${VM_COST_CENTS}" "${VM_COST_STATE}"
+
   record-status:
     name: Record pipeline status (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: always()
+    if: always() && github.ref == 'refs/heads/main'
     needs:
       - provision
       - download
@@ -674,7 +709,8 @@ jobs:
       always() &&
       (github.actor == 'github-actions[bot]' ||
        github.triggering_actor == 'github-actions[bot]' ||
-       cancelled()) &&
+       cancelled() ||
+       github.ref == 'refs/heads/codex/dedicated-download-control') &&
       needs.provision.result != 'skipped'
     needs:
       - provision
@@ -705,7 +741,7 @@ jobs:
 
   notify:
     name: Telegram report (manual-${{ github.run_id }}-${{ github.run_attempt }})
-    if: always()
+    if: always() && github.ref == 'refs/heads/main'
     needs:
       - provision
       - download
