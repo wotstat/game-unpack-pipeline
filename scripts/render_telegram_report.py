@@ -67,6 +67,18 @@ def _commit_url(owner: str, repository: str, commit_sha: str) -> str | None:
     )
 
 
+def _cost_line(environment: Mapping[str, str]) -> str:
+    state = environment.get("VM_COST_STATE", "")
+    cents = environment.get("VM_COST_CENTS", "")
+    if state not in {"final", "accrued"} or re.fullmatch(r"[0-9]{1,12}", cents) is None:
+        return "💶 VM — стоимость недоступна"
+    whole, fraction = divmod(int(cents), 100)
+    line = f"💶 VM — <b>€{whole}.{fraction:02d}</b>"
+    if state == "accrued":
+        line += " (начислено; удаление VM не подтверждено)"
+    return line
+
+
 def _publication_line(
     *,
     icon: str,
@@ -173,7 +185,7 @@ def render_message(environment: Mapping[str, str]) -> str:
         environment.get("PIPELINE_FINISHED_AT", ""),
     )
     footer = f"{duration} · {run_link}" if duration else run_link
-    lines.extend(("", footer))
+    lines.extend((_cost_line(environment), "", footer))
     return "\n".join(lines)
 
 

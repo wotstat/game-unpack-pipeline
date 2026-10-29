@@ -506,6 +506,8 @@ jobs:
     environment: aeza
     outputs:
       deleted_count: ${{ steps.cleanup.outputs.deleted_count }}
+      vm_cost_cents: ${{ steps.cost.outputs.vm_cost_cents }}
+      vm_cost_state: ${{ steps.cost.outputs.vm_cost_state }}
     steps:
       - name: Check out lifecycle code
         uses: actions/checkout@v7.0.1
@@ -558,6 +560,17 @@ jobs:
             --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}" \
             --server-id "${SERVER_ID}" \
             "${diagnostics[@]}"
+
+      - name: Read this VM's billed rental cost
+        if: always()
+        id: cost
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
+          BILLING_SERVICE_IDS: ${{ steps.cleanup.outputs.billing_service_ids }}
+          VM_DELETED: ${{ steps.cleanup.outputs.vm_deleted }}
+        run: python3 -m scripts.report_vm_cost
 
   record-status:
     name: Record pipeline status (manual-${{ github.run_id }}-${{ github.run_attempt }})
@@ -756,6 +769,8 @@ jobs:
           WOTSTAT_ASSETS_UPLOAD_STATE: ${{ needs.publish-wotstat-assets.outputs.upload_state }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
           CLEANUP_DELETED_COUNT: ${{ needs.cleanup.outputs.deleted_count || 'unknown' }}
+          VM_COST_CENTS: ${{ needs.cleanup.outputs.vm_cost_cents }}
+          VM_COST_STATE: ${{ needs.cleanup.outputs.vm_cost_state }}
           PIPELINE_STARTED_AT: ${{ steps.timing.outputs.started_at }}
           PIPELINE_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 scripts/render_telegram_report.py
