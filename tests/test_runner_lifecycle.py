@@ -545,7 +545,7 @@ def test_failed_ssh_bootstrap_redacts_encoded_secret_files() -> None:
     ).decode()
     result = Mock(returncode=1, stdout=f"Traceback: base64.b64decode('{encoded}')", stderr="")
     with (
-        patch("subprocess.run", side_effect=[Mock(returncode=0), result]),
+        patch("subprocess.run", side_effect=[Mock(returncode=0), result, Mock(returncode=0)]),
         pytest.raises(lifecycle.LifecycleError) as raised,
     ):
         lifecycle.ssh_bootstrap(

@@ -397,13 +397,6 @@ systemctl daemon-reload
 systemctl enable --now gup-emergency-self-destruct.timer
 systemd-run --unit=gup-bootstrap --property=Type=exec \\
   /bin/bash /usr/local/sbin/bootstrap-actions-runner
-while [[ ! -f /run/gup-bootstrap.ready ]]; do
-  if systemctl is-failed --quiet gup-bootstrap; then
-    journalctl --unit=gup-bootstrap --no-pager --lines=60
-    exit 1
-  fi
-  sleep 5
-done
 """
 
 
@@ -424,32 +417,79 @@ def ssh_bootstrap(
         "-o",
         f"UserKnownHostsFile={private_key.parent / 'known_hosts'}",
         "-o",
+        f"ControlPath={private_key.parent / 'ssh.sock'}",
+        "-o",
+        "ControlPersist=60",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
         "ConnectTimeout=10",
         f"root@{address}",
     ]
-    while time.monotonic() < deadline:
-        result = subprocess.run(
-            [*command, "true"], capture_output=True, text=True, timeout=20, check=False
-        )
-        if result.returncode == 0:
-            break
+    try:
+        # Keep the authenticated transport instead of opening a second TCP
+        # connection after a successful readiness probe. No JIT data is sent yet.
+        while time.monotonic() < deadline:
+            try:
+                # A background master keeps its standard descriptors open. A
+                # private regular file avoids communicate() waiting for EOF on
+                # a pipe that belongs to the long-lived master process.
+                with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as diagnostics:
+                    result = subprocess.run(
+                        [*command[:-1], "-M", "-N", "-f", command[-1]],
+                        stdout=subprocess.DEVNULL,
+                        stderr=diagnostics,
+                        text=True,
+                        timeout=min(20, max(1, deadline - time.monotonic())),
+                        check=False,
+                    )
+                    diagnostics.seek(0)
+                    details = diagnostics.read(65536)
+            except subprocess.TimeoutExpired:
+                time.sleep(5)
+                continue
+            if result.returncode == 0:
+                break
+            if "REMOTE HOST IDENTIFICATION HAS CHANGED" in details:
+                raise LifecycleError("Aeza SSH host key changed")
+            time.sleep(5)
+        else:
+            raise LifecycleError("Aeza SSH readiness timed out")
+        # Submit exactly once; systemd owns the detached bootstrap. Completion is
+        # observed through GitHub because this unit intentionally closes SSH.
+        try:
+            result = subprocess.run(
+                [*command, "bash -s"],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise BootstrapOutcomeUnknownError(
+                "SSH bootstrap acknowledgement timed out; payload will not be replayed"
+            ) from error
         if "REMOTE HOST IDENTIFICATION HAS CHANGED" in result.stderr:
             raise LifecycleError("Aeza SSH host key changed")
-        time.sleep(5)
-    else:
-        raise LifecycleError("Aeza SSH readiness timed out")
-    # Submit secret files once. A lost response cannot safely replay JIT configs.
-    result = subprocess.run(
-        [*command, "bash -s"],
-        input=payload,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
-    )
-    if result.returncode:
-        details = sanitized(result.stdout + result.stderr, sensitive_values)[-6000:]
-        raise LifecycleError(f"Aeza bootstrap failed; reconcile before retrying: {details}")
+        if result.returncode:
+            details = sanitized(result.stdout + result.stderr, sensitive_values)[-6000:]
+            if result.returncode == 255:
+                raise BootstrapOutcomeUnknownError(
+                    "SSH bootstrap acknowledgement lost; payload will not be replayed: " + details
+                )
+            raise LifecycleError(f"Aeza bootstrap failed; reconcile before retrying: {details}")
+    finally:
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [*command[:-1], "-O", "exit", command[-1]],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
 
 
 def provision(arguments: argparse.Namespace) -> None:
@@ -509,24 +549,35 @@ def provision(arguments: argparse.Namespace) -> None:
             configs[role] = jit
             runners[role] = runner_id
             write_output(role.replace("-", "_") + "_runner_id", runner_id)
-        ssh_bootstrap(
-            address,
-            private_key,
-            render_bootstrap(
-                identity, config, server_id, deadline, package, configs, product=product
-            ),
-            sensitive_values=(config.api_key, *configs.values()),
-        )
+        bootstrap_error: BootstrapOutcomeUnknownError | None = None
+        try:
+            ssh_bootstrap(
+                address,
+                private_key,
+                render_bootstrap(
+                    identity, config, server_id, deadline, package, configs, product=product
+                ),
+                sensitive_values=(config.api_key, *configs.values()),
+            )
+        except BootstrapOutcomeUnknownError as error:
+            bootstrap_error = error
+            print(f"::warning::{error}")
+        print("Bootstrap submitted once; confirming all four JIT runners through GitHub")
         online_deadline = time.monotonic() + int(
             os.environ.get("RUNNER_ONLINE_TIMEOUT_SECONDS", "600")
         )
-        for role in ROLES:
-            wait_for_runner_online(
-                identity.runner(role),
-                runners[role],
-                app_token,
-                max(1, int(online_deadline - time.monotonic())),
-            )
+        try:
+            for role in ROLES:
+                wait_for_runner_online(
+                    identity.runner(role),
+                    runners[role],
+                    app_token,
+                    max(1, int(online_deadline - time.monotonic())),
+                )
+        except LifecycleError as error:
+            if bootstrap_error is not None:
+                raise LifecycleError(f"{bootstrap_error}; {error}") from error
+            raise
     append_summary("## Ephemeral Aeza runner")
     append_summary(f"- {product.location} {product.mode} {product.name}; hourly billing")
     append_summary(f"- Emergency deletion deadline: `{deadline.isoformat()}`")
@@ -587,6 +638,10 @@ def cleanup(arguments: argparse.Namespace) -> None:
 
 class LifecycleError(RuntimeError):
     """An expected, user-facing lifecycle failure."""
+
+
+class BootstrapOutcomeUnknownError(LifecycleError):
+    """The one-time SSH payload may have been accepted; observe JIT readiness only."""
 
 
 class TransientLifecycleError(LifecycleError):

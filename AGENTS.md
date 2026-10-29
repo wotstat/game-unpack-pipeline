@@ -195,6 +195,13 @@ workflow или отдельный репозиторий и не перенос
   отдельный known_hosts с `accept-new`, изменения host key запрещены. JIT и API key передаются
   через SSH stdin, не argv или user data. Заказ и bootstrap не повторяются после неизвестного
   результата. Reconciler находит ресурсы без provision outputs.
+- SSH readiness и однократная передача bootstrap используют один authenticated master
+  с private control socket и keepalive. SSH завершается после принятия systemd unit;
+  длительная установка не зависит от SSH, который bootstrap затем отключает.
+  При неизвестном результате передачи допускается только read-only подтверждение online
+  всех четырёх выданных runner ID с точными labels; payload не повторяется.
+  Недоступный runner, известная ошибка remote shell или смена host key завершают provision
+  ошибкой. Control master закрывается в `finally`, таймауты и четырёхчасовой дедлайн сохраняются.
 - До установки runner вооружается абсолютный systemd timer на четыре часа от начала аренды.
   Root-файл `0600` содержит общий `AEZA_API_KEY`, ID и имя конкретной VM для kill switch;
   ограничений одним сервером/TTL Aeza не предоставляет, этот риск согласован пользователем.

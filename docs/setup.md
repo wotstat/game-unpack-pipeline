@@ -243,7 +243,15 @@ Consumer можно включать независимо для каждого 
 4. После активации VM provision выпускает четыре JIT-конфигурации и по SSH загружает
    root-файлы через stdin. Приватный ключ существует только во временном каталоге
    provisioner. SSH использует отдельный known_hosts с `accept-new`, последующие изменения
-   host key завершают provisioning ошибкой. Запрос bootstrap не повторяется.
+   host key завершают provisioning ошибкой. Readiness открывает один authenticated SSH master
+   с private control socket, keepalive и ограниченным idle lifetime; payload отправляется
+   через это же соединение ровно один раз. Master закрывается в `finally`.
+   SSH ждёт только записи root-файлов, вооружения таймера и принятия `gup-bootstrap`
+   systemd, затем отключается. Полная готовность проверяется через GitHub для всех четырёх
+   выданных runner ID и их уникальных labels. При потере SSH-подтверждения или таймауте
+   payload не повторяется: provision продолжает только read-only проверку этих runner.
+   Если хотя бы один не стал online, provision завершается ошибкой и выполняется cleanup.
+   Известная ошибка remote shell или изменение host key не обходятся этой проверкой.
 5. До установки runner вооружается systemd timer с абсолютным дедлайном через четыре
    часа от начала аренды. Аварийный скрипт сверяет ownership и вызывает Aeza DELETE;
    systemd повторяет проверку до подтверждённого удаления.
