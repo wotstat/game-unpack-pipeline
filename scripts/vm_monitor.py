@@ -96,7 +96,7 @@ def write_report(path: Path, reason: str) -> None:
             {
                 "schema_version": 1,
                 "provider": "aeza",
-                "product": "MSKs-5",
+                "product": lifecycle.selected_product().name,
                 "payment_term": "hour",
                 "reason": reason,
                 "observed_at": now(),
@@ -118,6 +118,7 @@ def provision(arguments: argparse.Namespace) -> None:
 
 
 def watch(arguments: argparse.Namespace) -> None:
+    product = lifecycle.selected_product()
     config = lifecycle.AezaConfig.from_environment()
     identity = lifecycle.build_identity(arguments.instance_key)
     token = lifecycle.require_environment("GITHUB_WATCH_TOKEN")
@@ -149,7 +150,7 @@ def watch(arguments: argparse.Namespace) -> None:
                 reason = "vm_unavailable"
                 lifecycle.write_output("cancel_required", "true")
                 return
-            if not lifecycle.server_has_ownership_markers(server, identity):
+            if not lifecycle.server_has_ownership_markers(server, identity, product=product):
                 raise lifecycle.LifecycleError("Monitored Aeza service ownership does not match")
             time.sleep(min(30, max(0, deadline - time.monotonic())))
         reason = "lifetime_expired"

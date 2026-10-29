@@ -29,12 +29,42 @@ from typing import Any
 GITHUB_API_VERSION = "2026-03-10"
 PIPELINE_MARKER = "game-unpack-pipeline"
 AEZA_API_URL = "https://my.aeza.net/api/v2"
-AEZA_PRODUCT_ID = 157
-AEZA_PRODUCT_NAME = "MSKs-5"
+DEFAULT_AEZA_SERVER = "MSKs-5"
 AEZA_RETRY_DELAYS = (5, 15, 30)
 TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 ROLES = ("downloader", "wot-src", "wot-gui-assets", "wotstat-assets")
+
+
+@dataclass(frozen=True)
+class AezaProduct:
+    name: str
+    product_id: int
+    group_id: int
+    location: str
+    mode: str
+    max_hourly_cents: int
+
+
+# Public catalogue checked on 2026-10-29. Keep allocation restricted to these
+# 16 vCPU / 32 GiB / 480 GB profiles; cleanup recognizes every approved product.
+AEZA_PRODUCTS = {
+    product.name: product
+    for product in (
+        AezaProduct("MSKs-5", 157, 2, "Moscow", "Shared", 53),
+        AezaProduct("MSK-5", 152, 1, "Moscow", "Dedicated", 76),
+        AezaProduct("WAWs-5", 445, 77, "Warsaw", "Shared", 53),
+        AezaProduct("CLTs-5", 341, 46, "Charlotte", "Shared", 53),
+    )
+}
+
+
+def selected_product() -> AezaProduct:
+    name = os.environ.get("AEZA_SERVER", DEFAULT_AEZA_SERVER)
+    try:
+        return AEZA_PRODUCTS[name]
+    except KeyError:
+        raise LifecycleError("Unsupported Aeza server profile") from None
 
 
 @dataclass(frozen=True)
@@ -81,54 +111,83 @@ def aeza_items(config: AezaConfig, path: str) -> list[dict[str, Any]]:
             raise LifecycleError("Aeza pagination stopped before total")
 
 
-def preflight(config: AezaConfig) -> None:
+def preflight(config: AezaConfig, profile: AezaProduct) -> None:
     products = aeza_items(config, "services/products")
-    matches = [p for p in products if p.get("id") == AEZA_PRODUCT_ID]
-    if len(matches) != 1 or matches[0].get("name") != AEZA_PRODUCT_NAME:
-        raise LifecycleError("Aeza MSKs-5 product identity changed")
+    matches = [p for p in products if p.get("id") == profile.product_id]
+    if len(matches) != 1 or matches[0].get("name") != profile.name:
+        raise LifecycleError("Aeza product identity changed")
     product = matches[0]
-    if product.get("isAvailable") is not True or product.get("groupId") != 2:
-        raise LifecycleError("Aeza Moscow Shared MSKs-5 is unavailable")
+    if product.get("groupId") != profile.group_id:
+        raise LifecycleError("Aeza product group changed")
+    if product.get("isAvailable") is not True:
+        raise LifecycleError(f"Aeza {profile.name} is unavailable")
+    parameters = product.get("parameters")
+    if not isinstance(parameters, dict) or any(
+        parameters.get(key) != value for key, value in {"cpu": 16, "ram": 32, "rom": 480}.items()
+    ):
+        raise LifecycleError("Aeza product capacity changed")
     _, price, _ = config.request(
-        "GET", f"services/orders/price?productId={AEZA_PRODUCT_ID}&paymentTerm=hour&termCount=1"
+        "GET", f"services/orders/price?productId={profile.product_id}&paymentTerm=hour&termCount=1"
     )
     # Prices are euro cents. Refuse unexpected upgrades or a price increase.
-    if not isinstance(price, dict) or not 0 < price.get("totalPrice", 0) <= 53:
-        raise LifecycleError("Aeza hourly quote exceeds EUR 0.53")
+    total_price = price.get("totalPrice") if isinstance(price, dict) else None
+    if (
+        isinstance(total_price, bool)
+        or not isinstance(total_price, (int, float))
+        or not 0 < total_price <= profile.max_hourly_cents
+    ):
+        raise LifecycleError(f"Aeza hourly quote exceeds EUR {profile.max_hourly_cents / 100:.2f}")
     if price.get("availability", {}).get("status") != "ok":
         raise LifecycleError("Aeza hourly VM capacity is unavailable")
     _, account, _ = config.request("GET", "accounts/me")
-    if not isinstance(account, dict) or account.get("balance", 0) < 4 * price["totalPrice"]:
+    if not isinstance(account, dict) or account.get("balance", 0) < 4 * total_price:
         raise LifecycleError("Aeza balance cannot cover the four-hour VM lifetime")
     _, limits, _ = config.request("GET", "services/limits")
     for limit in limits.get("items", []):
-        if (2 in limit.get("groupIds", []) or "hour" in limit.get("paymentTerms", [])) and (
-            limit.get("used", 0) >= limit.get("available", 0)
+        groups = limit.get("groupIds", [])
+        terms = limit.get("paymentTerms", [])
+        if (
+            (not groups or profile.group_id in groups)
+            and (not terms or "hour" in terms)
+            and limit.get("used", 0) >= limit.get("available", 0)
         ):
-            raise LifecycleError("Aeza shared/hourly account limit has no free capacity")
-    print("Preflight: Moscow Shared MSKs-5, 16 vCPU / 32 GiB / 480 GB, EUR 0.53/hour")
+            raise LifecycleError("Aeza account limit has no free capacity for the selected profile")
+    print(
+        f"Preflight: {profile.location} {profile.mode} {profile.name}, "
+        f"16 vCPU / 32 GiB / 480 GB, EUR {total_price / 100:.2f}/hour"
+    )
 
 
-def server_has_ownership_markers(server: Mapping[str, Any], identity: ResourceIdentity) -> bool:
-    product = server.get("product")
-    product_id = product.get("id") if isinstance(product, dict) else None
+def server_has_ownership_markers(
+    server: Mapping[str, Any], identity: ResourceIdentity, *, product: AezaProduct | None = None
+) -> bool:
+    nested_product = server.get("product")
+    nested_id = nested_product.get("id") if isinstance(nested_product, dict) else None
+    product_id = server.get("productId", nested_id)
     return (
         server.get("name") == identity.server_name
-        and server.get("productId", product_id) == AEZA_PRODUCT_ID
+        and isinstance(product_id, int)
+        and product_id in {profile.product_id for profile in AEZA_PRODUCTS.values()}
+        and (product is None or product_id == product.product_id)
         and server.get("paymentTerm") == "hour"
     )
 
 
-def owned_servers(config: AezaConfig, identity: ResourceIdentity) -> list[dict[str, Any]]:
+def owned_servers(
+    config: AezaConfig, identity: ResourceIdentity, *, product: AezaProduct | None = None
+) -> list[dict[str, Any]]:
     candidates = aeza_items(config, "services")
     return [
         item
         for item in candidates
-        if server_has_ownership_markers(item, identity) and item.get("status") != "deleted"
+        if server_has_ownership_markers(item, identity, product=product)
+        and item.get("status") != "deleted"
     ]
 
 
-def create_server(config: AezaConfig, identity: ResourceIdentity, ssh_key_id: str) -> str:
+def create_server(
+    config: AezaConfig, identity: ResourceIdentity, ssh_key_id: str, product: AezaProduct
+) -> str:
     if any(item.get("name") == identity.server_name for item in aeza_items(config, "services")):
         raise LifecycleError("An Aeza service with this attempt name already exists")
     # Never replay an order, including after 502 or a lost response. Cleanup
@@ -140,7 +199,7 @@ def create_server(config: AezaConfig, identity: ResourceIdentity, ssh_key_id: st
             "method": "balance",
             "orders": [
                 {
-                    "productId": AEZA_PRODUCT_ID,
+                    "productId": product.product_id,
                     "count": 1,
                     "name": identity.server_name,
                     "term": "hour",
@@ -154,7 +213,7 @@ def create_server(config: AezaConfig, identity: ResourceIdentity, ssh_key_id: st
     )
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
-        matches = owned_servers(config, identity)
+        matches = owned_servers(config, identity, product=product)
         if len(matches) > 1:
             raise LifecycleError("Multiple Aeza services match one attempt")
         if matches:
@@ -174,11 +233,13 @@ def get_server(config: AezaConfig, server_id: str) -> dict[str, Any] | None:
     return server
 
 
-def wait_for_server_active(config: AezaConfig, identity: ResourceIdentity, server_id: str) -> str:
+def wait_for_server_active(
+    config: AezaConfig, identity: ResourceIdentity, server_id: str, product: AezaProduct
+) -> str:
     deadline = time.monotonic() + 420
     while time.monotonic() < deadline:
         server = get_server(config, server_id)
-        if server is None or not server_has_ownership_markers(server, identity):
+        if server is None or not server_has_ownership_markers(server, identity, product=product):
             raise LifecycleError("Aeza VM disappeared or ownership does not match")
         if server.get("status") in {"blocked", "suspended", "deleted"}:
             raise LifecycleError("Aeza VM entered an unusable state")
@@ -256,6 +317,8 @@ def render_bootstrap(
     deadline: datetime,
     runner_package: tuple[str, str, str],
     jit_configs: Mapping[str, str],
+    *,
+    product: AezaProduct,
 ) -> str:
     import base64
 
@@ -311,7 +374,7 @@ TimeoutStartSec=120s
                 "api_key": config.api_key,
                 "server_id": server_id,
                 "server_name": identity.server_name,
-                "product_id": AEZA_PRODUCT_ID,
+                "product_id": product.product_id,
             }
         ),
         "/etc/systemd/system/gup-emergency-self-destruct.service": service,
@@ -390,6 +453,7 @@ def ssh_bootstrap(
 
 
 def provision(arguments: argparse.Namespace) -> None:
+    product = selected_product()
     config = AezaConfig.from_environment()
     identity = build_identity(arguments.instance_key)
     app_token = require_environment("GITHUB_APP_TOKEN")
@@ -402,7 +466,7 @@ def provision(arguments: argparse.Namespace) -> None:
         runner = identity.runner(role)
         write_output(role.replace("-", "_") + "_runner_name", runner.name)
         write_output(role.replace("-", "_") + "_runner_label", runner.label)
-    preflight(config)
+    preflight(config, product)
     package = resolve_runner_package(app_token, public_token)
     write_output("runner_version", package[2])
     deadline = (datetime.now(UTC) + timedelta(hours=4)).replace(microsecond=0)
@@ -435,9 +499,9 @@ def provision(arguments: argparse.Namespace) -> None:
         )
         key_id = str(key["id"])
         write_output("ssh_key_id", key_id)
-        server_id = create_server(config, identity, key_id)
+        server_id = create_server(config, identity, key_id, product)
         write_output("server_id", server_id)
-        address = wait_for_server_active(config, identity, server_id)
+        address = wait_for_server_active(config, identity, server_id, product)
         configs: dict[str, str] = {}
         runners: dict[str, str] = {}
         for role in ROLES:
@@ -448,7 +512,9 @@ def provision(arguments: argparse.Namespace) -> None:
         ssh_bootstrap(
             address,
             private_key,
-            render_bootstrap(identity, config, server_id, deadline, package, configs),
+            render_bootstrap(
+                identity, config, server_id, deadline, package, configs, product=product
+            ),
             sensitive_values=(config.api_key, *configs.values()),
         )
         online_deadline = time.monotonic() + int(
@@ -462,7 +528,7 @@ def provision(arguments: argparse.Namespace) -> None:
                 max(1, int(online_deadline - time.monotonic())),
             )
     append_summary("## Ephemeral Aeza runner")
-    append_summary("- Moscow Shared MSKs-5; hourly billing")
+    append_summary(f"- {product.location} {product.mode} {product.name}; hourly billing")
     append_summary(f"- Emergency deletion deadline: `{deadline.isoformat()}`")
 
 

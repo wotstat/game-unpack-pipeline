@@ -15,7 +15,7 @@ runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Teleg
 
 ```text
 manual workflow_dispatch
-  → provision одной почасовой Aeza MSKs-5 VM и одноразового SSH-ключа
+  → provision одной почасовой Aeza VM выбранного тарифа и одноразового SSH-ключа
   → SSH bootstrap вооружает systemd kill switch и закрывает ingress через nftables
   → четыре JIT runner в game-unpack-pipeline: downloader, wot-src, wot-gui-assets и wotstat-assets
   → встроенные downloader stages на downloader runner
@@ -36,15 +36,15 @@ targets, сравнивает `release_name` с `status/<target>.json` и в dis
 dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
 Основной workflow всегда строит полный snapshot до `snapshot`. Dispatch предоставляет
-target, client type, languages
-и три независимых переключателя `publish_wot_src`,
+target, client type, languages,
+выбор `aeza_server` и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
 Ручной диагностический `.github/workflows/benchmark-game-download.yml` сравнивает curl,
 aria2 и внутренний downloader на одинаковом подмножестве pinned файлов `wot-eu`.
 Он использует обычный lifecycle временной VM, проверяет размеры/source hash/SHA-256,
 сохраняет performance artifacts и всегда выполняет cleanup. Snapshot consumer и status
-production-версий в этом workflow не вызываются.
+production-версий в этом workflow не вызываются. `aeza_server` предоставляет тот же список тарифов.
 
 ## Границы компонентов
 
@@ -74,13 +74,18 @@ workflow или отдельный репозиторий и не перенос
 - `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
-  использует default branch, `sd`, `ALL` и все три snapshot consumer.
-- Единственный профиль — Aeza Moscow Shared `MSKs-5`, product ID `157`, group `2`:
-  16 vCPU, 32 ГБ RAM, 480 ГБ NVMe, ОС `ubuntu_2404`. Заказ оплачивается с баланса,
-  `term: hour`, `termCount: 1`, `autoProlong: true`. Preflight проверяет доступность,
-  котировку не выше €0,53/час, баланс на четыре часа и shared/hourly account limits.
-  При нехватке лимитов действует существующий checker retry. Выбора региона, preemptible,
-  немедленных полных rerun и Selectel fallback нет.
+  использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной `aeza_server`
+  передаётся во все запускаемые targets; cron использует `MSKs-5`.
+- `aeza_server` — choice из имён `MSKs-5` (по умолчанию, Москва Shared, product `157`, group `2`),
+  `MSK-5` (Москва Dedicated, `152`/`1`), `WAWs-5` (Варшава Shared, `445`/`77`) и
+  `CLTs-5` (Шарлотт Shared, `341`/`46`). Все профили имеют 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe,
+  ОС `ubuntu_2404`; каталог на 29 октября 2026 заявляет до 25 Гбит/с.
+  Заказ оплачивается с баланса: `term: hour`, `termCount: 1`, `autoProlong: true`.
+  Preflight проверяет identity, группу, ёмкость и доступность выбранного профиля,
+  котировку не выше €0,76/час для `MSK-5` или €0,53/час для остальных, баланс на четыре часа
+  и применимые к выбранной группе и почасовой оплате account limits.
+  При нехватке лимитов действует существующий checker retry. Автоматического переключения
+  тарифов, preemptible, немедленных полных rerun и Selectel fallback нет.
 - Runtime watchdog на GitHub-hosted runner отслеживает VM до завершения downloader и
   включённых consumer в пределах исходного четырёхчасового дедлайна. Артефакты
   `aeza-attempt-<run_id>-<attempt>-provision|monitor` содержат только provider, тариф,
@@ -162,7 +167,10 @@ workflow или отдельный репозиторий и не перенос
   `sudo`.
 - Cleanup выполняется после ошибок всех consumer и удаляет платную услугу независимо от
   ошибок GitHub. Reconciler идемпотентен: точное имя содержит hash репозитория и Run ID/attempt;
-  до удаления сверяются имя, product ID и `paymentTerm: hour`. У SSH-ключа дополнительно
+  до удаления сверяются имя, product ID из разрешённого списка и `paymentTerm: hour`.
+  Cleanup/reconciler ищут все разрешённые профили независимо от dispatch inputs, включая
+  прежний `MSKs-5`; activation, watchdog и root kill switch проверяют точный выбранный product ID.
+  У SSH-ключа дополнительно
   сверяется полный ownership descriptor в комментарии public key. HTTP 204 только ставит
   удаление в очередь: cleanup подтверждает `deleted`/404, затем удаляет SSH-ключ.
 - API service payload, `secureParameters`, пароли и account identifiers не выводятся.

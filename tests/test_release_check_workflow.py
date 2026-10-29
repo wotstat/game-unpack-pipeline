@@ -34,8 +34,9 @@ def test_release_checker_runs_hourly_and_dispatches_all_targets_by_default() -> 
         "check_mt_public_test",
         "dispatch_pipelines",
         "force_retry",
+        "aeza_server",
     }
-    boolean_inputs = inputs
+    boolean_inputs = {name: item for name, item in inputs.items() if name != "aeza_server"}
     assert all(item["default"] is (name != "force_retry") for name, item in boolean_inputs.items())
     assert all(item["type"] == "boolean" for item in boolean_inputs.values())
 
@@ -91,6 +92,7 @@ def test_release_checker_is_fail_closed_and_dry_run_does_not_dispatch() -> None:
     assert '--ref "${DEFAULT_BRANCH}"' in dispatch["run"]
     assert "--field client_type=sd" in dispatch["run"]
     assert "--field languages=ALL" in dispatch["run"]
+    assert '--field aeza_server="${AEZA_SERVER}"' in dispatch["run"]
     assert '--field detected_release_name="${RELEASE_NAME}"' in dispatch["run"]
     assert "--field publish_wot_src=true" in dispatch["run"]
     assert "--field publish_wot_gui_assets=true" in dispatch["run"]
