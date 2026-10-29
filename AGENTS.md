@@ -125,6 +125,9 @@ workflow или отдельный репозиторий и не перенос
   доступные logical workers. Мелкие HTTP/TLS-фрагменты объединяются в блоки до 1 МиБ для
   записи, хеширования и общего прогресса. Медленные потоки сбрасывают неполный блок при
   очередном чтении после секунды; idle deadline и отмена проверяются на каждом raw read.
+  Опциональный CLI `--download-processes`/`GAME_DOWNLOADER_DOWNLOAD_PROCESSES` (по умолчанию 1)
+  распределяет общий file/Range budget между spawn-процессами, сохраняет один CAS и общий
+  прогресс; ошибка процесса останавливает peers, исходная причина передаётся родителю.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,

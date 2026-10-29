@@ -14,7 +14,7 @@ on:
           - "2"
           - "3"
       diagnose:
-        description: Also compare 1/16 file workers and four independent processes
+        description: Also compare 1/16 file workers and four HTTP processes
         required: true
         default: false
         type: boolean

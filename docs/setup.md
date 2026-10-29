@@ -153,17 +153,22 @@ Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним со�
 Порядок инструментов меняется между повторами; каждый инструмент получает пустой каталог,
 размеры и source hash проверяются, SHA-256 всех результатов должны совпасть.
 
-Время включает проверку целостности. Артефакт `download-benchmark-<run_id>-<attempt>` содержит
-отдельно время передачи и проверки, CPU/I/O/network samples, версии инструментов и манифест
+Время включает `fsync` payload и проверку целостности. Нативные клиенты явно сбрасывают все
+загруженные файлы и каталог на диск перед проверкой. Артефакт `download-benchmark-<run_id>-<attempt>` содержит
+отдельно время передачи, завершающего `fsync` и проверки, CPU/I/O/network samples, версии инструментов и манифест
 выбранных файлов без URL query/credentials. У downloader его внутренняя проверка входит во
 время передачи. После измерений cleanup подтверждает удаление VM, временного SSH-ключа и runner.
 Workflow не публикует snapshot и не меняет production status.
 Production download и обычный benchmark используют четыре file worker. `diagnose: true`
-дополнительно сравнивает один и 16 file workers и четыре независимых процесса (по четыре
-file workers, с отдельными cache directories). Optional `baseline_sha` принимает полный SHA
+дополнительно сравнивает один и 16 file workers и четыре HTTP-процесса с общим cache,
+прогрессом и отменой, разделяющие бюджет 16 file workers. Optional `baseline_sha` принимает полный SHA
 из истории `main` и запускает прежний downloader с 16 workers на той же VM и тех же файлах.
 Исторический импорт проверяется явно; source hash и SHA-256 должны совпасть для всех вариантов.
 Reconciler также обрабатывает завершившиеся benchmark runs.
+CLI `run`/`resume` принимает `--download-processes` или `GAME_DOWNLOADER_DOWNLOAD_PROCESSES`
+(по умолчанию 1, максимум 8). Процессы используют общий CAS, бюджеты file/Range concurrency,
+счётчики прогресса и общий сигнал отмены; завершение download дожидается закрытия всех workers.
+Benchmark сохраняет семейства адресов и fingerprints DNS-ответов CDN без записи IP VM.
 
 ## 7. Автоматическая и ручная проверка новых версий
 
