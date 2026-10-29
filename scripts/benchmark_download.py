@@ -10,11 +10,17 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
+import tempfile
+import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -35,6 +41,103 @@ DIAGNOSTIC_METHODS = (
     "downloader-1",
     "downloader-processes",
 )
+
+
+class _PayloadServer(ThreadingHTTPServer):
+    payloads: dict[str, tuple[bytes, str]]
+
+
+class _PayloadHandler(BaseHTTPRequestHandler):
+    server: _PayloadServer
+    protocol_version = "HTTP/1.1"
+
+    def do_HEAD(self) -> None:
+        self._serve(body=False)
+
+    def do_GET(self) -> None:
+        self._serve(body=True)
+
+    def _serve(self, *, body: bool) -> None:
+        # Exact in-memory keys only: no filesystem paths or credentials can be served.
+        item = self.server.payloads.get(self.path)
+        if item is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        payload, etag = item
+        start, end, status = 0, len(payload) - 1, 200
+        raw_range = self.headers.get("Range")
+        if raw_range is not None and self.headers.get("If-Range", etag) == etag:
+            matched = re.fullmatch(r"bytes=(\d{1,20})-(\d{0,20})", raw_range)
+            if matched is not None:
+                start = int(matched[1])
+                end = min(int(matched[2]), end) if matched[2] else end
+            if matched is None or not 0 <= start <= end < len(payload):
+                self.send_response(416)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        self.send_response(status)
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+        self.end_headers()
+        if body:
+            with suppress(OSError):
+                self.wfile.write(memoryview(payload)[start : end + 1])
+
+    def log_message(self, _format: str, *args: object) -> None:
+        pass
+
+
+@contextmanager
+def loopback_source(
+    payloads: dict[str, tuple[bytes, str]], directory: Path
+) -> Iterator[tuple[str, Path]]:
+    directory.mkdir(mode=0o700)
+    certificate, key = directory / "certificate.pem", directory / "key.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(certificate),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    key.chmod(0o600)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certificate, key)
+    server = _PayloadServer(("127.0.0.1", 0), _PayloadHandler)
+    server.payloads = payloads
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_port}", certificate
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -205,6 +308,11 @@ def worker(args: argparse.Namespace) -> None:
                 [
                     "aria2c",
                     "--no-conf=true",
+                    *(
+                        [f"--ca-certificate={os.environ['BENCHMARK_CA_FILE']}"]
+                        if os.environ.get("BENCHMARK_CA_FILE")
+                        else []
+                    ),
                     "--max-concurrent-downloads=16",
                     f"--split={split}",
                     f"--max-connection-per-server={split}",
@@ -310,34 +418,29 @@ def benchmark(args: argparse.Namespace) -> None:
     )
     full_plan = AcquisitionPlan.model_validate(stage_result.payload)
     results: list[dict[str, Any]] = []
-    for case in ("small", "large"):
-        plan = selected_plan(full_plan, case)
-        artifacts = [a for part in plan.parts for a in part.artifacts]
-        # The report identifies files without publishing redirect queries or credentials.
-        write_json(
-            reports / f"{case}-manifest.json",
-            [
-                {
-                    "artifact_id": a.artifact_id,
-                    "path": a.path.utf8,
-                    "size": a.size,
-                    "source_hosts": [urlsplit(url).hostname for url in a.source_urls],
-                }
-                for a in artifacts
-            ],
-        )
+    plans: dict[str, AcquisitionPlan] = {}
+    references: dict[str, dict[str, str]] = {}
+    choices: tuple[str, ...] = DIAGNOSTIC_METHODS if args.diagnose else METHODS
+    if baseline_source is not None:
+        choices += ("downloader-baseline",)
+
+    def measure(
+        plan: AcquisitionPlan,
+        case: str,
+        work_root: Path,
+        choices: tuple[str, ...],
+        repeats: int,
+        reference: dict[str, str] | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         plan_path = root / f"{case}-plan.json"
         plan_path.write_text(plan.model_dump_json())
-        reference: dict[str, str] | None = None
-        for repeat in range(args.repeats):
+        for repeat in range(repeats):
             # Rotate order so a warmed CDN or a changing route cannot consistently favor one tool.
-            choices: tuple[str, ...] = DIAGNOSTIC_METHODS if args.diagnose else METHODS
-            if baseline_source is not None:
-                choices += ("downloader-baseline",)
             methods = choices[repeat % len(choices) :] + choices[: repeat % len(choices)]
             for method in methods:
                 label = f"{case}-{repeat + 1}-{method}"
-                work = root / label
+                work = work_root / label
                 samples = reports / f"{label}-samples.jsonl"
                 monitor = subprocess.Popen(
                     [
@@ -347,7 +450,7 @@ def benchmark(args: argparse.Namespace) -> None:
                         "--stage",
                         label,
                         "--data-root",
-                        str(root),
+                        str(work_root),
                         "--samples",
                         str(samples),
                         "--interval-seconds",
@@ -358,6 +461,7 @@ def benchmark(args: argparse.Namespace) -> None:
                 time_path = reports / f"{label}-time.log"
                 print(f"BENCHMARK START {label}", flush=True)
                 child_environment = dict(os.environ)
+                child_environment.update(environment or {})
                 if method == "downloader-baseline":
                     child_environment["PYTHONPATH"] = str(baseline_source)
                     child_environment["BENCHMARK_BASELINE_SOURCE"] = str(baseline_source)
@@ -419,6 +523,102 @@ def benchmark(args: argparse.Namespace) -> None:
                     flush=True,
                 )
                 shutil.rmtree(work)
+        assert reference is not None
+        return reference
+
+    for case in ("small", "large"):
+        plan = selected_plan(full_plan, case)
+        artifacts = [a for part in plan.parts for a in part.artifacts]
+        # The report identifies files without publishing redirect queries or credentials.
+        write_json(
+            reports / f"{case}-manifest.json",
+            [
+                {
+                    "artifact_id": a.artifact_id,
+                    "path": a.path.utf8,
+                    "size": a.size,
+                    "source_hosts": [urlsplit(url).hostname for url in a.source_urls],
+                }
+                for a in artifacts
+            ],
+        )
+        plan_path = root / f"{case}-plan.json"
+        plan_path.write_text(plan.model_dump_json())
+        plans[case] = plan
+        references[case] = measure(plan, case, root, choices, args.repeats)
+    if args.loopback_control:
+        controls: tuple[str, ...] = ("curl", "aria2-split", "downloader", "downloader-processes")
+        if baseline_source is not None:
+            controls += ("downloader-baseline",)
+        for case, plan in plans.items():
+            print(f"BENCHMARK PREPARE {case} loopback sources", flush=True)
+            source_workspace = Workspace(root / f"loopback-source-{case}")
+            source_result = ArtifactDownloader(DownloadPolicy(max_workers=4)).download(
+                plan, source_workspace
+            )
+            if {
+                x.artifact.artifact_id: x.blob_sha256 for x in source_result.artifacts
+            } != references[case]:
+                raise ValueError("Loopback sources differ from the verified CDN files")
+            payloads = {
+                "/" + artifact_name(x.artifact): (
+                    source_workspace.blobs.path_for(x.blob_sha256).read_bytes(),
+                    '"' + x.blob_sha256 + '"',
+                )
+                for x in source_result.artifacts
+            }
+            with loopback_source(payloads, root / f"loopback-tls-{case}") as (url, certificate):
+                parts = tuple(
+                    part.model_copy(
+                        update={
+                            "artifacts": tuple(
+                                a.model_copy(
+                                    update={"source_urls": (url + "/" + artifact_name(a),)}
+                                )
+                                for a in part.artifacts
+                            )
+                        }
+                    )
+                    for part in plan.parts
+                )
+                local_plan = AcquisitionPlan.model_validate(
+                    plan.model_copy(update={"parts": parts}).model_dump()
+                )
+                environment = {
+                    "SSL_CERT_FILE": str(certificate),
+                    "CURL_CA_BUNDLE": str(certificate),
+                    "BENCHMARK_CA_FILE": str(certificate),
+                    "NO_PROXY": "127.0.0.1,localhost",
+                    "no_proxy": "127.0.0.1,localhost",
+                }
+                measure(
+                    local_plan,
+                    f"{case}-loopback-disk",
+                    root,
+                    controls,
+                    min(2, args.repeats),
+                    references[case],
+                    environment,
+                )
+                with tempfile.TemporaryDirectory(
+                    prefix="gup-http-control-", dir="/dev/shm"
+                ) as memory_root:
+                    if (
+                        shutil.disk_usage(memory_root).free
+                        < local_plan.disk_space.required_free_bytes
+                    ):
+                        raise ValueError("Not enough tmpfs capacity for the RAM control")
+                    measure(
+                        local_plan,
+                        f"{case}-loopback-ram",
+                        Path(memory_root),
+                        controls,
+                        min(2, args.repeats),
+                        references[case],
+                        environment,
+                    )
+            payloads.clear()
+            shutil.rmtree(source_workspace.root)
     summary = [
         "| File set | Run | Tool | MiB/s including fsync and validation | Seconds |",
         "| --- | ---: | --- | ---: | ---: |",
@@ -443,6 +643,7 @@ def main() -> None:
     run.add_argument("--reports", type=Path, required=True)
     run.add_argument("--repeats", type=int, choices=(1, 2, 3), default=2)
     run.add_argument("--diagnose", action="store_true")
+    run.add_argument("--loopback-control", action="store_true")
     run.add_argument("--baseline-sha", default="")
     run.set_defaults(handler=benchmark)
     child = subparsers.add_parser("worker")
