@@ -1883,11 +1883,16 @@ def analyze_engine_stubs(
             ),
         )
     elif len(binaries) > 1 and max_workers > 1:
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(binaries))) as executor:
+        binary_workers = min(max_workers, len(binaries))
+        disassembly_workers = max(1, max_workers // binary_workers)
+        with ProcessPoolExecutor(max_workers=binary_workers) as executor:
             analyses = tuple(
                 executor.map(
                     _analyze_native_binary,
-                    ((binary, usage, constant_candidates, 1) for binary in binaries),
+                    (
+                        (binary, usage, constant_candidates, disassembly_workers)
+                        for binary in binaries
+                    ),
                 )
             )
     else:

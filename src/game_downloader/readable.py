@@ -113,6 +113,7 @@ class ReadablePolicy(FrozenModel):
     web_formatter_print_width: int = Field(default=100, ge=40, le=240)
     web_formatter_tab_width: int = Field(default=2, ge=1, le=8)
     transform_workers: int = Field(default=6, ge=1, le=32)
+    web_batch_size: int = Field(default=64, ge=1, le=256)
     pyc_batch_size: int = Field(default=32, ge=1, le=256)
     actionscript_workers: int = Field(default=1, ge=1, le=4)
     engine_stub_workers: int = Field(default=4, ge=1, le=16)
@@ -299,6 +300,22 @@ def _limit_ffdec(maximum_cpu_seconds: int) -> None:
         _set_resource_limit(resource.RLIMIT_NOFILE, 256)
 
 
+class _WebBatchOutput(FrozenModel):
+    id: str = Field(pattern=r"^[0-9]{8}$")
+    size: int = Field(ge=0, strict=True)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class _WebBatchReport(FrozenModel):
+    outputs: tuple[_WebBatchOutput, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedWebOutputs:
+    root: Path
+    outputs: tuple[_WebBatchOutput, ...]
+
+
 class PrettierFormatter:
     def __init__(self, policy: ReadablePolicy, executable: Path | None = None) -> None:
         self._policy = policy
@@ -401,6 +418,105 @@ class PrettierFormatter:
             detail = completed.stderr.decode("utf-8", "replace").strip()
             raise TransformFailedError(f"web formatter failed for {source}: {detail[:512]}")
         return completed.stdout, (f"parser={parser}",)
+
+    def stage_many(
+        self,
+        sources: Sequence[tuple[Path, str]],
+        scratch_directory: Path,
+    ) -> _StagedWebOutputs:
+        if not sources or len(sources) > self._policy.web_batch_size:
+            raise ValueError("web batch size is outside policy")
+        executable = self._ensure_healthy()
+        module = executable.parent.parent / "index.mjs"
+        if not module.is_file():
+            raise TransformFailedError(f"cannot locate the pinned Prettier module: {module}")
+        root = Path(tempfile.mkdtemp(prefix="web-batch-", dir=scratch_directory))
+        output_root = root / "outputs"
+        output_root.mkdir()
+        manifest = root / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "prettier_module": module.as_uri(),
+                    "expected_version": self._policy.web_formatter_tool_version,
+                    "print_width": self._policy.web_formatter_print_width,
+                    "tab_width": self._policy.web_formatter_tab_width,
+                    "timeout_ms": self._policy.subprocess_timeout_seconds * 1000,
+                    "max_output_bytes": self._policy.max_transform_output_bytes,
+                    "output_root": str(output_root),
+                    "items": [
+                        {"id": f"{index:08d}", "source": str(source.resolve()), "parser": parser}
+                        for index, (source, parser) in enumerate(sources)
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            try:
+                completed = subprocess.run(
+                    [
+                        "node",
+                        str(Path(__file__).with_name("web_formatter.mjs")),
+                        str(manifest),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    cwd=root,
+                    timeout=30 + self._policy.subprocess_timeout_seconds * len(sources),
+                    env={
+                        "HOME": os.environ.get("HOME", "/nonexistent"),
+                        "LANG": "C.UTF-8",
+                        "LC_ALL": "C.UTF-8",
+                        "PATH": os.environ.get("PATH", ""),
+                    },
+                    start_new_session=True,
+                    preexec_fn=partial(
+                        _limit_decompiler,
+                        30 + self._policy.subprocess_timeout_seconds * len(sources),
+                        self._policy.max_transform_output_bytes,
+                    ),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise TransformFailedError(f"cannot run web formatter batch: {exc}") from exc
+            if completed.returncode != 0:
+                detail = completed.stderr.decode("utf-8", "replace").strip()
+                raise TransformFailedError(f"web formatter batch failed: {detail[-2048:]}")
+            if len(completed.stdout) > 1024 * 1024:
+                raise TransformFailedError("web formatter batch report exceeds policy")
+            try:
+                report = _WebBatchReport.model_validate_json(completed.stdout)
+            except ValueError as exc:
+                raise TransformFailedError("web formatter batch report is malformed") from exc
+            expected = tuple(f"{index:08d}" for index in range(len(sources)))
+            if tuple(item.id for item in report.outputs) != expected or {
+                path.name for path in output_root.iterdir()
+            } != set(expected):
+                raise TransformFailedError("web formatter batch output set differs from its inputs")
+            for item in report.outputs:
+                metadata = (output_root / item.id).lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_size != item.size
+                    or item.size > self._policy.max_transform_output_bytes
+                ):
+                    raise TransformFailedError("web formatter batch output differs from its report")
+            return _StagedWebOutputs(root, report.outputs)
+        except BaseException:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
+
+    def read_staged(self, batch: _StagedWebOutputs, output: _WebBatchOutput) -> bytes:
+        path = batch.root / "outputs" / output.id
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != output.size:
+                raise TransformFailedError("web formatter batch output changed before validation")
+            encoded = source.read(self._policy.max_transform_output_bytes + 1)
+        if len(encoded) != output.size or hashlib.sha256(encoded).hexdigest() != output.sha256:
+            raise TransformFailedError("web formatter batch output differs from its report")
+        return encoded
 
 
 class FfdecTransformer:
@@ -2266,7 +2382,44 @@ def _transform_readable_chunk(
     values: Sequence[tuple[_ReadablePlan, Path, Path]],
 ) -> tuple[ReadableFile, ...]:
     assembler = _process_assembler()
-    return tuple(assembler._transform(plan, root, scratch) for plan, root, scratch in values)
+    web = tuple(
+        value
+        for value in values
+        if value[0].representation is RepresentationKind.WEB_FORMAT
+        and isinstance(assembler._web_formatter, PrettierFormatter)
+    )
+    result = [
+        assembler._transform(plan, root, scratch)
+        for plan, root, scratch in values
+        if not web or plan.representation is not RepresentationKind.WEB_FORMAT
+    ]
+    if web:
+        formatter = cast(PrettierFormatter, assembler._web_formatter)
+        for offset in range(0, len(web), assembler._policy.web_batch_size):
+            batch = web[offset : offset + assembler._policy.web_batch_size]
+            for plan, _root, _scratch in batch:
+                assembler._verify_transform_source(plan)
+            inputs = tuple(
+                (plan.source_path, WEB_FORMAT_PARSERS[plan.source_path.suffix.lower()])
+                for plan, _root, _scratch in batch
+            )
+            staged = formatter.stage_many(inputs, batch[0][2])
+            try:
+                for (plan, root, _scratch), (_source, parser), output in zip(
+                    batch, inputs, staged.outputs, strict=True
+                ):
+                    result.append(
+                        assembler._commit_transform(
+                            plan,
+                            root,
+                            formatter.read_staged(staged, output),
+                            (f"parser={parser}",),
+                            formatter.identity,
+                        )
+                    )
+            finally:
+                shutil.rmtree(staged.root, ignore_errors=True)
+    return tuple(result)
 
 
 def create_readable_implementations(
@@ -2477,6 +2630,26 @@ def create_readable_implementations(
                     )
             finally:
                 shutil.rmtree(staged_pyc.root, ignore_errors=True)
+        elif remaining and pyc_transformer is None and web_formatter is None:
+            phase_started = time.monotonic()
+            process_workers = min(selected.transform_workers, len(remaining))
+            with ProcessPoolExecutor(
+                max_workers=process_workers,
+                initializer=_initialize_readable_process,
+                initargs=(selected,),
+            ) as process_executor:
+                work = tuple((item, root, scratch) for item in remaining)
+                for chunk in process_executor.map(
+                    _transform_readable_chunk,
+                    _chunked_work(work, workers=process_workers),
+                ):
+                    files.extend(chunk)
+                    completed += len(chunk)
+                    context.progress(f"transformed {completed}/{len(runtime_plans)} files")
+            context.progress(
+                f"converted {len(remaining)} non-PYC inputs in "
+                f"{time.monotonic() - phase_started:.1f}s"
+            )
         else:
             phase_started = time.monotonic()
             with ThreadPoolExecutor(
@@ -2831,7 +3004,7 @@ def create_readable_implementations(
             configuration=configuration,
         ),
         Stage.TRANSFORM_READABLE: StageImplementation(
-            implementation_version="transform-readable-v6",
+            implementation_version="transform-readable-v7",
             execute=execute_transforms,
             validate=validate_transforms,
             audit=audit_transforms,
@@ -2851,7 +3024,7 @@ def create_readable_implementations(
             audit=audit_assembly,
         ),
         Stage.GENERATE_ENGINE_STUBS: StageImplementation(
-            implementation_version="generate-engine-stubs-v4",
+            implementation_version="generate-engine-stubs-v5",
             execute=execute_stubs,
             validate=validate_stubs,
             audit=audit_stubs,

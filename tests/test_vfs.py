@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import stat
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from game_downloader.acquisition import ArtifactCorruptError
 from game_downloader.models import (
     ClientTreeFile,
     ClientTreeResult,
@@ -210,3 +212,49 @@ def test_vfs_rejects_ambiguous_duplicate_inside_one_package(tmp_path: Path) -> N
 
     with pytest.raises(VfsOrderUnknownError, match="ambiguous"):
         VfsIndexer().index(tree, workspace, ClientType.SD)
+
+
+def test_process_materialization_matches_serial_and_keeps_outputs_read_only(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    tree = _client_tree(workspace)
+    index = VfsIndexer().index(tree, workspace, ClientType.SD)
+    serial = VfsMaterializer(VfsPolicy(materialize_workers=1)).materialize(
+        index, workspace, tmp_path / "serial", locale_languages=("EN",)
+    )
+    parallel = VfsMaterializer(VfsPolicy(materialize_workers=2)).materialize(
+        index, workspace, tmp_path / "parallel", locale_languages=("EN",)
+    )
+
+    assert parallel.files == serial.files
+    for result in (serial, parallel):
+        for item in result.files:
+            root = result.locale_roots[item.language] if item.language else result.base_root
+            path = workspace.root / root / item.path
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == item.sha256
+            assert stat.S_IMODE(path.stat().st_mode) == 0o444
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_materialization_error_never_exposes_partial_tree(tmp_path: Path, workers: int) -> None:
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    tree = _client_tree(workspace)
+    index = VfsIndexer().index(tree, workspace, ClientType.SD)
+    package = next(item for item in index.packages if item.path.endswith("z-first.pkg"))
+    # Corrupt compressed bytes while preserving the indexed central directory.
+    path = workspace.blobs.path_for(package.blob_sha256)
+    encoded = bytearray(path.read_bytes())
+    encoded[50] ^= 0xFF
+    path.chmod(0o644)
+    path.write_bytes(encoded)
+    path.chmod(0o444)
+    work = tmp_path / "work"
+
+    with pytest.raises(ArtifactCorruptError):
+        VfsMaterializer(VfsPolicy(materialize_workers=workers)).materialize(
+            index, workspace, work, locale_languages=("EN",)
+        )
+
+    assert not (work / "materialized").exists()
+    assert not list((work / "materialized.partial").rglob("*.tmp"))

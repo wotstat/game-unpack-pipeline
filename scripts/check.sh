@@ -11,6 +11,8 @@ command -v aria2c >/dev/null 2>&1 || {
 }
 
 uv sync --frozen --all-groups
+npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+node_modules/.bin/prettier --check src/game_downloader/web_formatter.mjs
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy

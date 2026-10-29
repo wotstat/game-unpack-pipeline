@@ -4,10 +4,12 @@ import json
 import struct
 from pathlib import Path
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 from capstone import CS_ARCH_X86, CS_MODE_64, Cs  # type: ignore[import-untyped]
 
+import game_downloader.engine_stubs as engine_stubs_module
 from game_downloader.engine_stubs import (
     BindingEvidence,
     CallShape,
@@ -29,6 +31,35 @@ from game_downloader.engine_stubs import (
     find_main_binaries,
     parse_native_signature,
 )
+
+
+@pytest.mark.parametrize(("count", "budget", "per_binary"), [(2, 8, 4), (3, 8, 2), (8, 4, 1)])
+def test_multiple_binaries_share_the_disassembly_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    budget: int,
+    per_binary: int,
+) -> None:
+    pool = MagicMock()
+    pool.__enter__.return_value = pool
+    observed: list[tuple[Path, int]] = []
+
+    def analyze(
+        arguments: tuple[Path, SourceUsageIndex, object, int],
+    ) -> tuple[tuple[BindingEvidence, ...], tuple[EnumEvidence, ...], tuple[ConstantEvidence, ...]]:
+        observed.append((arguments[0], arguments[3]))
+        return (), (), ()
+
+    pool.map.side_effect = lambda function, values: tuple(map(function, values))
+    monkeypatch.setattr(engine_stubs_module, "ProcessPoolExecutor", lambda **_kwargs: pool)
+    monkeypatch.setattr(engine_stubs_module, "_analyze_native_binary", analyze)
+    binaries = tuple(tmp_path / f"client-{index}.exe" for index in range(count))
+
+    analyze_engine_stubs(binaries, (tmp_path,), max_workers=budget)
+
+    assert observed == [(binary, per_binary) for binary in binaries]
+    assert min(count, budget) * per_binary <= budget
 
 
 def test_source_only_attributes_become_native_constant_candidates(

@@ -27,6 +27,7 @@ from game_downloader.models import (
     PartName,
     ReadableAssemblyResult,
     ReadableResult,
+    ReadableTransformResult,
     RepresentationKind,
     RunRequest,
     Stage,
@@ -430,6 +431,69 @@ def test_prettier_formatter_checks_version_and_formats_stdin(tmp_path: Path) -> 
     assert formatter.identity.name == "prettier"
     assert output == b"const value = 1;\n"
     assert diagnostics == ("parser=babel",)
+
+
+@pytest.mark.parametrize("include_pyc", [False, True])
+def test_readable_stage_batches_real_web_inputs_with_and_without_pyc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_pyc: bool
+) -> None:
+    prettier = Path(__file__).parents[1] / "node_modules/.bin/prettier"
+    monkeypatch.setenv("GAME_DOWNLOADER_PRETTIER", str(prettier))
+    workspace = Workspace(tmp_path / "data")
+    workspace.initialize()
+    base = workspace.root / "materialized/base"
+    base.mkdir(parents=True)
+    (workspace.root / "materialized/locales/EN").mkdir(parents=True)
+    source_data = {
+        f"gui/gameface/bundle-{index}.js": f"const value={index}".encode() for index in range(9)
+    }
+    if include_pyc:
+        source_data["scripts/example.pyc"] = base64.b64decode(
+            (Path(__file__).parent / "fixtures/pyc/python27-control-flow.pyc.b64").read_bytes()
+        )
+    for name, data in source_data.items():
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o444)
+    materialized = MaterializationResult(
+        vfs_index_result_sha256="sha256:" + "1" * 64,
+        base_root="materialized/base",
+        locale_roots={"EN": "materialized/locales/EN"},
+        files=tuple(_materialized_file(name, data) for name, data in source_data.items()),
+    )
+
+    def execute_materialization(_context: StageContext) -> Mapping[str, JsonValue]:
+        return materialized.model_dump(mode="json")
+
+    readable_implementations = create_readable_implementations(
+        ReadablePolicy(transform_workers=2, web_batch_size=2)
+    )
+    implementations: dict[Stage, StageImplementation] = {
+        stage: StageImplementation(
+            implementation_version="fixture", execute=execute_materialization
+        )
+        for stage in Stage
+        if stage not in readable_implementations and stage is not Stage.SNAPSHOT
+    }
+    implementations.update(readable_implementations)
+    report = Pipeline(workspace, implementations).start(
+        RunRequest(target="fixture", client_type=ClientType.SD, languages=("EN",)),
+        Stage.TRANSFORM_READABLE,
+    )
+    result = StageResult.model_validate_json(
+        workspace.read_bytes(
+            workspace.stage_path(report.run_id, Stage.TRANSFORM_READABLE) / "result.json"
+        )
+    )
+    transformed = ReadableTransformResult.model_validate(result.payload)
+    assert len(transformed.files) == len(source_data)
+    formatter = PrettierFormatter(ReadablePolicy(), prettier)
+    for name in source_data:
+        if name.endswith(".js"):
+            assert (workspace.root / transformed.base_root / name).read_bytes() == formatter.format(
+                base / name, "babel"
+            )[0]
 
 
 def test_readable_assembler_exports_only_canonical_swc_libraries(tmp_path: Path) -> None:

@@ -123,7 +123,7 @@ def _build_pipeline(
             Stage.ASSEMBLE_CLIENT: create_assemble_client_implementation(),
             Stage.INDEX_VFS: create_index_vfs_implementation(),
             Stage.MATERIALIZE_VFS: create_materialize_vfs_implementation(
-                VfsPolicy(materialize_workers=workers)
+                VfsPolicy(materialize_workers=min(8, workers))
             ),
             **create_readable_implementations(
                 ReadablePolicy(

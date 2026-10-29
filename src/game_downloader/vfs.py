@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import shutil
 import stat
-import tempfile
 import time
 import unicodedata
 import zipfile
 import zlib
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -405,16 +404,20 @@ class VfsMaterializer:
                 for key, values in groups
             ]
         else:
-            with ThreadPoolExecutor(
+            with ProcessPoolExecutor(
                 max_workers=self._policy.materialize_workers,
-                thread_name_prefix="vfs-package",
+                mp_context=multiprocessing.get_context("spawn"),
             ) as executor:
                 package_results = list(
                     executor.map(
-                        lambda group: self._materialize_package(
-                            group[0], group[1], workspace, partial_root
+                        _materialize_package_group,
+                        (
+                            (key, values, workspace.root, partial_root)
+                            for key, values in sorted(
+                                groups,
+                                key=lambda group: -sum(item.uncompressed_size for item in group[1]),
+                            )
                         ),
-                        groups,
                     )
                 )
         for values in package_results:
@@ -460,6 +463,7 @@ class VfsMaterializer:
         _language, _source_path, source_sha256 = key
         package_path = workspace.blobs.path_for(source_sha256)
         result: list[MaterializedFile] = []
+        directories: set[Path] = set()
         try:
             with zipfile.ZipFile(package_path) as archive:
                 infos = archive.infolist()
@@ -475,20 +479,17 @@ class VfsMaterializer:
                             "Game Package central directory changed after VFS indexing"
                         )
                     destination = self._destination(root, candidate)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    descriptor, temporary_name = tempfile.mkstemp(
-                        dir=destination.parent,
-                        prefix=f".{destination.name}.",
-                        suffix=".tmp",
-                    )
-                    temporary = Path(temporary_name)
+                    if destination.parent not in directories:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        directories.add(destination.parent)
                     digest = hashlib.sha256()
                     crc = 0
                     size = 0
+                    output = destination.open("xb")
                     try:
                         with (
                             archive.open(info) as source,
-                            os.fdopen(descriptor, "wb") as output,
+                            output,
                         ):
                             size, crc = self._copy_entry(
                                 cast(BinaryIO, source),
@@ -500,11 +501,9 @@ class VfsMaterializer:
                             raise ArtifactCorruptError(
                                 "Game Package entry failed size/CRC verification"
                             )
-                        os.replace(temporary, destination)
                     except BaseException:
-                        temporary.unlink(missing_ok=True)
-                        with suppress(OSError):
-                            os.close(descriptor)
+                        output.close()
+                        destination.unlink(missing_ok=True)
                         raise
                     result.append(
                         MaterializedFile(
@@ -546,6 +545,14 @@ class VfsMaterializer:
             else root / "base"
         )
         return layer / candidate.canonical_path
+
+
+def _materialize_package_group(
+    arguments: tuple[tuple[str | None, str, str], tuple[VfsCandidate, ...], Path, Path],
+) -> list[MaterializedFile]:
+    key, candidates, workspace_root, root = arguments
+    # Spawn workers from paths only; the parent already holds the complete VFS index.
+    return VfsMaterializer()._materialize_package(key, candidates, Workspace(workspace_root), root)
 
 
 def _validate_materialized_structure(
@@ -709,7 +716,7 @@ def create_materialize_vfs_implementation(
         _audit_materialized(MaterializationResult.model_validate(payload), context.workspace)
 
     return StageImplementation(
-        implementation_version="vfs-materialize-v5",
+        implementation_version="vfs-materialize-v6",
         execute=execute,
         validate=validate,
         audit=audit,
