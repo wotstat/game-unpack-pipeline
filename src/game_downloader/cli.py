@@ -107,7 +107,6 @@ def _build_pipeline(
     *,
     disk_reserve_bytes: int,
     workers: int,
-    download_processes: int = 1,
 ) -> Pipeline:
     return Pipeline(
         workspace,
@@ -117,9 +116,7 @@ def _build_pipeline(
                 target,
                 policy=AcquisitionPolicy(reserve_bytes=disk_reserve_bytes),
             ),
-            Stage.DOWNLOAD: create_download_implementation(
-                DownloadPolicy(max_workers=workers, process_workers=download_processes)
-            ),
+            Stage.DOWNLOAD: create_download_implementation(DownloadPolicy(max_workers=workers)),
             Stage.VERIFY: create_verify_implementation(
                 VerificationPolicy(max_workers=_verification_workers(workers))
             ),
@@ -440,14 +437,6 @@ def doctor(
     help="Extra free-space reserve included in the Acquisition Plan.",
 )
 @click.option(
-    "--download-processes",
-    type=click.IntRange(min=1, max=8),
-    default=1,
-    envvar="GAME_DOWNLOADER_DOWNLOAD_PROCESSES",
-    show_default=True,
-    help="Independent HTTP processes sharing the download worker budget.",
-)
-@click.option(
     "--download-workers",
     type=click.IntRange(min=1, max=32),
     default=6,
@@ -473,7 +462,6 @@ def run_command(
     targets_config: Path | None,
     disk_reserve_bytes: int,
     download_workers: int,
-    download_processes: int,
     skip_check: bool,
 ) -> None:
     """Create a pinned Run and execute it through a stage."""
@@ -492,7 +480,6 @@ def run_command(
         target_config,
         disk_reserve_bytes=disk_reserve_bytes,
         workers=download_workers,
-        download_processes=download_processes,
     )
     try:
         with _translate_sigterm():
@@ -543,14 +530,6 @@ def run_command(
     help="Extra free-space reserve included in the Acquisition Plan.",
 )
 @click.option(
-    "--download-processes",
-    type=click.IntRange(min=1, max=8),
-    default=1,
-    envvar="GAME_DOWNLOADER_DOWNLOAD_PROCESSES",
-    show_default=True,
-    help="Independent HTTP processes sharing the download worker budget.",
-)
-@click.option(
     "--download-workers",
     type=click.IntRange(min=1, max=32),
     default=6,
@@ -574,7 +553,6 @@ def resume(
     targets_config: Path | None,
     disk_reserve_bytes: int,
     download_workers: int,
-    download_processes: int,
     skip_check: bool,
 ) -> None:
     """Continue an existing Run without changing its pinned request."""
@@ -588,7 +566,6 @@ def resume(
             target_config,
             disk_reserve_bytes=disk_reserve_bytes,
             workers=download_workers,
-            download_processes=download_processes,
         )
         click.echo(f"Run {run_id}: resuming through {until_value}", err=True)
         with _translate_sigterm():
