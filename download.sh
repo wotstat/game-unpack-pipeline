@@ -141,6 +141,8 @@ destination="$(cd "${destination}" && pwd -P)"
 
 command -v uv >/dev/null 2>&1 ||
   fail "uv was not found; install it from https://docs.astral.sh/uv/"
+command -v aria2c >/dev/null 2>&1 ||
+  fail "aria2c was not found; install aria2 for HTTP and torrent downloads"
 command -v java >/dev/null 2>&1 ||
   fail "Java was not found; install OpenJDK 17 or newer"
 command -v node >/dev/null 2>&1 ||

@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -37,9 +39,78 @@ DIAGNOSTIC_METHODS = (
     "aria2",
     "aria2-split",
     "downloader",
-    "downloader-16",
+    "downloader-4",
     "downloader-1",
 )
+
+_HOSTS_SCRIPT = r"""
+import fcntl, ipaddress, json, re, sys
+path, mode, marker, raw = sys.argv[1:]
+pins = json.loads(raw)
+assert re.fullmatch(r"gup-benchmark-[a-f0-9]{16}", marker)
+for host, address in pins.items():
+    assert re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host)
+    assert ipaddress.ip_address(address).is_global
+with open(path, "r+") as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    lines = stream.read().splitlines(keepends=True)
+    if mode == "add":
+        existing = {name for line in lines for name in line.split("#", 1)[0].split()[1:]}
+        assert not existing.intersection(pins), "CDN already has a hosts override"
+        lines += ["\n"] + [f"{address} {host} # {marker}\n" for host, address in pins.items()]
+    else:
+        assert mode == "remove"
+        lines = [line for line in lines if not line.rstrip().endswith("# " + marker)]
+    stream.seek(0)
+    stream.write("".join(lines))
+    stream.truncate()
+    stream.flush()
+"""
+
+
+@contextmanager
+def pinned_game_sources(plan: AcquisitionPlan, reports: Path) -> Iterator[None]:
+    hosts = sorted(
+        {
+            host
+            for part in plan.parts
+            for artifact in part.artifacts
+            for url in artifact.source_urls
+            if (host := urlsplit(url).hostname) is not None
+        }
+    )
+    pins: dict[str, str] = {}
+    for host in hosts:
+        if host is None or re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host) is None:
+            raise ValueError("Invalid game CDN hostname")
+        try:
+            ipaddress.ip_address(host)
+            continue
+        except ValueError:
+            pass
+        records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        preferred = next(
+            (str(item[4][0]) for item in records if item[0] == socket.AF_INET),
+            str(records[0][4][0]),
+        )
+        if not ipaddress.ip_address(preferred).is_global:
+            raise ValueError("Game CDN did not resolve to a public endpoint")
+        pins[host] = preferred
+    marker = "gup-benchmark-" + secrets.token_hex(8)
+    arguments = ["sudo", "python3", "-c", _HOSTS_SCRIPT, "/etc/hosts"]
+    subprocess.run([*arguments, "add", marker, json.dumps(pins)], check=True)
+    try:
+        write_json(
+            reports / "pinned-source-dns.json",
+            {
+                host: {"address_sha256": hashlib.sha256(address.encode()).hexdigest()}
+                for host, address in pins.items()
+            },
+        )
+        yield
+    finally:
+        # Remove only our own lines, preserving any unrelated changes to this throwaway VM.
+        subprocess.run([*arguments, "remove", marker, json.dumps(pins)], check=True)
 
 
 class _PayloadServer(ThreadingHTTPServer):
@@ -261,10 +332,10 @@ def worker(args: argparse.Namespace) -> None:
     synced_at: float | None = None
     if args.method.startswith("downloader"):
         workers = {
-            "downloader-16": 16,
+            "downloader-4": 4,
             "downloader-1": 1,
-            "downloader-baseline": 16,
-        }.get(args.method, 4)
+            "downloader-baseline": int(os.environ.get("BENCHMARK_BASELINE_WORKERS", "4")),
+        }.get(args.method, 16)
         if args.method == "downloader-baseline":
             baseline = Path(os.environ["BENCHMARK_BASELINE_SOURCE"]).resolve()
             if not Path(delivery.__file__).resolve().is_relative_to(baseline):
@@ -301,6 +372,7 @@ def worker(args: argparse.Namespace) -> None:
                 [
                     "aria2c",
                     "--no-conf=true",
+                    "--async-dns=false",
                     *(
                         [f"--ca-certificate={os.environ['BENCHMARK_CA_FILE']}"]
                         if os.environ.get("BENCHMARK_CA_FILE")
@@ -379,7 +451,10 @@ def benchmark(args: argparse.Namespace) -> None:
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
             source.extractall(root / "baseline", filter="data")
         baseline_source = root / "baseline/src"
-        write_json(reports / "baseline.json", {"commit": args.baseline_sha, "artifact_workers": 16})
+        write_json(
+            reports / "baseline.json",
+            {"commit": args.baseline_sha, "artifact_workers": args.baseline_workers},
+        )
     metadata_root = root / "metadata"
     resolved = subprocess.run(
         [
@@ -454,6 +529,7 @@ def benchmark(args: argparse.Namespace) -> None:
                 time_path = reports / f"{label}-time.log"
                 print(f"BENCHMARK START {label}", flush=True)
                 child_environment = dict(os.environ)
+                child_environment["BENCHMARK_BASELINE_WORKERS"] = str(args.baseline_workers)
                 child_environment.update(environment or {})
                 if method == "downloader-baseline":
                     child_environment["PYTHONPATH"] = str(baseline_source)
@@ -504,6 +580,20 @@ def benchmark(args: argparse.Namespace) -> None:
                     check=True,
                 )
                 measurement = json.loads(result_path.read_text())
+                if case in {"small", "large"}:
+                    pins = json.loads((reports / "pinned-source-dns.json").read_text())
+                    for host, records in measurement["source_dns"].items():
+                        if host in pins and (
+                            not isinstance(records, list)
+                            or not records
+                            or any(
+                                record["address_sha256"] != pins[host]["address_sha256"]
+                                for record in records
+                            )
+                        ):
+                            raise ValueError(
+                                "A benchmark worker did not use the pinned CDN resolver"
+                            )
                 if reference is None:
                     reference = measurement["digests"]
                 elif reference != measurement["digests"]:
@@ -519,99 +609,100 @@ def benchmark(args: argparse.Namespace) -> None:
         assert reference is not None
         return reference
 
-    for case in ("small", "large"):
-        plan = selected_plan(full_plan, case)
-        artifacts = [a for part in plan.parts for a in part.artifacts]
-        # The report identifies files without publishing redirect queries or credentials.
-        write_json(
-            reports / f"{case}-manifest.json",
-            [
-                {
-                    "artifact_id": a.artifact_id,
-                    "path": a.path.utf8,
-                    "size": a.size,
-                    "source_hosts": [urlsplit(url).hostname for url in a.source_urls],
-                }
-                for a in artifacts
-            ],
-        )
-        plan_path = root / f"{case}-plan.json"
-        plan_path.write_text(plan.model_dump_json())
-        plans[case] = plan
-        references[case] = measure(plan, case, root, choices, args.repeats)
-    if args.loopback_control:
-        controls: tuple[str, ...] = ("curl", "aria2-split", "downloader")
-        if baseline_source is not None:
-            controls += ("downloader-baseline",)
-        for case, plan in plans.items():
-            print(f"BENCHMARK PREPARE {case} loopback sources", flush=True)
-            source_workspace = Workspace(root / f"loopback-source-{case}")
-            source_result = ArtifactDownloader(DownloadPolicy(max_workers=4)).download(
-                plan, source_workspace
+    with pinned_game_sources(full_plan, reports):
+        for case in ("small", "large"):
+            plan = selected_plan(full_plan, case)
+            artifacts = [a for part in plan.parts for a in part.artifacts]
+            # The report identifies files without publishing redirect queries or credentials.
+            write_json(
+                reports / f"{case}-manifest.json",
+                [
+                    {
+                        "artifact_id": a.artifact_id,
+                        "path": a.path.utf8,
+                        "size": a.size,
+                        "source_hosts": [urlsplit(url).hostname for url in a.source_urls],
+                    }
+                    for a in artifacts
+                ],
             )
-            if {
-                x.artifact.artifact_id: x.blob_sha256 for x in source_result.artifacts
-            } != references[case]:
-                raise ValueError("Loopback sources differ from the verified CDN files")
-            payloads = {
-                "/" + artifact_name(x.artifact): (
-                    source_workspace.blobs.path_for(x.blob_sha256).read_bytes(),
-                    '"' + x.blob_sha256 + '"',
+            plan_path = root / f"{case}-plan.json"
+            plan_path.write_text(plan.model_dump_json())
+            plans[case] = plan
+            references[case] = measure(plan, case, root, choices, args.repeats)
+        if args.loopback_control:
+            controls: tuple[str, ...] = ("curl", "aria2-split", "downloader")
+            if baseline_source is not None:
+                controls += ("downloader-baseline",)
+            for case, plan in plans.items():
+                print(f"BENCHMARK PREPARE {case} loopback sources", flush=True)
+                source_workspace = Workspace(root / f"loopback-source-{case}")
+                source_result = ArtifactDownloader(DownloadPolicy(max_workers=16)).download(
+                    plan, source_workspace
                 )
-                for x in source_result.artifacts
-            }
-            with loopback_source(payloads, root / f"loopback-tls-{case}") as (url, certificate):
-                parts = tuple(
-                    part.model_copy(
-                        update={
-                            "artifacts": tuple(
-                                a.model_copy(
-                                    update={"source_urls": (url + "/" + artifact_name(a),)}
-                                )
-                                for a in part.artifacts
-                            )
-                        }
+                if {
+                    x.artifact.artifact_id: x.blob_sha256 for x in source_result.artifacts
+                } != references[case]:
+                    raise ValueError("Loopback sources differ from the verified CDN files")
+                payloads = {
+                    "/" + artifact_name(x.artifact): (
+                        source_workspace.blobs.path_for(x.blob_sha256).read_bytes(),
+                        '"' + x.blob_sha256 + '"',
                     )
-                    for part in plan.parts
-                )
-                local_plan = AcquisitionPlan.model_validate(
-                    plan.model_copy(update={"parts": parts}).model_dump()
-                )
-                environment = {
-                    "SSL_CERT_FILE": str(certificate),
-                    "CURL_CA_BUNDLE": str(certificate),
-                    "BENCHMARK_CA_FILE": str(certificate),
-                    "NO_PROXY": "127.0.0.1,localhost",
-                    "no_proxy": "127.0.0.1,localhost",
+                    for x in source_result.artifacts
                 }
-                measure(
-                    local_plan,
-                    f"{case}-loopback-disk",
-                    root,
-                    controls,
-                    min(2, args.repeats),
-                    references[case],
-                    environment,
-                )
-                with tempfile.TemporaryDirectory(
-                    prefix="gup-http-control-", dir="/dev/shm"
-                ) as memory_root:
-                    if (
-                        shutil.disk_usage(memory_root).free
-                        < local_plan.disk_space.required_free_bytes
-                    ):
-                        raise ValueError("Not enough tmpfs capacity for the RAM control")
+                with loopback_source(payloads, root / f"loopback-tls-{case}") as (url, certificate):
+                    parts = tuple(
+                        part.model_copy(
+                            update={
+                                "artifacts": tuple(
+                                    a.model_copy(
+                                        update={"source_urls": (url + "/" + artifact_name(a),)}
+                                    )
+                                    for a in part.artifacts
+                                )
+                            }
+                        )
+                        for part in plan.parts
+                    )
+                    local_plan = AcquisitionPlan.model_validate(
+                        plan.model_copy(update={"parts": parts}).model_dump()
+                    )
+                    environment = {
+                        "SSL_CERT_FILE": str(certificate),
+                        "CURL_CA_BUNDLE": str(certificate),
+                        "BENCHMARK_CA_FILE": str(certificate),
+                        "NO_PROXY": "127.0.0.1,localhost",
+                        "no_proxy": "127.0.0.1,localhost",
+                    }
                     measure(
                         local_plan,
-                        f"{case}-loopback-ram",
-                        Path(memory_root),
+                        f"{case}-loopback-disk",
+                        root,
                         controls,
                         min(2, args.repeats),
                         references[case],
                         environment,
                     )
-            payloads.clear()
-            shutil.rmtree(source_workspace.root)
+                    with tempfile.TemporaryDirectory(
+                        prefix="gup-http-control-", dir="/dev/shm"
+                    ) as memory_root:
+                        if (
+                            shutil.disk_usage(memory_root).free
+                            < local_plan.disk_space.required_free_bytes
+                        ):
+                            raise ValueError("Not enough tmpfs capacity for the RAM control")
+                        measure(
+                            local_plan,
+                            f"{case}-loopback-ram",
+                            Path(memory_root),
+                            controls,
+                            min(2, args.repeats),
+                            references[case],
+                            environment,
+                        )
+                payloads.clear()
+                shutil.rmtree(source_workspace.root)
     summary = [
         "| File set | Run | Tool | MiB/s including fsync and validation | Seconds |",
         "| --- | ---: | --- | ---: | ---: |",
@@ -638,6 +729,7 @@ def main() -> None:
     run.add_argument("--diagnose", action="store_true")
     run.add_argument("--loopback-control", action="store_true")
     run.add_argument("--baseline-sha", default="")
+    run.add_argument("--baseline-workers", type=int, choices=(1, 4, 16), default=4)
     run.set_defaults(handler=benchmark)
     child = subparsers.add_parser("worker")
     child.add_argument(

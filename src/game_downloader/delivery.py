@@ -6,15 +6,17 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 import zipfile
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -22,6 +24,7 @@ from pydantic import ConfigDict, Field, ValidationError
 
 from game_downloader._json import JsonValue
 from game_downloader.acquisition import ArtifactCorruptError, UnsafeArchiveError
+from game_downloader.aria2_rpc import Aria2Session
 from game_downloader.models import (
     AcquisitionArtifact,
     AcquisitionPlan,
@@ -61,46 +64,16 @@ class InsufficientDiskError(StageExecutionError):
         super().__init__("insufficient_disk", message)
 
 
-class _ParallelRangeUnavailable(Exception):
-    def __init__(self, fallback: ParallelRangeFallback) -> None:
-        self.fallback = fallback
-        super().__init__(fallback.reason.value)
-
-
-def _parallel_range_unavailable(
-    reason: ParallelRangeFallbackReason,
-    url: str,
-    *,
-    response: httpx.Response | None = None,
-    response_status: int | None = None,
-    range_index: int | None = None,
-    attempts: int = 1,
-) -> _ParallelRangeUnavailable:
-    effective_url = str(response.url) if response is not None else url
-    return _ParallelRangeUnavailable(
-        ParallelRangeFallback(
-            reason=reason,
-            source_host=(urlsplit(effective_url).hostname or urlsplit(url).hostname or "unknown"),
-            response_status=(response.status_code if response is not None else response_status),
-            range_index=range_index,
-            attempts=attempts,
-        )
-    )
-
-
 class DownloadPolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_workers: int = Field(default=6, ge=1, le=32)
-    attempts_per_url: int = Field(default=4, ge=1, le=20)
-    parallel_range_retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
+    max_workers: int = Field(default=16, ge=1, le=32)
     http_attempts_per_url: int = Field(default=8, ge=1, le=20)
     http_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=30.0)
     http_retry_max_backoff_seconds: float = Field(default=10.0, ge=0.0, le=30.0)
     http_no_progress_timeout_seconds: float = Field(default=300.0, gt=0, le=600.0)
     http_minimum_throughput_bytes_per_second: int = Field(default=256 * 1024, ge=0)
     http_throughput_window_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
-    chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024 * 1024)
     connect_timeout_seconds: float = Field(default=15.0, gt=0)
     read_timeout_seconds: float = Field(default=60.0, gt=0)
     max_redirects: int = Field(default=5, ge=0, le=20)
@@ -116,8 +89,6 @@ class DownloadPolicy(FrozenModel):
     parallel_range_minimum_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     parallel_range_target_bytes: int = Field(default=128 * 1024 * 1024, ge=64 * 1024)
     parallel_range_max_segments: int = Field(default=16, ge=2, le=32)
-    parallel_range_minimum_throughput_bytes_per_second: int = Field(default=128 * 1024, ge=0)
-    parallel_range_throughput_window_seconds: float = Field(default=120.0, ge=10.0, le=900.0)
     aria2_executable: str = "aria2c"
     aria2_timeout_seconds: int = Field(default=24 * 60 * 60, ge=60)
 
@@ -219,28 +190,9 @@ class _PartialState(FrozenModel):
     bytes_written: int = Field(ge=0)
     etag: str | None = None
     last_modified: str | None = None
-
-
-class _ParallelRangeState(FrozenModel):
-    artifact_id: str
-    url: str
-    final_url: str
-    size: int = Field(ge=1)
-    segment_count: int = Field(ge=2, le=32)
-    etag: str | None = None
-    last_modified: str | None = None
-    completed_bytes: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _ByteRange:
-    index: int
-    start: int
-    end: int
-
-    @property
-    def size(self) -> int:
-        return self.end - self.start + 1
+    native_control: bool = False
+    confirmed_complete: bool = False
+    sequential_prefix: bool = False
 
 
 def _format_bytes(value: float) -> str:
@@ -450,137 +402,6 @@ class _DownloadProgress:
         self._slow_warning_active = True
 
 
-def _split_byte_ranges(
-    size: int,
-    *,
-    target_bytes: int,
-    max_segments: int,
-) -> tuple[_ByteRange, ...]:
-    if size < 2:
-        return ()
-    segment_count = min(max_segments, size, max(2, (size + target_bytes - 1) // target_bytes))
-    base_size, extra = divmod(size, segment_count)
-    ranges: list[_ByteRange] = []
-    start = 0
-    for index in range(segment_count):
-        segment_size = base_size + (1 if index < extra else 0)
-        end = start + segment_size - 1
-        ranges.append(_ByteRange(index=index, start=start, end=end))
-        start = end + 1
-    assert start == size
-    return tuple(ranges)
-
-
-class _ParallelArtifactProgress:
-    def __init__(
-        self,
-        artifact_id: str,
-        ranges: Sequence[_ByteRange],
-        initial_bytes: Sequence[int],
-        progress: _DownloadProgress | None,
-        state: _ParallelRangeState,
-        state_path: Path,
-        workspace: Workspace,
-    ) -> None:
-        if len(ranges) != len(initial_bytes):
-            raise ValueError("parallel range progress does not match its ranges")
-        self._artifact_id = artifact_id
-        self._range_sizes = tuple(item.size for item in ranges)
-        self._current_bytes = list(initial_bytes)
-        self._progress = progress
-        self._state = state
-        self._state_path = state_path
-        self._workspace = workspace
-        self._lock = threading.Lock()
-        if progress is not None:
-            progress.update(artifact_id, sum(initial_bytes))
-
-    def update(
-        self,
-        index: int,
-        current_bytes: int,
-        transferred_bytes: int,
-        *,
-        source_host: str | None,
-    ) -> None:
-        if not 0 <= current_bytes <= self._range_sizes[index]:
-            raise ValueError("parallel range progress exceeds its declared size")
-        with self._lock:
-            if current_bytes < self._current_bytes[index]:
-                raise ValueError("parallel range progress cannot move backwards")
-            self._current_bytes[index] = current_bytes
-            if self._progress is not None:
-                self._progress.update(
-                    self._artifact_id,
-                    sum(self._current_bytes),
-                    transferred_bytes,
-                    source_host=source_host,
-                )
-
-    def current(self, index: int) -> int:
-        self.check_active()
-        with self._lock:
-            return self._current_bytes[index]
-
-    def check_active(self) -> None:
-        if self._progress is not None:
-            self._progress.check_active()
-
-    def persist(self) -> None:
-        with self._lock:
-            current_state = self._state.model_copy(
-                update={"completed_bytes": tuple(self._current_bytes)}
-            )
-            self._workspace.atomic_write_json(
-                self._state_path,
-                current_state.model_dump(mode="json"),
-            )
-
-
-def _response_chunks(
-    response: httpx.Response,
-    chunk_bytes: int,
-    *,
-    on_received: Callable[[int], None] | None = None,
-) -> Iterator[tuple[bytes, bool]]:
-    """Yield buffered bytes and whether a network read is fully consumed.
-
-    Flush trickles and received prefixes before retrying. The boundary flag keeps
-    Range throughput checks from treating one large read as several slow reads.
-    """
-
-    pending = bytearray()
-    received_bytes = 0
-    flushed_at = time.monotonic()
-    try:
-        for received in response.iter_raw():
-            flush_due = time.monotonic() - flushed_at >= 1
-            received_bytes += len(received)
-            if on_received is not None:
-                on_received(received_bytes)
-            remaining = memoryview(received)
-            while remaining:
-                available = chunk_bytes - len(pending)
-                pending.extend(remaining[:available])
-                remaining = remaining[available:]
-                if len(pending) == chunk_bytes:
-                    yield bytes(pending), not remaining
-                    pending.clear()
-                    flushed_at = time.monotonic()
-            # A slow source must expose useful progress without filling a whole block.
-            if pending and flush_due:
-                yield bytes(pending), True
-                pending.clear()
-                flushed_at = time.monotonic()
-    except httpx.HTTPError:
-        # Preserve the received prefix so a resumed request starts at persisted bytes.
-        if pending:
-            yield bytes(pending), True
-        raise
-    if pending:
-        yield bytes(pending), True
-
-
 def _artifact_cache_key(artifact: AcquisitionArtifact) -> str:
     return artifact.artifact_id.removeprefix("sha256:")
 
@@ -740,6 +561,239 @@ class _Aria2Adapter:
         return DownloadTrace(method=DownloadMethod.TORRENT, attempts=1)
 
 
+class _NativeHttpError(OSError):
+    def __init__(self, message: str, code: int = 0) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _Aria2HttpAdapter:
+    def __init__(self, policy: DownloadPolicy, session: Aria2Session, client: httpx.Client) -> None:
+        self.policy, self.session, self.client = policy, session, client
+        self.hash_slots = threading.Semaphore(min(4, policy.max_workers))
+
+    def probe(self, url: str, artifact: AcquisitionArtifact) -> httpx.Response:
+        response = self.client.head(url)
+        if response.status_code in {405, 501}:
+            with self.client.stream("GET", url, headers={"Range": "bytes=0-0"}) as streamed:
+                response = streamed
+        if response.status_code not in {200, 206}:
+            raise _NativeHttpError(f"HTTP metadata returned {response.status_code}")
+        if urlsplit(str(response.url)).scheme != "https":
+            raise ArtifactCorruptError("web seed redirected metadata away from HTTPS")
+        length = response.headers.get("content-length")
+        if response.status_code == 206:
+            matched = _CONTENT_RANGE.fullmatch(response.headers.get("content-range", ""))
+            length = matched.group("total") if matched else None
+        if length is not None and (not length.isdecimal() or int(length) != artifact.size):
+            raise _NativeHttpError("HTTP metadata size does not match the Acquisition Plan")
+        return response
+
+    @staticmethod
+    def validator(response: httpx.Response) -> tuple[str | None, str | None]:
+        def clean(value: str | None) -> str | None:
+            return value if value and all(32 <= ord(char) < 127 for char in value) else None
+
+        etag = clean(response.headers.get("etag"))
+        if etag and etag.startswith("W/"):
+            etag = None
+        return etag, clean(response.headers.get("last-modified"))
+
+    @staticmethod
+    def clear(payload: Path, state: Path) -> None:
+        payload.unlink(missing_ok=True)
+        state.unlink(missing_ok=True)
+        Path(str(payload) + ".aria2").unlink(missing_ok=True)
+        (payload.parent / "range-state.json").unlink(missing_ok=True)
+
+    def attempt(
+        self,
+        artifact: AcquisitionArtifact,
+        url: str,
+        workspace: Workspace,
+        payload: Path,
+        state_path: Path,
+        progress: _DownloadProgress,
+        transfer: _HttpTransferProgress,
+        *,
+        single_stream: bool,
+    ) -> tuple[DownloadTrace, _PayloadIntegrity]:
+        metadata = self.probe(url, artifact)
+        final_url = str(metadata.url)
+        etag, modified = self.validator(metadata)
+        previous = ArtifactDownloader._load_state(state_path, workspace)
+        control = Path(str(payload) + ".aria2")
+        if control.exists() or control.is_symlink():
+            _validate_regular_file(control, expected_size=control.stat().st_size, writable=True)
+        same_source = (
+            previous is not None
+            and previous.artifact_id == artifact.artifact_id
+            and previous.bytes_written <= artifact.size
+            and previous.url == url
+            and (etag is not None or modified is not None)
+            and (previous.etag == etag if etag is not None else previous.last_modified == modified)
+        )
+        native = (
+            same_source and previous is not None and previous.native_control and control.exists()
+        )
+        prefix = (
+            same_source
+            and previous is not None
+            and not previous.native_control
+            and payload.exists()
+            and payload.stat().st_size == previous.bytes_written
+        )
+        if not (native or prefix):
+            self.clear(payload, state_path)
+        resumed = previous.bytes_written if (native or prefix) and previous else 0
+        progress.update(artifact.artifact_id, resumed)
+        transfer.update(resumed)
+        state = _PartialState(
+            artifact_id=artifact.artifact_id,
+            url=url,
+            bytes_written=resumed,
+            etag=etag,
+            last_modified=modified,
+            native_control=True,
+        )
+        workspace.atomic_write_json(state_path, state.model_dump(mode="json"))
+        minimum_split = max(1024 * 1024, self.policy.parallel_range_target_bytes)
+        segments = 1
+        fallbacks: tuple[ParallelRangeFallback, ...] = ()
+        if artifact.size >= self.policy.parallel_range_minimum_bytes and not single_stream:
+            if metadata.headers.get("accept-ranges", "").lower() != "bytes":
+                reason = ParallelRangeFallbackReason.RANGE_NOT_ADVERTISED
+            elif not (etag or modified):
+                reason = ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE
+            else:
+                reason = None
+                segments = max(
+                    1,
+                    min(
+                        16, self.policy.parallel_range_max_segments, artifact.size // minimum_split
+                    ),
+                )
+            if reason is not None:
+                fallbacks = (
+                    ParallelRangeFallback(
+                        reason=reason, source_host=urlsplit(final_url).hostname or "unknown"
+                    ),
+                )
+        headers = ["Accept-Encoding: identity"]
+        if etag:
+            headers.append("If-Match: " + etag)
+        elif modified:
+            headers.append("If-Unmodified-Since: " + modified)
+        options: dict[str, Any] = {
+            "dir": str(payload.parent),
+            "out": payload.name,
+            "continue": "true" if native or prefix else "false",
+            "use-head": "true"
+            if (native or prefix or segments > 1) and metadata.request.method == "HEAD"
+            else "false",
+            "split": str(segments),
+            "max-connection-per-server": str(segments),
+            "min-split-size": str(minimum_split),
+            "header": headers,
+        }
+        # With disk-cache disabled and one native writer, st_size is an exact
+        # contiguous prefix even below aria2's 16 KiB RPC block granularity.
+        contiguous = segments == 1 and (not native or bool(previous and previous.sequential_prefix))
+        state = state.model_copy(update={"sequential_prefix": contiguous})
+        workspace.atomic_write_json(state_path, state.model_dump(mode="json"))
+        gid = self.session.call("addUri", [final_url], options)
+        if not isinstance(gid, str) or re.fullmatch(r"[a-f0-9]{16}", gid) is None:
+            raise StageExecutionError("source_unavailable", "aria2 returned an invalid transfer ID")
+        completed, observed, complete = resumed, resumed, False
+        interval = min(0.25, self.policy.http_no_progress_timeout_seconds / 4)
+        try:
+            while True:
+                progress.check_active()
+                status = self.session.call(
+                    "tellStatus",
+                    gid,
+                    ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
+                )
+                completed = int(status["completedLength"])
+                if contiguous and payload.exists():
+                    completed = max(completed, payload.stat().st_size)
+                total = int(status["totalLength"])
+                if not 0 <= completed <= artifact.size or total not in {0, artifact.size}:
+                    raise _NativeHttpError("aria2 HTTP size does not match the Acquisition Plan")
+                if (
+                    segments > 1
+                    and int(status.get("downloadSpeed", "0")) > 0
+                    and completed <= observed
+                    and transfer.remaining() < self.policy.http_no_progress_timeout_seconds / 2
+                ):
+                    raise _NativeHttpError(
+                        "HTTP Range progress is below native block granularity", 8
+                    )
+                transfer.update(completed)
+                progress.update(
+                    artifact.artifact_id,
+                    completed,
+                    max(0, completed - observed),
+                    source_host=urlsplit(final_url).hostname,
+                )
+                observed = completed
+                if status["status"] == "complete":
+                    if completed != artifact.size or total != artifact.size:
+                        raise _NativeHttpError("aria2 completed an incomplete HTTP payload")
+                    complete = True
+                    break
+                if status["status"] in {"error", "removed"}:
+                    code = int(status.get("errorCode", "1"))
+                    raise _NativeHttpError(f"aria2 HTTP transfer failed with code {code}", code)
+                time.sleep(min(interval, transfer.remaining()))
+        finally:
+            already_failing = sys.exc_info()[0] is not None
+            try:
+                stopped = self.session.remove(gid)
+                completed = int(stopped["completedLength"])
+                if contiguous and payload.exists():
+                    completed = max(completed, payload.stat().st_size)
+            except StageExecutionError:
+                self.session.close()
+                if not already_failing:
+                    raise
+            workspace.atomic_write_json(
+                state_path,
+                state.model_copy(update={"bytes_written": completed}).model_dump(mode="json"),
+            )
+        if not complete:
+            raise _NativeHttpError("aria2 HTTP transfer did not complete")
+        _validate_regular_file(payload, expected_size=artifact.size, writable=True)
+        with payload.open("rb") as source:
+            os.fsync(source.fileno())
+        if etag or modified:
+            current = self.probe(url, artifact)
+            current_etag, current_modified = self.validator(current)
+            if current_etag != etag if etag else current_modified != modified:
+                raise _NativeHttpError("HTTP source validator changed during download")
+        workspace.atomic_write_json(
+            state_path,
+            state.model_copy(
+                update={"bytes_written": artifact.size, "confirmed_complete": True}
+            ).model_dump(mode="json"),
+        )
+        progress.check_active()
+        with self.hash_slots:
+            own, verified = _hash_file(payload, artifact.source_hash)
+        return DownloadTrace(
+            method=DownloadMethod.WEB_SEED,
+            requested_url=url,
+            final_url=final_url,
+            http_redirects=tuple(str(r.url) for r in metadata.history)
+            + ((final_url,) if metadata.history else ()),
+            etag=etag,
+            last_modified=modified,
+            resumed_from=resumed,
+            parallel_segments=segments,
+            parallel_range_fallbacks=fallbacks,
+        ), _PayloadIntegrity(sha256=own, source_hash_verified=verified)
+
+
 class ArtifactDownloader:
     def __init__(
         self,
@@ -786,61 +840,59 @@ class ArtifactDownloader:
             write=self._policy.read_timeout_seconds,
             pool=self._policy.connect_timeout_seconds,
         )
-        range_workers = min(64, self._policy.max_workers * 3)
         scheduled_artifacts = tuple(
-            sorted(
-                artifacts,
-                key=lambda item: (-item.size, item.artifact_id.encode("ascii")),
-            )
+            sorted(artifacts, key=lambda item: (-item.size, item.artifact_id))
         )
-        with (
-            httpx.Client(
-                follow_redirects=True,
-                max_redirects=self._policy.max_redirects,
-                timeout=timeout,
-                limits=httpx.Limits(
-                    max_connections=self._policy.max_workers + range_workers,
-                    max_keepalive_connections=self._policy.max_workers + range_workers,
-                ),
-                headers={
-                    "Accept-Encoding": "identity",
-                    "User-Agent": "game-downloader/0.1 resumable downloader",
-                },
-            ) as client,
-            ThreadPoolExecutor(
-                max_workers=range_workers,
-                thread_name_prefix="artifact-range",
-            ) as range_executor,
-        ):
+        pending_http = any(a.source_urls and a.artifact_id not in cached for a in artifacts)
+        with ExitStack() as stack:
+            client = stack.enter_context(
+                httpx.Client(
+                    follow_redirects=True,
+                    max_redirects=self._policy.max_redirects,
+                    timeout=timeout,
+                    headers={"Accept-Encoding": "identity", "User-Agent": "game-downloader/0.1"},
+                )
+            )
+            session = (
+                stack.enter_context(
+                    Aria2Session(
+                        workspace.tmp_root,
+                        executable=self._policy.aria2_executable,
+                        workers=self._policy.max_workers,
+                        connect_timeout=self._policy.connect_timeout_seconds,
+                        read_timeout=self._policy.read_timeout_seconds,
+                    )
+                )
+                if pending_http
+                else None
+            )
+            http = _Aria2HttpAdapter(self._policy, session, client) if session else None
 
             def download_artifact(artifact: AcquisitionArtifact) -> DownloadedArtifact:
                 progress.check_active()
                 try:
                     return self._download_one(
-                        artifact,
-                        plan,
-                        workspace,
-                        client,
-                        cached.get(artifact.artifact_id),
-                        progress,
-                        range_executor,
+                        artifact, plan, workspace, http, cached.get(artifact.artifact_id), progress
                     )
-                except StageExecutionError as exc:
-                    progress.fail(exc)
+                except BaseException as exc:
+                    progress.fail(
+                        exc
+                        if isinstance(exc, StageExecutionError)
+                        else StageExecutionError("source_unavailable", "HTTP download interrupted")
+                    )
                     raise
 
-            if self._policy.max_workers == 1:
-                scheduled_downloads = tuple(
-                    download_artifact(artifact) for artifact in scheduled_artifacts
-                )
-            else:
-                with ThreadPoolExecutor(
-                    max_workers=self._policy.max_workers,
-                    thread_name_prefix="artifact-download",
-                ) as executor:
+            with ThreadPoolExecutor(
+                max_workers=self._policy.max_workers, thread_name_prefix="artifact-download"
+            ) as executor:
+                try:
                     scheduled_downloads = tuple(
                         executor.map(download_artifact, scheduled_artifacts)
                     )
+                except BaseException:
+                    if session is not None:
+                        session.close()
+                    raise
         downloads_by_id = {item.artifact.artifact_id: item for item in scheduled_downloads}
         downloaded = tuple(downloads_by_id[artifact.artifact_id] for artifact in artifacts)
         progress.completed()
@@ -879,10 +931,9 @@ class ArtifactDownloader:
         artifact: AcquisitionArtifact,
         plan: AcquisitionPlan,
         workspace: Workspace,
-        client: httpx.Client,
+        http: _Aria2HttpAdapter | None,
         cached: DownloadedArtifact | None = None,
         progress: _DownloadProgress | None = None,
-        range_executor: ThreadPoolExecutor | None = None,
     ) -> DownloadedArtifact:
         partial_directory = workspace.partial_root / _artifact_cache_key(artifact)
         partial_directory.mkdir(parents=True, exist_ok=True)
@@ -906,12 +957,11 @@ class ArtifactDownloader:
             if artifact.source_urls:
                 trace, integrity = self._download_web_seed(
                     artifact,
-                    client,
+                    http,
                     workspace,
                     payload_path,
                     state_path,
                     progress,
-                    range_executor,
                 )
             else:
                 trace = self._aria2.download(
@@ -952,6 +1002,7 @@ class ArtifactDownloader:
                 partial_directory / "receipt.json", receipt.model_dump(mode="json")
             )
             state_path.unlink(missing_ok=True)
+            Path(str(payload_path) + ".aria2").unlink(missing_ok=True)
             if progress is not None:
                 progress.update(artifact.artifact_id, artifact.size)
             return receipt
@@ -983,183 +1034,128 @@ class ArtifactDownloader:
     def _download_web_seed(
         self,
         artifact: AcquisitionArtifact,
-        client: httpx.Client,
+        http: _Aria2HttpAdapter | None,
         workspace: Workspace,
         payload_path: Path,
         state_path: Path,
         progress: _DownloadProgress | None,
-        range_executor: ThreadPoolExecutor | None,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
-        attempts = 0
-        range_state_path = payload_path.parent / "range-state.json"
+        assert http is not None and progress is not None
+        previous = self._load_state(state_path, workspace)
         initial_size = payload_path.stat().st_size if payload_path.exists() else 0
-        last_error = "no web seed was attempted"
-        saw_corrupt_payload = False
-        parallel_fallbacks: list[ParallelRangeFallback] = []
+        # A native sparse file can have its final length long before it is complete.
+        # Only a declared hash or a durable completed receipt proves all bytes exist.
         if (
-            payload_path.exists()
-            and initial_size == artifact.size
-            and not range_state_path.exists()
+            initial_size == artifact.size
+            and payload_path.exists()
+            and not Path(str(payload_path) + ".aria2").exists()
+            and not (payload_path.parent / "range-state.json").exists()
+            and (artifact.source_hash is not None or (previous and previous.confirmed_complete))
         ):
-            own_sha256, source_verified = _hash_file(payload_path, artifact.source_hash)
-            if artifact.source_hash is None or source_verified:
-                if progress is not None:
-                    progress.update(artifact.artifact_id, artifact.size)
-                state = self._load_state(state_path, workspace)
-                completed_url = state.url if state is not None else artifact.source_urls[0]
-                return (
-                    DownloadTrace(
-                        method=DownloadMethod.WEB_SEED,
-                        requested_url=completed_url,
-                        final_url=completed_url,
-                        etag=state.etag if state is not None else None,
-                        last_modified=state.last_modified if state is not None else None,
-                        resumed_from=initial_size,
-                        attempts=1,
-                    ),
-                    _PayloadIntegrity(
-                        sha256=own_sha256,
-                        source_hash_verified=source_verified,
-                    ),
-                )
-            payload_path.unlink(missing_ok=True)
-            state_path.unlink(missing_ok=True)
-            initial_size = 0
-            saw_corrupt_payload = True
-            if progress is not None:
-                progress.update(artifact.artifact_id, 0)
-        if (
-            range_executor is not None
-            and (
-                artifact.size >= self._policy.parallel_range_minimum_bytes
-                or range_state_path.exists()
-            )
-            and (not payload_path.exists() or range_state_path.exists())
-        ):
-            for url in artifact.source_urls:
-                self._validate_web_seed_url(url)
-                try:
-                    ranged = self._try_parallel_range_download(
-                        artifact,
-                        url,
-                        client,
-                        workspace,
-                        payload_path,
-                        progress,
-                        range_executor,
-                    )
-                except _ParallelRangeUnavailable as exc:
-                    last_error = str(exc)
-                    parallel_fallbacks.append(exc.fallback)
-                    self._clear_parallel_range_state(payload_path.parent)
-                    payload_path.unlink(missing_ok=True)
-                    state_path.unlink(missing_ok=True)
-                    initial_size = 0
-                    if progress is not None:
-                        progress.update(artifact.artifact_id, 0)
-                    self._progress_observer(
-                        f"Artifact {artifact.artifact_id}: parallel Range unavailable from "
-                        f"{exc.fallback.source_host} ({exc.fallback.reason.value}); "
-                        "single-stream HTTP fallback remains enabled"
-                    )
-                    continue
-                if ranged is None:
-                    continue
-                range_trace, range_integrity = ranged
-                if artifact.source_hash is not None and not range_integrity.source_hash_verified:
-                    last_error = "parallel web seed payload failed its declared source hash"
-                    fallback = ParallelRangeFallback(
-                        reason=ParallelRangeFallbackReason.PAYLOAD_HASH_MISMATCH,
-                        source_host=(urlsplit(range_trace.final_url or url).hostname or "unknown"),
-                        attempts=range_trace.attempts,
-                        discarded_bytes=artifact.size,
-                    )
-                    parallel_fallbacks.append(fallback)
-                    payload_path.unlink(missing_ok=True)
-                    state_path.unlink(missing_ok=True)
-                    initial_size = 0
-                    if progress is not None:
-                        progress.update(artifact.artifact_id, 0)
-                    self._progress_observer(
-                        f"Artifact {artifact.artifact_id}: parallel Range unavailable from "
-                        f"{fallback.source_host} ({fallback.reason.value}); "
-                        "single-stream HTTP fallback remains enabled"
-                    )
-                    continue
-                return (
-                    range_trace.model_copy(
-                        update={"parallel_range_fallbacks": tuple(parallel_fallbacks)}
-                    ),
-                    range_integrity,
-                )
+            own, verified = _hash_file(payload_path, artifact.source_hash)
+            if verified:
+                url = previous.url if previous else artifact.source_urls[0]
+                return DownloadTrace(
+                    method=DownloadMethod.WEB_SEED,
+                    requested_url=url,
+                    final_url=url,
+                    resumed_from=initial_size,
+                ), _PayloadIntegrity(sha256=own, source_hash_verified=verified)
+            http.clear(payload_path, state_path)
+        attempts = 0
+        saw_corrupt = False
+        single_stream = False
+        fallbacks: list[ParallelRangeFallback] = []
+        last_error = "no HTTP source was attempted"
         transfer = _HttpTransferProgress(
             artifact.artifact_id,
             artifact.size,
-            payload_path.stat().st_size if payload_path.exists() else 0,
+            previous.bytes_written if previous else 0,
             self._policy,
             observer=self._progress_observer,
         )
         for url in artifact.source_urls:
             self._validate_web_seed_url(url)
             for _attempt in range(self._policy.http_attempts_per_url):
-                if progress is not None:
-                    progress.check_active()
+                progress.check_active()
                 if attempts:
                     delay = min(
-                        self._policy.http_retry_backoff_seconds * (2 ** min(attempts - 1, 10)),
+                        self._policy.http_retry_backoff_seconds * 2 ** min(attempts - 1, 10),
                         self._policy.http_retry_max_backoff_seconds,
                         transfer.remaining(),
                     )
                     self._progress_observer(
                         f"Artifact {artifact.artifact_id}: {last_error}; "
                         f"retrying HTTP from {urlsplit(url).hostname} in {delay:g}s "
-                        f"(attempt {_attempt + 1}/{self._policy.http_attempts_per_url}); "
-                        f"no-progress timeout in {transfer.remaining():.1f}s"
+                        f"(attempt {_attempt + 1}/{self._policy.http_attempts_per_url})"
                     )
-                    if delay > 0:
-                        time.sleep(delay)
+                    until = time.monotonic() + delay
+                    while time.monotonic() < until:
+                        progress.check_active()
+                        time.sleep(min(0.1, until - time.monotonic()))
                 transfer.remaining()
                 attempts += 1
                 try:
-                    complete, trace, integrity = self._http_attempt(
+                    trace, integrity = http.attempt(
                         artifact,
                         url,
-                        client,
                         workspace,
                         payload_path,
                         state_path,
                         progress,
                         transfer,
+                        single_stream=single_stream,
                     )
-                except (httpx.HTTPError, OSError) as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
+                except (httpx.HTTPError, OSError) as error:
+                    last_error = (
+                        str(error) if isinstance(error, _NativeHttpError) else type(error).__name__
+                    )
+                    if isinstance(error, _NativeHttpError) and error.code == 8:
+                        http.clear(payload_path, state_path)
+                        if not single_stream:
+                            # A one-time Range fallback discards the old sparse layout.
+                            # Single-stream retries then retain their own high watermark.
+                            transfer = _HttpTransferProgress(
+                                artifact.artifact_id,
+                                artifact.size,
+                                0,
+                                self._policy,
+                                observer=self._progress_observer,
+                            )
+                        single_stream = True
+                        fallbacks.append(
+                            ParallelRangeFallback(
+                                reason=ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL,
+                                source_host=urlsplit(url).hostname or "unknown",
+                            )
+                        )
                     continue
-                if not complete:
-                    last_error = "web seed response ended before the declared Artifact size"
-                    continue
-                assert integrity is not None
-                if artifact.source_hash is not None and not integrity.source_hash_verified:
-                    saw_corrupt_payload = True
-                    last_error = "web seed payload failed its declared source hash"
-                    payload_path.unlink(missing_ok=True)
-                    state_path.unlink(missing_ok=True)
-                    if progress is not None:
-                        progress.update(artifact.artifact_id, 0)
+                if not integrity.source_hash_verified:
+                    saw_corrupt = True
+                    last_error = "HTTP payload failed its declared source hash"
+                    http.clear(payload_path, state_path)
+                    progress.update(artifact.artifact_id, 0)
                     transfer.update(0)
+                    if trace.parallel_segments > 1:
+                        single_stream = True
+                        fallbacks.append(
+                            ParallelRangeFallback(
+                                reason=ParallelRangeFallbackReason.PAYLOAD_HASH_MISMATCH,
+                                source_host=urlsplit(url).hostname or "unknown",
+                                discarded_bytes=artifact.size,
+                            )
+                        )
                     continue
-                return (
-                    trace.model_copy(
-                        update={
-                            "attempts": attempts,
-                            "resumed_from": initial_size,
-                            "parallel_range_fallbacks": tuple(parallel_fallbacks),
-                        }
-                    ),
-                    integrity,
-                )
-        if saw_corrupt_payload:
+                return trace.model_copy(
+                    update={
+                        "attempts": attempts,
+                        "parallel_range_fallbacks": tuple(fallbacks)
+                        + trace.parallel_range_fallbacks,
+                    }
+                ), integrity
+        if saw_corrupt:
             raise ArtifactCorruptError(
-                "all complete sources were corrupt for Artifact "
+                f"all complete sources were corrupt for Artifact "
                 f"{artifact.artifact_id}: {last_error}"
             )
         raise StageExecutionError(
@@ -1173,551 +1169,6 @@ class ArtifactDownloader:
         parsed = urlsplit(url)
         if parsed.scheme != "https" or parsed.hostname is None:
             raise ArtifactCorruptError("Acquisition Plan contains a non-HTTPS web seed URL")
-
-    def _try_parallel_range_download(
-        self,
-        artifact: AcquisitionArtifact,
-        url: str,
-        client: httpx.Client,
-        workspace: Workspace,
-        payload_path: Path,
-        progress: _DownloadProgress | None,
-        executor: ThreadPoolExecutor,
-    ) -> tuple[DownloadTrace, _PayloadIntegrity] | None:
-        if progress is not None:
-            progress.check_active()
-        try:
-            probe = client.head(url)
-        except (httpx.HTTPError, OSError):
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.PROBE_FAILED,
-                url,
-            ) from None
-        if probe.status_code != 200:
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.PROBE_STATUS,
-                url,
-                response=probe,
-            )
-        final_url = str(probe.url)
-        if urlsplit(final_url).scheme != "https":
-            raise ArtifactCorruptError("web seed redirected a range probe away from HTTPS")
-        try:
-            declared_size = int(probe.headers.get("content-length", ""))
-        except ValueError:
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.PROBE_LENGTH_UNAVAILABLE,
-                url,
-                response=probe,
-            ) from None
-        if declared_size != artifact.size:
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.PROBE_SIZE_MISMATCH,
-                url,
-                response=probe,
-            )
-        if "bytes" not in probe.headers.get("accept-ranges", "").lower():
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.RANGE_NOT_ADVERTISED,
-                url,
-                response=probe,
-            )
-        etag = probe.headers.get("etag")
-        last_modified = probe.headers.get("last-modified")
-        if etag is None and last_modified is None:
-            raise _parallel_range_unavailable(
-                ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE,
-                url,
-                response=probe,
-            )
-        ranges = _split_byte_ranges(
-            artifact.size,
-            target_bytes=self._policy.parallel_range_target_bytes,
-            max_segments=self._policy.parallel_range_max_segments,
-        )
-        if len(ranges) < 2:
-            return None
-
-        state = _ParallelRangeState(
-            artifact_id=artifact.artifact_id,
-            url=url,
-            final_url=final_url,
-            size=artifact.size,
-            segment_count=len(ranges),
-            etag=etag,
-            last_modified=last_modified,
-            completed_bytes=(0,) * len(ranges),
-        )
-        state_path = payload_path.parent / "range-state.json"
-        previous_state = self._load_parallel_range_state(state_path, workspace)
-        previous_identity = (
-            previous_state.model_copy(update={"completed_bytes": state.completed_bytes})
-            if previous_state is not None
-            else None
-        )
-        if previous_identity != state:
-            self._clear_parallel_range_state(payload_path.parent)
-            payload_path.unlink(missing_ok=True)
-            workspace.atomic_write_json(state_path, state.model_dump(mode="json"))
-            previous_state = state
-        assert previous_state is not None
-        if len(previous_state.completed_bytes) != len(ranges) or any(
-            not 0 <= current <= item.size
-            for item, current in zip(ranges, previous_state.completed_bytes, strict=True)
-        ):
-            raise ArtifactCorruptError("parallel range state contains invalid progress")
-        initial_bytes = previous_state.completed_bytes
-        if payload_path.exists():
-            _validate_regular_file(
-                payload_path,
-                expected_size=artifact.size,
-                writable=True,
-            )
-        else:
-            with payload_path.open("w+b") as output:
-                output.truncate(artifact.size)
-                output.flush()
-                os.fsync(output.fileno())
-        resumed_from = sum(initial_bytes)
-        range_progress = _ParallelArtifactProgress(
-            artifact.artifact_id,
-            ranges,
-            initial_bytes,
-            progress,
-            previous_state,
-            state_path,
-            workspace,
-        )
-        self._progress_observer(
-            f"Artifact {artifact.artifact_id}: downloading {_format_bytes(artifact.size)} "
-            f"in {len(ranges)} validated HTTP ranges from {urlsplit(final_url).hostname}"
-        )
-        with payload_path.open("r+b", buffering=0) as output:
-            futures = [
-                executor.submit(
-                    self._download_range,
-                    artifact,
-                    url,
-                    client,
-                    item,
-                    output.fileno(),
-                    previous_state,
-                    range_progress,
-                )
-                for item in ranges
-            ]
-            try:
-                range_attempts = [future.result() for future in futures]
-            except _ParallelRangeUnavailable as exc:
-                for future in futures:
-                    future.cancel()
-                wait(futures)
-                range_progress.persist()
-                discarded_bytes = sum(range_progress.current(item.index) for item in ranges)
-                raise _ParallelRangeUnavailable(
-                    exc.fallback.model_copy(update={"discarded_bytes": discarded_bytes})
-                ) from exc
-            except BaseException:
-                for future in futures:
-                    future.cancel()
-                wait(futures)
-                raise
-            os.fsync(output.fileno())
-        range_progress.persist()
-        own_sha256, source_verified = _hash_file(payload_path, artifact.source_hash)
-        integrity = _PayloadIntegrity(
-            sha256=own_sha256,
-            source_hash_verified=source_verified,
-        )
-        self._clear_parallel_range_state(payload_path.parent)
-        trace = self._trace(probe, url).model_copy(
-            update={
-                "attempts": max(range_attempts),
-                "parallel_segments": len(ranges),
-                "resumed_from": resumed_from,
-            }
-        )
-        return trace, integrity
-
-    def _download_range(
-        self,
-        artifact: AcquisitionArtifact,
-        url: str,
-        client: httpx.Client,
-        byte_range: _ByteRange,
-        output_fd: int,
-        state: _ParallelRangeState,
-        progress: _ParallelArtifactProgress,
-    ) -> int:
-        attempts = 0
-        last_response_status: int | None = None
-        try:
-            while attempts < self._policy.attempts_per_url:
-                attempts += 1
-                current_size = progress.current(byte_range.index)
-                if current_size == byte_range.size:
-                    return attempts
-                headers = {
-                    "Range": (f"bytes={byte_range.start + current_size}-{byte_range.end}"),
-                    "If-Range": state.etag or cast(str, state.last_modified),
-                }
-                try:
-                    with client.stream("GET", url, headers=headers) as response:
-                        last_response_status = response.status_code
-                        if (
-                            response.status_code in {404, 408, 425, 429}
-                            or response.status_code >= 500
-                        ):
-                            continue
-                        if response.status_code != 206:
-                            if (
-                                response.status_code == 200
-                                and attempts < self._policy.attempts_per_url
-                            ):
-                                response.close()
-                                self._progress_observer(
-                                    f"Artifact {artifact.artifact_id}: range "
-                                    f"{byte_range.index} from "
-                                    f"{urlsplit(str(response.url)).hostname or 'unknown'} "
-                                    "ignored a bounded request with HTTP 200; retrying "
-                                    f"({attempts}/{self._policy.attempts_per_url})"
-                                )
-                                retry_delay = min(
-                                    self._policy.parallel_range_retry_backoff_seconds
-                                    * (2 ** (attempts - 1)),
-                                    self._policy.read_timeout_seconds,
-                                )
-                                if retry_delay > 0:
-                                    time.sleep(retry_delay)
-                                continue
-                            raise _parallel_range_unavailable(
-                                ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL,
-                                url,
-                                response=response,
-                                range_index=byte_range.index,
-                                attempts=attempts,
-                            )
-                        raw_range = response.headers.get("content-range", "")
-                        matched = _CONTENT_RANGE.fullmatch(raw_range)
-                        expected_start = byte_range.start + current_size
-                        if (
-                            matched is None
-                            or int(matched.group("start")) != expected_start
-                            or int(matched.group("end")) != byte_range.end
-                            or int(matched.group("total")) != artifact.size
-                        ):
-                            raise _parallel_range_unavailable(
-                                ParallelRangeFallbackReason.INVALID_CONTENT_RANGE,
-                                url,
-                                response=response,
-                                range_index=byte_range.index,
-                                attempts=attempts,
-                            )
-                        if state.etag is not None:
-                            validator_changed = response.headers.get("etag") != state.etag
-                        else:
-                            validator_changed = (
-                                response.headers.get("last-modified") != state.last_modified
-                            )
-                        if validator_changed:
-                            raise _parallel_range_unavailable(
-                                ParallelRangeFallbackReason.VALIDATOR_CHANGED,
-                                url,
-                                response=response,
-                                range_index=byte_range.index,
-                                attempts=attempts,
-                            )
-                        source_host = urlsplit(str(response.url)).hostname
-                        written = current_size
-                        window_started_at = time.monotonic()
-                        window_started_bytes = written
-                        minimum_speed = (
-                            self._policy.parallel_range_minimum_throughput_bytes_per_second
-                        )
-                        check_slow_range = minimum_speed > 0
-                        for received, read_complete in _response_chunks(
-                            response,
-                            self._policy.chunk_bytes,
-                            on_received=lambda _count: progress.check_active(),
-                        ):
-                            for offset in range(0, len(received), self._policy.chunk_bytes):
-                                chunk = received[offset : offset + self._policy.chunk_bytes]
-                                written += len(chunk)
-                                if written > byte_range.size:
-                                    raise _parallel_range_unavailable(
-                                        ParallelRangeFallbackReason.RANGE_LENGTH_MISMATCH,
-                                        url,
-                                        response=response,
-                                        range_index=byte_range.index,
-                                        attempts=attempts,
-                                    )
-                                absolute_offset = byte_range.start + written - len(chunk)
-                                remaining = memoryview(chunk)
-                                while remaining:
-                                    persisted = os.pwrite(output_fd, remaining, absolute_offset)
-                                    if persisted <= 0:
-                                        raise OSError("positional Artifact write made no progress")
-                                    absolute_offset += persisted
-                                    remaining = remaining[persisted:]
-                                progress.update(
-                                    byte_range.index,
-                                    written,
-                                    len(chunk),
-                                    source_host=source_host,
-                                )
-                            if (
-                                not read_complete
-                                or not check_slow_range
-                                or written == byte_range.size
-                            ):
-                                continue
-                            now = time.monotonic()
-                            elapsed = now - window_started_at
-                            if elapsed < self._policy.parallel_range_throughput_window_seconds:
-                                continue
-                            speed = (written - window_started_bytes) / elapsed
-                            window_started_at, window_started_bytes = now, written
-                            if speed >= minimum_speed:
-                                continue
-                            diagnostic = (
-                                f"Artifact {artifact.artifact_id}: slow range {byte_range.index} "
-                                f"from {source_host or 'unknown'} averaged {_format_rate(speed)} "
-                                f"over {elapsed:.1f}s, below {_format_rate(minimum_speed)}"
-                            )
-                            if attempts >= self._policy.attempts_per_url:
-                                self._progress_observer(
-                                    f"{diagnostic}; retry budget exhausted; "
-                                    "continuing current stream"
-                                )
-                                check_slow_range = False
-                                continue
-                            # Closing an unfinished response releases its connection. Keep the
-                            # written prefix and validate the resumed response as usual.
-                            response.close()
-                            progress.persist()
-                            self._progress_observer(
-                                f"{diagnostic}; resuming at byte {byte_range.start + written} "
-                                f"(attempt {attempts + 1}/{self._policy.attempts_per_url})"
-                            )
-                            break
-                except (httpx.HTTPError, OSError):
-                    continue
-                current_size = progress.current(byte_range.index)
-                if current_size == byte_range.size:
-                    return attempts
-        finally:
-            progress.persist()
-        raise _parallel_range_unavailable(
-            ParallelRangeFallbackReason.RANGE_REQUEST_FAILED,
-            url,
-            response_status=last_response_status,
-            range_index=byte_range.index,
-            attempts=attempts,
-        )
-
-    @staticmethod
-    def _clear_parallel_range_state(partial_directory: Path) -> None:
-        for path in partial_directory.glob("range-[0-9][0-9][0-9][0-9].part"):
-            path.unlink(missing_ok=True)
-        (partial_directory / "range-state.json").unlink(missing_ok=True)
-
-    @staticmethod
-    def _load_parallel_range_state(
-        state_path: Path,
-        workspace: Workspace,
-    ) -> _ParallelRangeState | None:
-        try:
-            return _ParallelRangeState.model_validate_json(workspace.read_bytes(state_path))
-        except FileNotFoundError:
-            return None
-        except (ValidationError, WorkspaceCorruptError) as exc:
-            raise ArtifactCorruptError(f"invalid parallel range state: {exc}") from exc
-
-    def _http_attempt(
-        self,
-        artifact: AcquisitionArtifact,
-        url: str,
-        client: httpx.Client,
-        workspace: Workspace,
-        payload_path: Path,
-        state_path: Path,
-        progress: _DownloadProgress | None,
-        transfer: _HttpTransferProgress,
-    ) -> tuple[bool, DownloadTrace, _PayloadIntegrity | None]:
-        existing_size = payload_path.stat().st_size if payload_path.exists() else 0
-        state = self._load_state(state_path, workspace)
-        can_resume = (
-            existing_size > 0
-            and state is not None
-            and state.artifact_id == artifact.artifact_id
-            and state.url == url
-            and state.bytes_written == existing_size
-            and (state.etag is not None or state.last_modified is not None)
-        )
-        if existing_size and not can_resume:
-            payload_path.unlink(missing_ok=True)
-            state_path.unlink(missing_ok=True)
-            existing_size = 0
-            state = None
-        if progress is not None:
-            progress.update(artifact.artifact_id, existing_size)
-        transfer.update(existing_size)
-        headers: dict[str, str] = {}
-        if existing_size:
-            headers["Range"] = f"bytes={existing_size}-"
-            assert state is not None
-            validator = state.etag or state.last_modified
-            assert validator is not None
-            headers["If-Range"] = validator
-
-        with client.stream("GET", url, headers=headers, timeout=transfer.timeout()) as response:
-            transfer.remaining()
-            if response.status_code not in {200, 206}:
-                raise httpx.HTTPStatusError(
-                    f"unexpected HTTP {response.status_code}",
-                    request=response.request,
-                    response=response,
-                )
-            response_etag = response.headers.get("etag")
-            response_last_modified = response.headers.get("last-modified")
-            append = existing_size > 0 and response.status_code == 206
-            if append:
-                raw_range = response.headers.get("content-range", "")
-                matched = _CONTENT_RANGE.fullmatch(raw_range)
-                if (
-                    matched is None
-                    or int(matched.group("start")) != existing_size
-                    or int(matched.group("total")) != artifact.size
-                ):
-                    raise ArtifactCorruptError("web seed returned an invalid Content-Range")
-                assert state is not None
-                validator_changed = (
-                    response_etag != state.etag
-                    if state.etag is not None
-                    else response_last_modified != state.last_modified
-                )
-                if validator_changed:
-                    payload_path.unlink(missing_ok=True)
-                    state_path.unlink(missing_ok=True)
-                    if progress is not None:
-                        progress.update(artifact.artifact_id, 0)
-                    transfer.update(0)
-                    return False, self._trace(response, url), None
-                mode = "ab"
-            else:
-                existing_size = 0
-                transfer.update(0)
-                mode = "wb"
-                if response.status_code == 206:
-                    raw_range = response.headers.get("content-range", "")
-                    matched = _CONTENT_RANGE.fullmatch(raw_range)
-                    if (
-                        matched is None
-                        or int(matched.group("start")) != 0
-                        or int(matched.group("total")) != artifact.size
-                    ):
-                        raise ArtifactCorruptError("web seed returned an invalid initial range")
-
-            workspace.atomic_write_json(
-                state_path,
-                _PartialState(
-                    artifact_id=artifact.artifact_id,
-                    url=url,
-                    bytes_written=existing_size,
-                    etag=response_etag,
-                    last_modified=response_last_modified,
-                ).model_dump(mode="json"),
-            )
-            hasher = _PayloadHasher(artifact.source_hash)
-            if existing_size:
-                hasher.update_file(payload_path)
-            transfer.remaining()
-            try:
-                with payload_path.open(mode) as output:
-                    self._stream_response(
-                        response,
-                        cast(BinaryIO, output),
-                        existing_size,
-                        artifact.size,
-                        artifact.artifact_id,
-                        progress,
-                        hasher,
-                        transfer,
-                        source_host=urlsplit(str(response.url)).hostname,
-                    )
-            finally:
-                current_size = payload_path.stat().st_size if payload_path.exists() else 0
-                workspace.atomic_write_json(
-                    state_path,
-                    _PartialState(
-                        artifact_id=artifact.artifact_id,
-                        url=url,
-                        bytes_written=current_size,
-                        etag=response_etag,
-                        last_modified=response_last_modified,
-                    ).model_dump(mode="json"),
-                )
-            complete = payload_path.stat().st_size == artifact.size
-            integrity = hasher.finish() if complete else None
-            return complete, self._trace(response, url), integrity
-
-    def _stream_response(
-        self,
-        response: httpx.Response,
-        output: BinaryIO,
-        initial_size: int,
-        expected_size: int,
-        artifact_id: str,
-        progress: _DownloadProgress | None,
-        hasher: _PayloadHasher,
-        transfer: _HttpTransferProgress,
-        *,
-        source_host: str | None,
-    ) -> None:
-        written = initial_size
-
-        def received_progress(received_bytes: int) -> None:
-            if progress is not None:
-                progress.check_active()
-            current = initial_size + received_bytes
-            if current > expected_size:
-                raise ArtifactCorruptError("web seed sent more bytes than declared")
-            # Keep the idle deadline and throughput window tied to actual network reads.
-            transfer.update(current)
-
-        for received, _read_complete in _response_chunks(
-            response, self._policy.chunk_bytes, on_received=received_progress
-        ):
-            for offset in range(0, len(received), self._policy.chunk_bytes):
-                chunk = received[offset : offset + self._policy.chunk_bytes]
-                written += len(chunk)
-                if written > expected_size:
-                    raise ArtifactCorruptError("web seed sent more bytes than declared")
-                output.write(chunk)
-                hasher.update(chunk)
-                if progress is not None:
-                    progress.update(
-                        artifact_id,
-                        written,
-                        len(chunk),
-                        source_host=source_host,
-                    )
-        transfer.remaining()
-        output.flush()
-        os.fsync(output.fileno())
-
-    @staticmethod
-    def _trace(response: httpx.Response, requested_url: str) -> DownloadTrace:
-        history = tuple(str(item.url) for item in response.history)
-        redirects = history + ((str(response.url),) if history else ())
-        return DownloadTrace(
-            method=DownloadMethod.WEB_SEED,
-            requested_url=requested_url,
-            final_url=str(response.url),
-            http_redirects=redirects,
-            etag=response.headers.get("etag"),
-            last_modified=response.headers.get("last-modified"),
-        )
 
     @staticmethod
     def _load_state(state_path: Path, workspace: Workspace) -> _PartialState | None:
@@ -2016,7 +1467,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v15",
+        implementation_version="aria2-http-download-v16",
         execute=execute,
         validate=validate,
         audit=audit,
