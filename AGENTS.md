@@ -132,12 +132,17 @@ workflow или отдельный репозиторий и не перенос
   попытками, делает fsync и проверяет source hash/SHA-256 перед CAS commit; хеширование
   ограничено четырьмя workers. Resume требует совпадающий strong ETag/Last-Modified
   и родной .aria2 bitmap. Незавершённый payload без control-файла перезапускается.
+  Полный payload после прерванного хеширования принимается по объявленному source hash;
+  без него требуется повторная проверка сохранённого валидатора источника.
   Импорт partial-файлов прежнего HTTP downloader не поддерживается.
   RPC слушает только loopback, одноразовый token хранится в private config 0600/dir 0700,
-  отсутствует в argv/env/logs. RPC использует сетевой read timeout, ограниченный остатком
-  no-progress budget; startup ограничен 10 секундами, остановка writer — пятью.
-  Не повторять RPC mutations после неизвестного результата. Любая ошибка или отмена
-  останавливает и дожидается aria2; при отмене остальных workers сохраняется исходная ошибка.
+  отсутствует в argv/env/logs. Ожидание ответа addUri/tellStatus ограничено остатком
+  no-progress budget, независимо от read timeout удалённого HTTP. Metadata probe также
+  ограничен этим остатком; startup ограничен 10 секундами, остановка writer — пятью.
+  Не повторять RPC mutations после неизвестного результата. Удаление уже завершённого
+  RPC result выполняется однократно и best-effort, не останавливая соседние загрузки.
+  Окончательная ошибка файла или отмена сразу останавливает и дожидается aria2;
+  при отмене остальных workers сохраняется исходная ошибка.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,
   `mt-public-test`; client types: `sd`/`hd`; languages: список или `ALL`.
 - Каждый consumer можно независимо отключить. Все включённые consumer получают одинаковые target,

@@ -12,7 +12,7 @@ import time
 import zipfile
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -578,10 +578,14 @@ class _Aria2HttpAdapter:
         self.policy, self.session, self.client = policy, session, client
         self.hash_slots = threading.Semaphore(min(4, policy.max_workers))
 
-    def probe(self, url: str, artifact: AcquisitionArtifact) -> httpx.Response:
-        response = self.client.head(url)
+    def probe(
+        self, url: str, artifact: AcquisitionArtifact, transfer: _HttpTransferProgress
+    ) -> httpx.Response:
+        response = self.client.head(url, timeout=transfer.timeout())
         if response.status_code in {405, 501}:
-            with self.client.stream("GET", url, headers={"Range": "bytes=0-0"}) as streamed:
+            with self.client.stream(
+                "GET", url, headers={"Range": "bytes=0-0"}, timeout=transfer.timeout()
+            ) as streamed:
                 response = streamed
         if response.status_code not in {200, 206}:
             raise _NativeHttpError(f"HTTP metadata returned {response.status_code}")
@@ -623,7 +627,7 @@ class _Aria2HttpAdapter:
         *,
         single_stream: bool,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
-        metadata = self.probe(url, artifact)
+        metadata = self.probe(url, artifact, transfer)
         final_url = str(metadata.url)
         etag, modified = self.validator(metadata)
         previous = ArtifactDownloader._load_state(state_path, workspace)
@@ -638,6 +642,32 @@ class _Aria2HttpAdapter:
             and (etag is not None or modified is not None)
             and (previous.etag == etag if etag is not None else previous.last_modified == modified)
         )
+        if (
+            same_source
+            and previous is not None
+            and previous.confirmed_complete
+            and previous.bytes_written == artifact.size
+            and payload.exists()
+            and not control.exists()
+        ):
+            # Completion survives an interrupted hash/commit, but without a
+            # declared source hash it is only reusable after this fresh probe.
+            _validate_regular_file(payload, expected_size=artifact.size, writable=True)
+            progress.check_active()
+            progress.update(artifact.artifact_id, artifact.size)
+            transfer.update(artifact.size)
+            with self.hash_slots:
+                own, verified = _hash_file(payload, artifact.source_hash)
+            return DownloadTrace(
+                method=DownloadMethod.WEB_SEED,
+                requested_url=url,
+                final_url=final_url,
+                http_redirects=tuple(str(r.url) for r in metadata.history)
+                + ((final_url,) if metadata.history else ()),
+                etag=etag,
+                last_modified=modified,
+                resumed_from=artifact.size,
+            ), _PayloadIntegrity(sha256=own, source_hash_verified=verified)
         native = (
             same_source and previous is not None and previous.native_control and control.exists()
         )
@@ -703,7 +733,7 @@ class _Aria2HttpAdapter:
             "addUri",
             [final_url],
             options,
-            timeout=min(self.policy.read_timeout_seconds, transfer.remaining()),
+            timeout=transfer.remaining(),
         )
         if not isinstance(gid, str) or re.fullmatch(r"[a-f0-9]{16}", gid) is None:
             raise StageExecutionError("source_unavailable", "aria2 returned an invalid transfer ID")
@@ -716,7 +746,7 @@ class _Aria2HttpAdapter:
                     "tellStatus",
                     gid,
                     ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
-                    timeout=min(self.policy.read_timeout_seconds, transfer.remaining()),
+                    timeout=transfer.remaining(),
                 )
                 completed = int(status["completedLength"])
                 if contiguous and payload.exists():
@@ -751,16 +781,17 @@ class _Aria2HttpAdapter:
                     raise _NativeHttpError(f"aria2 HTTP transfer failed with code {code}", code)
                 time.sleep(min(interval, transfer.remaining()))
         finally:
-            already_failing = sys.exc_info()[0] is not None
-            try:
-                stopped = self.session.remove(gid)
-                completed = int(stopped["completedLength"])
-                if contiguous and payload.exists():
-                    completed = max(completed, payload.stat().st_size)
-            except StageExecutionError:
-                self.session.close()
-                if not already_failing:
-                    raise
+            if not complete:
+                already_failing = sys.exc_info()[0] is not None
+                try:
+                    stopped = self.session.remove(gid)
+                    completed = int(stopped["completedLength"])
+                    if contiguous and payload.exists():
+                        completed = max(completed, payload.stat().st_size)
+                except StageExecutionError:
+                    self.session.close()
+                    if not already_failing:
+                        raise
             workspace.atomic_write_json(
                 state_path,
                 state.model_copy(update={"bytes_written": completed}).model_dump(mode="json"),
@@ -771,7 +802,7 @@ class _Aria2HttpAdapter:
         with payload.open("rb") as source:
             os.fsync(source.fileno())
         if etag or modified:
-            current = self.probe(url, artifact)
+            current = self.probe(url, artifact, transfer)
             current_etag, current_modified = self.validator(current)
             if current_etag != etag if etag else current_modified != modified:
                 raise _NativeHttpError("HTTP source validator changed during download")
@@ -784,6 +815,7 @@ class _Aria2HttpAdapter:
         progress.check_active()
         with self.hash_slots:
             own, verified = _hash_file(payload, artifact.source_hash)
+        self.session.discard_completed(gid)
         return DownloadTrace(
             method=DownloadMethod.WEB_SEED,
             requested_url=url,
@@ -891,9 +923,11 @@ class ArtifactDownloader:
                 max_workers=self._policy.max_workers, thread_name_prefix="artifact-download"
             ) as executor:
                 try:
-                    scheduled_downloads = tuple(
-                        executor.map(download_artifact, scheduled_artifacts)
-                    )
+                    pending = [
+                        executor.submit(download_artifact, artifact)
+                        for artifact in scheduled_artifacts
+                    ]
+                    scheduled_downloads = tuple(future.result() for future in as_completed(pending))
                 except BaseException:
                     if session is not None:
                         session.close()
@@ -1052,14 +1086,17 @@ class ArtifactDownloader:
         previous = self._load_state(state_path, workspace)
         initial_size = payload_path.stat().st_size if payload_path.exists() else 0
         # A native sparse file can have its final length long before it is complete.
-        # Only a declared hash or a durable completed receipt proves all bytes exist.
+        # A declared source hash proves completeness without a metadata request.
+        # Otherwise attempt() must revalidate even a previously completed payload.
         if (
             initial_size == artifact.size
             and payload_path.exists()
             and not Path(str(payload_path) + ".aria2").exists()
-            and (artifact.source_hash is not None or (previous and previous.confirmed_complete))
+            and artifact.source_hash is not None
         ):
-            own, verified = _hash_file(payload_path, artifact.source_hash)
+            progress.check_active()
+            with http.hash_slots:
+                own, verified = _hash_file(payload_path, artifact.source_hash)
             if verified:
                 url = previous.url if previous else artifact.source_urls[0]
                 return DownloadTrace(
@@ -1077,7 +1114,7 @@ class ArtifactDownloader:
         transfer = _HttpTransferProgress(
             artifact.artifact_id,
             artifact.size,
-            previous.bytes_written if previous else 0,
+            previous.bytes_written if previous and not previous.confirmed_complete else 0,
             self._policy,
             observer=self._progress_observer,
         )

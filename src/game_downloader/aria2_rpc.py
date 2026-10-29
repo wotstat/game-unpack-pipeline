@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +117,14 @@ class Aria2Session:
         process = self._process
         if process is None or process.poll() is not None:
             raise StageExecutionError("source_unavailable", "aria2 HTTP process is not running")
+        request_timeout = self._client.timeout
+        if timeout is not None:
+            request_timeout = httpx.Timeout(
+                connect=min(request_timeout.connect or timeout, timeout),
+                read=timeout,
+                write=min(request_timeout.write or timeout, timeout),
+                pool=min(request_timeout.pool or timeout, timeout),
+            )
         try:
             response = self._client.post(
                 f"http://127.0.0.1:{self._port}/jsonrpc",
@@ -125,7 +134,7 @@ class Aria2Session:
                     "method": f"aria2.{method}",
                     "params": [f"token:{self._secret}", *parameters],
                 },
-                timeout=self._client.timeout if timeout is None else timeout,
+                timeout=request_timeout,
             )
             response.raise_for_status()
             result = response.json()
@@ -138,6 +147,16 @@ class Aria2Session:
             # RPC diagnostics can contain source credentials. Never include them in errors.
             raise StageExecutionError("source_unavailable", "aria2 HTTP control returned an error")
         return result["result"]
+
+    def discard_completed(self, gid: str) -> None:
+        """Forget a known completed result without making bookkeeping fatal.
+
+        The caller already observed completion and verified the payload. This
+        mutation is sent once: a lost acknowledgement cannot restart a writer.
+        If it fails, aria2's bounded result cache is reclaimed with the process.
+        """
+        with suppress(StageExecutionError):
+            self.call("removeDownloadResult", gid, timeout=5)
 
     def remove(self, gid: str) -> dict[str, Any]:
         """Wait for all writers to stop before a caller touches a partial/control file."""

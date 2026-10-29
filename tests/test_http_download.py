@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from game_downloader.acquisition import ArtifactCorruptError
@@ -43,6 +44,8 @@ class Source(ThreadingHTTPServer):
     disconnect: bool
     disconnected: bool
     stall: bool
+    stall_metadata: bool
+    head_delay: float
     invalid_ranges: bool
     advertise_ranges: bool
     requests: list[tuple[str, str | None, str | None]]
@@ -60,6 +63,15 @@ class Handler(BaseHTTPRequestHandler):
     server: Source
 
     def do_HEAD(self) -> None:
+        if self.server.head_delay:
+            self.server.release.wait(self.server.head_delay)
+        if (
+            self.server.stall_metadata
+            and not self.server.no_head
+            and self.path.split("?", 1)[0] == "/client.bin"
+        ):
+            self.server.release.wait(10)
+            return
         if self.server.no_head:
             self.send_response(405)
             self.headers_for(0)
@@ -81,6 +93,9 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         data = self.server.data[path]
         raw_range = self.headers.get("Range")
+        if self.server.stall_metadata and raw_range == "bytes=0-0":
+            self.server.release.wait(10)
+            return
         validator = (
             self.headers.get("If-Match")
             or self.headers.get("If-Range")
@@ -191,6 +206,8 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     }
     server.etag = '"version-1"'
     server.disconnect = server.disconnected = server.stall = server.invalid_ranges = False
+    server.stall_metadata = False
+    server.head_delay = 0
     server.advertise_ranges = True
     server.chunk_delay = 0
     server.chunk_bytes = 16384
@@ -342,6 +359,75 @@ def test_http_control_tolerates_a_short_native_process_stall(
     assert child.poll() is not None
 
 
+@pytest.mark.parametrize("workers", [1, 16])
+@pytest.mark.parametrize("operation", ["addUri", "tellStatus"])
+def test_http_download_survives_a_busy_control_loop_within_its_progress_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+    workers: int,
+    operation: str,
+) -> None:
+    original = Aria2Session.call
+    submitted = 0
+    ready = threading.Event()
+    paused = threading.Event()
+    lock = threading.Lock()
+    timers: list[threading.Timer] = []
+
+    def resume() -> None:
+        for child in processes:
+            if child.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.kill(child.pid, signal.SIGCONT)
+
+    def call(
+        session: Aria2Session, method: str, *parameters: Any, timeout: float | None = None
+    ) -> Any:
+        nonlocal submitted
+        if method == operation and not paused.is_set():
+            if operation == "tellStatus":
+                assert ready.wait(3)
+            with lock:
+                if not paused.is_set():
+                    paused.set()
+                    os.kill(processes[-1].pid, signal.SIGSTOP)
+                    timer = threading.Timer(0.75, resume)
+                    timers.append(timer)
+                    timer.start()
+        result = original(session, method, *parameters, timeout=timeout)
+        if method == "addUri":
+            with lock:
+                submitted += 1
+                if submitted >= min(workers, 3):
+                    ready.set()
+        return result
+
+    monkeypatch.setattr(Aria2Session, "call", call)
+    workspace = Workspace(tmp_path)
+    try:
+        with source(certificate, monkeypatch) as server:
+            selected = plan(workspace, server)
+            result = ArtifactDownloader(
+                DownloadPolicy(
+                    max_workers=workers,
+                    http_attempts_per_url=1,
+                    read_timeout_seconds=0.25,
+                    http_no_progress_timeout_seconds=4,
+                )
+            ).download(selected, workspace)
+            assert_bytes(result, workspace, server)
+    finally:
+        resume()
+        for timer in timers:
+            timer.cancel()
+            timer.join()
+    assert paused.is_set()
+    assert submitted == 3, "A busy RPC must not replay addUri"
+    assert processes and all(child.poll() is not None for child in processes)
+
+
 def test_http_uses_one_native_process_and_revalidates_cached_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -360,6 +446,162 @@ def test_http_uses_one_native_process_and_revalidates_cached_hashes(
     assert len(processes) == 1, "HTTP payload must go through one shared aria2 process"
     assert all(child.poll() is not None for child in processes)
     assert "(100.0%)" in messages[-1]
+
+
+def test_http_completed_payload_survives_a_stalled_result_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+) -> None:
+    original = Aria2Session.call
+    completed: set[str] = set()
+    lock = threading.Lock()
+    timers: list[threading.Timer] = []
+
+    def resume() -> None:
+        for child in processes:
+            if child.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.kill(child.pid, signal.SIGCONT)
+
+    def call(
+        session: Aria2Session, method: str, *parameters: Any, timeout: float | None = None
+    ) -> Any:
+        result = original(session, method, *parameters, timeout=timeout)
+        if method == "tellStatus" and result["status"] == "complete":
+            with lock:
+                completed.add(parameters[0])
+                if len(completed) == 3 and not timers:
+                    os.kill(processes[-1].pid, signal.SIGSTOP)
+                    timer = threading.Timer(5.5, resume)
+                    timers.append(timer)
+                    timer.start()
+        return result
+
+    monkeypatch.setattr(Aria2Session, "call", call)
+    workspace = Workspace(tmp_path)
+    try:
+        with source(certificate, monkeypatch) as server:
+            result = ArtifactDownloader(policy()).download(plan(workspace, server), workspace)
+            assert_bytes(result, workspace, server)
+    finally:
+        resume()
+        for timer in timers:
+            timer.cancel()
+            timer.join()
+    assert timers, "The process must stall after all payload writers complete"
+    assert all(child.poll() is not None for child in processes)
+
+
+def test_http_sibling_hash_failure_stops_a_worker_waiting_for_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+) -> None:
+    original = Aria2Session.call
+    waiting = threading.Event()
+    large_gid: str | None = None
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.chunk_delay = 0.05
+        selected = plan(workspace, server)
+        client_key = selected.parts[0].artifacts[0].artifact_id.removeprefix("sha256:")
+        part = selected.parts[1]
+        broken = part.artifacts[0].model_copy(
+            update={"source_hash": SourceHash(algorithm="sha1", value="0" * 40)}
+        )
+        selected = selected.model_copy(
+            update={
+                "parts": (
+                    selected.parts[0],
+                    part.model_copy(update={"artifacts": (broken,)}),
+                    selected.parts[2],
+                )
+            }
+        )
+
+        def call(
+            session: Aria2Session, method: str, *parameters: Any, timeout: float | None = None
+        ) -> Any:
+            nonlocal large_gid
+            if method == "addUri":
+                result = original(session, method, *parameters, timeout=timeout)
+                if Path(parameters[1]["dir"]).name == client_key:
+                    large_gid = result
+                return result
+            if method == "tellStatus":
+                if parameters[0] == large_gid:
+                    waiting.set()
+                    # Model an outstanding RPC: stopping the native session must
+                    # unblock it, without waiting for the first scheduled file.
+                    deadline = time.monotonic() + 2
+                    while processes[-1].poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                else:
+                    assert waiting.wait(3)
+            return original(session, method, *parameters, timeout=timeout)
+
+        monkeypatch.setattr(Aria2Session, "call", call)
+        started = time.monotonic()
+        with pytest.raises(ArtifactCorruptError, match="source hash"):
+            ArtifactDownloader(DownloadPolicy(max_workers=3, http_attempts_per_url=1)).download(
+                selected, workspace
+            )
+        assert time.monotonic() - started < 1.5
+    assert waiting.is_set()
+    assert all(child.poll() is not None for child in processes)
+
+
+@pytest.mark.parametrize("validator", ["etag", "last-modified"])
+@pytest.mark.parametrize("change", ["unchanged", "changed", "removed"])
+def test_http_completed_partial_revalidates_its_source_before_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    validator: str,
+    change: str,
+) -> None:
+    from game_downloader import delivery
+
+    original = delivery._hash_file
+    interrupted = False
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        if validator == "last-modified":
+            server.etag = None
+            server.last_modified = "Sun, 01 Jan 2023 00:00:00 GMT"
+        selected = plan(workspace, server, hashes=False)
+        client_key = selected.parts[0].artifacts[0].artifact_id.removeprefix("sha256:")
+
+        def interrupt_hash(path: Path, source_hash: SourceHash | None) -> tuple[str, bool]:
+            nonlocal interrupted
+            if path.name == "payload.part" and path.parent.name == client_key and not interrupted:
+                interrupted = True
+                raise RuntimeError("interrupted before hashing a completed payload")
+            return original(path, source_hash)
+
+        monkeypatch.setattr(delivery, "_hash_file", interrupt_hash)
+        downloader = ArtifactDownloader(DownloadPolicy(max_workers=1, http_attempts_per_url=1))
+        with pytest.raises(RuntimeError, match="interrupted before hashing"):
+            downloader.download(selected, workspace)
+        partial = workspace.partial_root / client_key
+        assert json.loads((partial / "state.json").read_text())["confirmed_complete"]
+        assert not (partial / "payload.part.aria2").exists()
+        if change != "unchanged":
+            server.data["/client.bin"] = b"N" * len(server.data["/client.bin"])
+            if validator == "etag":
+                server.etag = '"version-2"' if change == "changed" else None
+            else:
+                server.last_modified = (
+                    "Mon, 02 Jan 2023 00:00:00 GMT" if change == "changed" else None
+                )
+        before = sum(path == "/client.bin" for path, _, _ in server.requests)
+        result = downloader.download(selected, workspace)
+        assert_bytes(result, workspace, server)
+        after = sum(path == "/client.bin" for path, _, _ in server.requests)
+        assert (after == before) == (change == "unchanged")
 
 
 def test_http_rejects_a_tampered_cached_cas_blob(
@@ -683,6 +925,66 @@ def test_http_read_timeout_is_bounded_separately_from_useful_progress_deadline(
                 )
             ).download(selected, workspace)
         assert time.monotonic() - started < 4
+    assert processes and all(child.poll() is not None for child in processes)
+
+
+@pytest.mark.parametrize("fallback", [False, True], ids=["head", "range-probe"])
+def test_http_metadata_wait_is_bounded_by_the_remaining_progress_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+    fallback: bool,
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.stall_metadata = True
+        server.no_head = fallback
+        server.head_delay = 0.9 if fallback else 0
+        selected = plan(workspace, server)
+        started = time.monotonic()
+        with pytest.raises(StageExecutionError):
+            ArtifactDownloader(
+                DownloadPolicy(
+                    max_workers=1,
+                    http_attempts_per_url=1,
+                    read_timeout_seconds=5,
+                    http_no_progress_timeout_seconds=1.2,
+                )
+            ).download(selected, workspace)
+        assert time.monotonic() - started < 2.5
+    assert processes and all(child.poll() is not None for child in processes)
+
+
+def test_http_unknown_add_uri_acknowledgement_is_not_replayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+) -> None:
+    original = httpx.Client.post
+    submitted: list[str] = []
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        selected = plan(workspace, server)
+        client_key = selected.parts[0].artifacts[0].artifact_id.removeprefix("sha256:")
+
+        def post(client: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            request = kwargs.get("json")
+            if isinstance(request, dict) and request.get("method") == "aria2.addUri":
+                key = Path(request["params"][2]["dir"]).name
+                submitted.append(key)
+                response = original(client, url, *args, **kwargs)
+                if key == client_key:
+                    raise httpx.ReadTimeout("lost acknowledgement: unit-control-secret")
+                return response
+            return original(client, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "post", post)
+        with pytest.raises(StageExecutionError, match="addUri: ReadTimeout") as failure:
+            ArtifactDownloader(policy()).download(selected, workspace)
+        assert "unit-control-secret" not in str(failure.value)
+        assert submitted.count(client_key) == 1
     assert processes and all(child.poll() is not None for child in processes)
 
 
