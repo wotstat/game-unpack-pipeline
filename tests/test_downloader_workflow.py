@@ -35,7 +35,10 @@ def test_download_job_exposes_every_pipeline_stage_as_one_step() -> None:
         "Readable · Generate engine stubs",
         "Readable · Finalize references",
     ]
-    assert all("if" not in step for step in stage_steps)
+    assert all("if" not in step for step in stage_steps[:2])
+    assert all(
+        step["if"] == "${{ !inputs.dedicated_download_control }}" for step in stage_steps[2:]
+    )
 
 
 def test_downloader_is_internal_to_the_primary_workflow() -> None:
@@ -98,7 +101,7 @@ def test_every_completed_pipeline_records_status_in_default_branch() -> None:
         "publish-wotstat-assets",
         "cleanup",
     }
-    assert job["if"] == "always()"
+    assert job["if"] == "always() && !inputs.dedicated_download_control"
     assert job["permissions"] == {"actions": "read", "contents": "write"}
     assert job["concurrency"] == {
         "group": "release-status-${{ github.repository }}",
@@ -136,6 +139,45 @@ def test_status_recording_and_telegram_notification_are_parallel_final_jobs() ->
     assert "notify" not in jobs["record-status"]["needs"]
     assert "cleanup" in jobs["notify"]["needs"]
     assert "cleanup" in jobs["record-status"]["needs"]
+
+
+def test_dedicated_control_is_opt_in_and_cannot_publish_or_change_release_status() -> None:
+    workflow = _workflow()
+    control = workflow[True]["workflow_dispatch"]["inputs"]["dedicated_download_control"]
+    assert control["type"] == "boolean"
+    assert control["default"] is False
+    jobs = workflow["jobs"]
+    guard = jobs["provision"]["steps"][0]
+    assert guard["if"] == "inputs.dedicated_download_control"
+    assert '"${SERVER}" == MSK-5' in guard["run"]
+    assert all(
+        f'"${{{name}}}" == false' in guard["run"]
+        for name in ("PUBLISH_SRC", "PUBLISH_GUI", "PUBLISH_ASSETS")
+    )
+    for name in ("record-status", "notify"):
+        assert "!inputs.dedicated_download_control" in jobs[name]["if"]
+    steps = jobs["download"]["steps"]
+    comparisons = [step for step in steps if step["name"].startswith("Dedicated control ")]
+    assert len(comparisons) == 4
+    for step in comparisons:
+        assert "inputs.dedicated_download_control" in step["if"]
+        assert "!cancelled()" in step["if"]
+        assert "steps.acquisition.conclusion == 'success'" in step["if"]
+
+
+def test_dedicated_control_preserves_the_vm_security_and_cleanup_boundary() -> None:
+    jobs = _workflow()["jobs"]
+    assert jobs["provision"]["environment"] == "aeza"
+    assert jobs["cleanup"]["environment"] == "aeza"
+    assert jobs["cleanup"]["if"] == "always() && needs.provision.result != 'skipped'"
+    assert jobs["download"]["steps"][0]["with"]["persist-credentials"] is False
+    guard = next(
+        step
+        for step in jobs["download"]["steps"]
+        if step["name"] == "Verify temporary VM protections"
+    )
+    assert "gup-emergency-self-destruct.timer" in guard["run"]
+    assert 'chains[name]["policy"] == "drop"' in guard["run"]
 
 
 def test_status_page_deploy_runs_after_status_commit() -> None:

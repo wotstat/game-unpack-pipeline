@@ -358,6 +358,7 @@ def test_workflows_keep_consumers_and_aeza_cleanup() -> None:
         "client_type",
         "languages",
         "detected_release_name",
+        "dedicated_download_control",
         "aeza_server",
         "publish_wot_src",
         "publish_wot_gui_assets",
