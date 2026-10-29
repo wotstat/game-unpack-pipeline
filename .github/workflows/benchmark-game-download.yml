@@ -1,9 +1,19 @@
 name: Benchmark game download
-run-name: Download benchmark · Aeza MSKs-5 · @${{ github.actor }}
+run-name: Download benchmark · Aeza ${{ inputs.aeza_server || 'MSKs-5' }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
     inputs:
+      aeza_server:
+        description: Aeza server plan
+        required: true
+        default: MSKs-5
+        type: choice
+        options:
+          - MSKs-5
+          - MSK-5
+          - WAWs-5
+          - CLTs-5
       repeats:
         description: Repetitions of each comparison
         required: true
@@ -43,6 +53,7 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
+  AEZA_SERVER: ${{ inputs.aeza_server || 'MSKs-5' }}
 
 jobs:
   provision:

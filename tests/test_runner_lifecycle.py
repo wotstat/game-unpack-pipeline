@@ -22,6 +22,7 @@ from scripts import runner_lifecycle as lifecycle
 ROOT = Path(__file__).parents[1]
 IDENTITY = lifecycle.ResourceIdentity("owner/pipeline", "12345", "2", "manual-12345-2")
 CONFIG = lifecycle.AezaConfig("dummy-private-api-key")
+PROFILES = tuple(lifecycle.AEZA_PRODUCTS.values())
 
 
 def server(**changes: Any) -> dict[str, Any]:
@@ -135,13 +136,44 @@ def test_both_aeza_list_and_detail_shapes_have_the_same_ownership() -> None:
     assert IDENTITY.server_name != other.server_name
 
 
-def test_delete_waits_for_actual_deletion_after_204() -> None:
+def test_reconciliation_discovers_every_approved_profile_independently_of_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AEZA_SERVER", "MSKs-5")
+    owned = [
+        server(id=index, productId=profile.product_id)
+        for index, profile in enumerate(PROFILES, start=1)
+    ]
+    rows = [
+        *owned,
+        server(name="unrelated"),
+        server(productId=999),
+        server(paymentTerm="month"),
+        server(status="deleted"),
+    ]
+    with patch.object(lifecycle, "aeza_items", return_value=rows):
+        assert lifecycle.owned_servers(CONFIG, IDENTITY) == owned
+        assert lifecycle.owned_servers(
+            CONFIG, IDENTITY, product=lifecycle.AEZA_PRODUCTS["WAWs-5"]
+        ) == [owned[2]]
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_delete_waits_for_actual_deletion_after_204(profile: lifecycle.AezaProduct) -> None:
     deleted: list[str] = []
     billing_ids: set[str] = set()
     with (
-        patch.object(lifecycle, "owned_servers", return_value=[server()]),
         patch.object(
-            lifecycle, "get_server", side_effect=[server(), server(), server(status="deleted")]
+            lifecycle, "owned_servers", return_value=[server(productId=profile.product_id)]
+        ),
+        patch.object(
+            lifecycle,
+            "get_server",
+            side_effect=[
+                server(productId=profile.product_id),
+                server(productId=profile.product_id),
+                server(productId=profile.product_id, status="deleted"),
+            ],
         ),
         patch.object(lifecycle.AezaConfig, "request", return_value=(204, None, {})) as request,
         patch.object(time, "sleep"),
@@ -184,7 +216,8 @@ def test_unknown_delete_result_is_reconciled() -> None:
     assert deleted == ["aeza-service:42"]
 
 
-def test_paid_order_is_hourly_and_post_is_never_replayed() -> None:
+@pytest.mark.parametrize("profile", PROFILES)
+def test_paid_order_is_hourly_and_post_is_never_replayed(profile: lifecycle.AezaProduct) -> None:
     with (
         patch.object(lifecycle, "aeza_items", return_value=[]),
         patch.object(
@@ -194,13 +227,13 @@ def test_paid_order_is_hourly_and_post_is_never_replayed() -> None:
         ) as request,
         pytest.raises(lifecycle.TransientLifecycleError),
     ):
-        lifecycle.create_server(CONFIG, IDENTITY, "17")
+        lifecycle.create_server(CONFIG, IDENTITY, "17", profile)
     request.assert_called_once()
     order = request.call_args.kwargs["body"]["orders"][0]
     assert order["term"] == "hour"
     assert order["termCount"] == 1
     assert order["autoProlong"] is True
-    assert order["productId"] == 157
+    assert order["productId"] == profile.product_id
     assert order["sshKeyIds"] == [17]
 
 
@@ -246,7 +279,10 @@ def test_cleanup_attempts_all_runners_after_cloud_failure(
     assert "vm_deleted=false\n" in output.read_text()
 
 
-def test_bootstrap_arms_timer_before_runner_and_keeps_secrets_out_of_argv() -> None:
+@pytest.mark.parametrize("profile", PROFILES)
+def test_bootstrap_arms_timer_before_runner_and_keeps_secrets_out_of_argv(
+    profile: lifecycle.AezaProduct,
+) -> None:
     configs = {role: f"secret-jit-{role}" for role in lifecycle.ROLES}
     script = lifecycle.render_bootstrap(
         IDENTITY,
@@ -255,11 +291,15 @@ def test_bootstrap_arms_timer_before_runner_and_keeps_secrets_out_of_argv() -> N
         datetime(2026, 10, 28, 21, tzinfo=UTC),
         ("https://github.com/actions/runner", "a" * 64, "2.338.0"),
         configs,
+        product=profile,
     )
     encoded = script.split("base64.b64decode('")[1].split("'")[0]
     files = json.loads(base64.b64decode(encoded))
     assert CONFIG.api_key not in script
     assert all(value not in script for value in configs.values())
+    assert json.loads(files["/etc/gup-emergency-self-destruct.json"])["product_id"] == (
+        profile.product_id
+    )
     assert (
         "OnCalendar=2026-10-28 21:00:00 UTC"
         in files["/etc/systemd/system/gup-emergency-self-destruct.timer"]
@@ -318,6 +358,7 @@ def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None
         "client_type",
         "languages",
         "detected_release_name",
+        "aeza_server",
         "publish_wot_src",
         "publish_wot_gui_assets",
         "publish_wotstat_assets",
@@ -360,6 +401,138 @@ def test_missing_github_app_token_does_not_block_cloud_cleanup(
     keys.assert_called_once()
     runners.assert_not_called()
     assert "vm_deleted=true\n" in output.read_text()
+
+
+def test_product_selection_defaults_to_moscow_and_rejects_arbitrary_plans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AEZA_SERVER", raising=False)
+    assert lifecycle.selected_product().name == "MSKs-5"
+    monkeypatch.setenv("AEZA_SERVER", "WAWs-5")
+    assert lifecycle.selected_product().product_id == 445
+    monkeypatch.setenv("AEZA_SERVER", "other-product")
+    with pytest.raises(lifecycle.LifecycleError, match="Unsupported"):
+        lifecycle.selected_product()
+
+
+def catalogue_product(profile: lifecycle.AezaProduct, **changes: Any) -> dict[str, Any]:
+    return {
+        "id": profile.product_id,
+        "name": profile.name,
+        "groupId": profile.group_id,
+        "isAvailable": True,
+        "parameters": {"cpu": 16, "ram": 32, "rom": 480, "net": 25000},
+        **changes,
+    }
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+@pytest.mark.parametrize("price_increase", [0, 1])
+def test_preflight_checks_each_selected_profiles_quote(
+    profile: lifecycle.AezaProduct, price_increase: int
+) -> None:
+    with (
+        patch.object(lifecycle, "aeza_items", return_value=[catalogue_product(profile)]),
+        patch.object(
+            lifecycle.AezaConfig,
+            "request",
+            side_effect=[
+                (
+                    200,
+                    {
+                        "totalPrice": profile.max_hourly_cents + price_increase,
+                        "availability": {"status": "ok"},
+                    },
+                    {},
+                ),
+                (200, {"balance": 10000}, {}),
+                (200, {"items": []}, {}),
+            ],
+        ) as request,
+    ):
+        if price_increase:
+            with pytest.raises(lifecycle.LifecycleError, match="hourly quote"):
+                lifecycle.preflight(CONFIG, profile)
+        else:
+            lifecycle.preflight(CONFIG, profile)
+    assert request.call_args_list[0].args == (
+        "GET",
+        f"services/orders/price?productId={profile.product_id}&paymentTerm=hour&termCount=1",
+    )
+
+
+@pytest.mark.parametrize(
+    "changes", [{"isAvailable": False}, {"groupId": 999}, {"parameters": {"rom": 30}}]
+)
+def test_preflight_rejects_unavailable_or_changed_product_before_allocation(
+    changes: dict[str, Any],
+) -> None:
+    profile = lifecycle.AEZA_PRODUCTS["WAWs-5"]
+    with (
+        patch.object(lifecycle, "aeza_items", return_value=[catalogue_product(profile, **changes)]),
+        patch.object(lifecycle.AezaConfig, "request") as request,
+        pytest.raises(lifecycle.LifecycleError),
+    ):
+        lifecycle.preflight(CONFIG, profile)
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "groups,terms,blocked",
+    [
+        ([2], ["hour"], False),
+        ([1], ["month"], False),
+        ([1], ["hour"], True),
+        ([], ["hour"], True),
+        ([1], [], True),
+    ],
+)
+def test_account_limit_applies_only_to_the_selected_group_and_payment_term(
+    groups: list[int], terms: list[str], blocked: bool
+) -> None:
+    profile = lifecycle.AEZA_PRODUCTS["MSK-5"]
+    with (
+        patch.object(lifecycle, "aeza_items", return_value=[catalogue_product(profile)]),
+        patch.object(
+            lifecycle.AezaConfig,
+            "request",
+            side_effect=[
+                (200, {"totalPrice": 76, "availability": {"status": "ok"}}, {}),
+                (200, {"balance": 10000}, {}),
+                (
+                    200,
+                    {
+                        "items": [
+                            {"groupIds": groups, "paymentTerms": terms, "used": 2, "available": 2}
+                        ]
+                    },
+                    {},
+                ),
+            ],
+        ),
+    ):
+        if blocked:
+            with pytest.raises(lifecycle.LifecycleError, match="account limit"):
+                lifecycle.preflight(CONFIG, profile)
+        else:
+            lifecycle.preflight(CONFIG, profile)
+
+
+@pytest.mark.parametrize(
+    "workflow_name", ["process-game-release", "check-game-releases", "benchmark-game-download"]
+)
+def test_all_manual_workflows_offer_the_same_server_choices_and_default(workflow_name: str) -> None:
+    document = yaml.safe_load((ROOT / f".github/workflows/{workflow_name}.yml").read_text())
+    choice = document[True]["workflow_dispatch"]["inputs"]["aeza_server"]
+    assert choice["type"] == "choice"
+    assert choice["default"] == "MSKs-5"
+    assert (
+        choice["options"]
+        == list(lifecycle.AEZA_PRODUCTS)
+        == ["MSKs-5", "MSK-5", "WAWs-5", "CLTs-5"]
+    )
+    assert document["env"]["AEZA_SERVER"] == "${{ inputs.aeza_server || 'MSKs-5' }}"
+    assert "inputs.aeza_server" in document["run-name"]
 
 
 def test_failed_ssh_bootstrap_redacts_encoded_secret_files() -> None:

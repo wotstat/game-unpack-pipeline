@@ -6,11 +6,28 @@
 
 ## 1. Aeza и ёмкость
 
-Используется только Moscow Shared **MSKs-5**, product ID `157`, group `2`:
-16 vCPU, 32 ГБ RAM, 480 ГБ NVMe и один публичный IPv4. ОС — `ubuntu_2404`.
+В формах `Process game release`, `Check game releases` и `Benchmark game download`
+поле `aeza_server` выбирает тариф по имени. По умолчанию остаётся **MSKs-5**.
+
+| Тариф | Локация | CPU mode | Максимальная котировка за час | Заявленный порт |
+| --- | --- | --- | ---: | ---: |
+| `MSKs-5` | Москва | Shared | €0,53 | до 25 Гбит/с |
+| `MSK-5` | Москва | Dedicated | €0,76 | до 25 Гбит/с |
+| `WAWs-5` | Варшава | Shared | €0,53 | до 25 Гбит/с |
+| `CLTs-5` | Шарлотт, США | Shared | €0,53 | до 25 Гбит/с |
+
+Все варианты: 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe и один публичный IPv4. ОС — `ubuntu_2404`.
 Заказ использует `term: hour`, `termCount: 1`, `autoProlong: true` и оплату с баланса.
-Текущая проверенная цена — €0,53/час. Preflight отклоняет более дорогую котировку,
-недоступный тариф, недостаточный баланс на четыре часа и заполненный shared/hourly limit.
+Preflight отклоняет более дорогую котировку, изменённые identity/группу/ёмкость,
+недоступный тариф, недостаточный баланс на четыре часа и заполненный применимый account limit.
+
+Имена, цены, доступность и порты сверены с публичными
+[продуктами](https://my.aeza.net/api/v2/services/products) и
+[группами Aeza](https://my.aeza.net/api/v2/services/groups) 29 октября 2026.
+`WAWs-5` добавлен как европейская альтернатива, `CLTs-5` — для сравнения с американским CDN.
+Порт не гарантирует скорость до CDN: нагрузка на хост и маршрут влияют на результат.
+На эту дату Франкфурт недоступен, а остальные доступные европейские Shared-локации
+указывают 1 Гбит/с. Измерения нашего downloader пока выполнены только на `MSKs-5`.
 
 В аккаунте на 28 октября 2026 доступны две одновременные почасовые VM.
 При нехватке лимита target завершается ошибкой; существующий checker повторяет его
@@ -96,8 +113,9 @@ caller, включая техническую доступность `GH_APP_PRI
 
 ## 4. Repository Variables
 
-Обязательна только прежняя `GH_APP_CLIENT_ID`. Тариф, ОС и URL Aeza API зафиксированы
-в lifecycle-коде. Credentials и account identifiers не хранятся в коде или variables.
+Обязательна только прежняя `GH_APP_CLIENT_ID`. Разрешённые тарифы, ОС и URL Aeza API зафиксированы
+в lifecycle-коде; тариф выбирается input `aeza_server`. Credentials и account identifiers
+не хранятся в коде или variables.
 
 ## 5. Telegram-уведомления
 
@@ -156,7 +174,8 @@ ClickHouse и S3 в Pages workflow недоступны.
 ## Диагностика скорости скачивания
 
 `Actions → Benchmark game download → Run workflow` на `main` арендует отдельную почасовую
-MSKs-5 с production firewall и четырёхчасовым kill switch. Workflow получает один Acquisition
+VM выбранного `aeza_server` (`MSKs-5` по умолчанию) с production firewall и четырёхчасовым
+kill switch. Workflow получает один Acquisition
 Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним соединением на файл, aria2 с Range
 и production downloader. Наборы включают 16 файлов 64–256 МиБ и четыре файла от 512 МиБ.
 Порядок инструментов меняется между повторами; каждый инструмент получает пустой каталог,
@@ -199,7 +218,8 @@ Workflow автоматически запускается каждый час �
 Для ручной проверки открыть `Actions → Check game releases → Run workflow` на `main`. Форма
 предоставляет отдельный checkbox для каждого из семи targets. По умолчанию включены все target-чекбоксы
 и `dispatch_pipelines`, поэтому ручной запуск сразу запустит основной workflow для всех найденных новых версий.
-Все targets используют Aeza Moscow Shared MSKs-5.
+Поле `aeza_server` задаёт общий тариф для всех запускаемых targets; по умолчанию и в cron
+используется Aeza Moscow Shared `MSKs-5`.
 
 - `action=none` — release name совпадает со status;
 - `action=would-dispatch` — найдено расхождение, но dry-run ничего не запускает;

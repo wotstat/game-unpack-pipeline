@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza MSKs-5 · @${{ github.actor }}
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza ${{ inputs.aeza_server || 'MSKs-5' }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -35,6 +35,16 @@ on:
         required: false
         default: ""
         type: string
+      aeza_server:
+        description: Aeza server plan
+        required: true
+        default: MSKs-5
+        type: choice
+        options:
+          - MSKs-5
+          - MSK-5
+          - WAWs-5
+          - CLTs-5
       publish_wot_src:
         description: Publish the snapshot to wot-src
         required: true
@@ -55,6 +65,7 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: "1"
+  AEZA_SERVER: ${{ inputs.aeza_server || 'MSKs-5' }}
 
 jobs:
   provision:

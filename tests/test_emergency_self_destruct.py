@@ -7,12 +7,15 @@ from unittest.mock import patch
 import pytest
 
 from scripts import emergency_self_destruct as emergency
+from scripts import runner_lifecycle as lifecycle
 
 
 @pytest.mark.parametrize("status", ["active", "deleted", "missing", "wrong_owner"])
+@pytest.mark.parametrize("profile", lifecycle.AEZA_PRODUCTS.values())
 def test_emergency_deletion_checks_identity_and_confirms_async_completion(
     tmp_path: Path,
     status: str,
+    profile: lifecycle.AezaProduct,
 ) -> None:
     config = tmp_path / "config.json"
     config.write_text(
@@ -21,13 +24,13 @@ def test_emergency_deletion_checks_identity_and_confirms_async_completion(
                 "api_key": "dummy-secret",
                 "server_id": "42",
                 "server_name": "owned-attempt",
-                "product_id": 157,
+                "product_id": profile.product_id,
             }
         )
     )
     server = {
         "name": "other" if status == "wrong_owner" else "owned-attempt",
-        "productId": 157,
+        "productId": profile.product_id,
         "paymentTerm": "hour",
         "status": status,
     }

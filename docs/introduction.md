@@ -13,7 +13,7 @@ schedule каждый час на :23 UTC
   → lightweight-проверка всех targets
   → для новых версий workflow_dispatch основного pipeline
 workflow_dispatch
-  → одна почасовая Aeza MSKs-5 VM; одноразовый SSH bootstrap и egress-only nftables
+  → одна почасовая Aeza VM выбранного тарифа; одноразовый SSH bootstrap и egress-only nftables
   → локальный systemd kill switch удаляет VM после четырёх часов
   → четыре изолированных repository-level JIT runner на этой VM
   → встроенный download job собирает полный sealed GameSnapshot
@@ -160,15 +160,18 @@ snapshot до стадии `snapshot` и предоставляет только
 | `client_type` | `sd` или `hd` |
 | `languages` | Коды через запятую или отдельное значение `ALL`; по умолчанию `ALL` |
 | `detected_release_name` | Необязательная подсказка checker; в прямом ручном запуске остаётся пустой |
+| `aeza_server` | `MSKs-5` (по умолчанию), `MSK-5`, `WAWs-5` или `CLTs-5` |
 | `publish_wot_src` | Включить публикацию в `wot-src`; по умолчанию `true` |
 | `publish_wot_gui_assets` | Включить публикацию в `wot-gui-assets`; по умолчанию `true` |
 | `publish_wotstat_assets` | Включить временную загрузку через `wotstat-assets-uploader`; по умолчанию `true` |
 
 Каждый consumer можно независимо отключить для ручного рерана. Если отключить все три, workflow только
-соберёт и проверит snapshot, после чего удалит VM. Используется только Aeza Moscow
-Shared MSKs-5: 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe, Ubuntu 24.04, €0,53/час.
-Provision проверяет свободный shared/hourly slot, баланс и котировку до заказа.
-Прерываемых VM, выбора региона и немедленных автоматических rerun нет.
+соберёт и проверит snapshot, после чего удалит VM. По умолчанию используется Aeza Moscow
+Shared MSKs-5 за €0,53/час. Можно выбрать Moscow Dedicated MSK-5 за €0,76/час,
+Warsaw Shared WAWs-5 или Charlotte Shared CLTs-5 за €0,53/час.
+Все варианты: 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe, Ubuntu 24.04.
+Provision проверяет доступность, ёмкость, применимые account limits, баланс и котировку до заказа.
+Выбор ручной; тарифы и ограничения описаны в [setup.md](setup.md#1-aeza-и-ёмкость).
 
 ## Проверка новых версий
 
@@ -180,7 +183,8 @@ chain для объявленной default language, затем сравнив�
 Scheduled run каждый час проверяет все семь targets и автоматически dispatch'ит основной
 pipeline для новых версий. Ручной запуск сохраняет семь независимых whitelist-чекбоксов; по
 умолчанию включены все семь targets и `dispatch_pipelines`, поэтому найденные новые версии сразу
-запускают production pipeline. Все targets используют тот же Aeza MSKs-5.
+запускают production pipeline. Ручной `aeza_server` передаётся во все targets;
+cron использует `MSKs-5`.
 Для dry-run нужно явно выключить `dispatch_pipelines`.
 
 При разрешённом dispatch checker сначала исключает уже ожидающий или работающий pipeline того же

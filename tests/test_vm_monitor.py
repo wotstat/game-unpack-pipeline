@@ -39,11 +39,14 @@ def test_download_failure_finishes_observation_without_waiting_for_skipped_consu
 
 
 @pytest.mark.parametrize("state", ["active", "deleted", "missing", "expired"])
+@pytest.mark.parametrize("profile", lifecycle.AEZA_PRODUCTS.values())
 def test_monitor_cancels_only_for_vm_loss_or_absolute_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     state: str,
+    profile: lifecycle.AezaProduct,
 ) -> None:
+    monkeypatch.setenv("AEZA_SERVER", profile.name)
     monkeypatch.setenv("GITHUB_WATCH_TOKEN", "dummy-token")
     deadline = datetime.now(UTC) + timedelta(hours=-1 if state == "expired" else 1)
     monkeypatch.setenv("AEZA_VM_DEADLINE", deadline.isoformat())
@@ -51,7 +54,7 @@ def test_monitor_cancels_only_for_vm_loss_or_absolute_deadline(
     args = argparse.Namespace(instance_key=IDENTITY.instance_key, server_id="42", report=report)
     server = {
         "name": IDENTITY.server_name,
-        "product": {"id": 157},
+        "product": {"id": profile.product_id},
         "paymentTerm": "hour",
         "status": state,
         "secureParameters": {"password": "do-not-log"},
@@ -73,6 +76,7 @@ def test_monitor_cancels_only_for_vm_loss_or_absolute_deadline(
     text = report.read_text()
     assert "do-not-log" not in text
     assert "server_id" not in text
+    assert json.loads(text)["product"] == profile.name
     assert json.loads(text)["reason"] == (
         "jobs_completed"
         if state == "active"
@@ -80,3 +84,35 @@ def test_monitor_cancels_only_for_vm_loss_or_absolute_deadline(
         if state == "expired"
         else "vm_unavailable"
     )
+
+
+def test_watchdog_rejects_another_approved_profile_for_the_same_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AEZA_SERVER", "WAWs-5")
+    monkeypatch.setenv("GITHUB_WATCH_TOKEN", "dummy-token")
+    monkeypatch.setenv("AEZA_VM_DEADLINE", (datetime.now(UTC) + timedelta(hours=1)).isoformat())
+    args = argparse.Namespace(
+        instance_key=IDENTITY.instance_key, server_id="42", report=tmp_path / "report.json"
+    )
+    with (
+        patch.object(
+            lifecycle.AezaConfig, "from_environment", return_value=lifecycle.AezaConfig("dummy")
+        ),
+        patch.object(lifecycle, "build_identity", return_value=IDENTITY),
+        patch.object(monitor, "attempt_jobs", return_value=[job("download", "in_progress")]),
+        patch.object(
+            lifecycle,
+            "get_server",
+            return_value={
+                "name": IDENTITY.server_name,
+                "productId": 157,
+                "paymentTerm": "hour",
+                "status": "active",
+            },
+        ),
+        patch.object(lifecycle, "write_output") as output,
+        pytest.raises(lifecycle.LifecycleError, match="ownership"),
+    ):
+        monitor.watch(args)
+    output.assert_any_call("cancel_required", "true")
