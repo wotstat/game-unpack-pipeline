@@ -40,12 +40,6 @@ target, client type, languages,
 выбор `aeza_server` и три независимых переключателя `publish_wot_src`,
 `publish_wot_gui_assets` и `publish_wotstat_assets`, включённых по умолчанию.
 
-Ручной диагностический `.github/workflows/benchmark-game-download.yml` сравнивает curl,
-aria2 и внутренний downloader на одинаковом подмножестве pinned файлов `wot-eu`.
-Он использует обычный lifecycle временной VM, проверяет размеры/source hash/SHA-256,
-сохраняет performance artifacts и всегда выполняет cleanup. Snapshot consumer и status
-production-версий в этом workflow не вызываются. `aeza_server` предоставляет тот же список тарифов.
-
 ## Границы компонентов
 
 - `src/game_downloader`, `contracts/v1`, `config`: resolve WGUS/LSTUS, download/verify,
@@ -71,6 +65,8 @@ workflow или отдельный репозиторий и не перенос
 
 - Единственный production workflow — `.github/workflows/process-game-release.yml`; checker только
   dispatch'ит его и не создаёт downloader Run самостоятельно.
+  Остальные workflows — checker, `reconcile-release-resources.yml` и `deploy-status-page.yml`.
+  Локальные проверки выполняются через `./scripts/check.sh`.
 - `.github/workflows/check-game-releases.yml` запускается по cron `23 * * * *` и вручную. Cron
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
@@ -84,8 +80,8 @@ workflow или отдельный репозиторий и не перенос
   Preflight проверяет identity, группу, ёмкость и доступность выбранного профиля,
   котировку не выше €0,76/час для `MSK-5` или €0,53/час для остальных, баланс на четыре часа
   и применимые к выбранной группе и почасовой оплате account limits.
-  При нехватке лимитов действует существующий checker retry. Автоматического переключения
-  тарифов, preemptible, немедленных полных rerun и Selectel fallback нет.
+  При нехватке лимитов действует checker retry. Тариф выбирается вручную; автоматического
+  переключения тарифов нет.
 - Runtime watchdog на GitHub-hosted runner отслеживает VM до завершения downloader и
   включённых consumer в пределах исходного четырёхчасового дедлайна. Артефакты
   `aeza-attempt-<run_id>-<attempt>-provision|monitor` содержат только provider, тариф,
@@ -111,11 +107,14 @@ workflow или отдельный репозиторий и не перенос
   расписание повторов.
   Новая версия запускается сразу и при ошибке начинает новый цикл, успех очищает retry state.
   Прямой ручной запуск не ограничен расписанием; ошибка с известной версией учитывается в нём.
+  Неопубликованный неуспешный `last_run` с известной версией требует явный `retry`;
+  восстановление retry по старым status-файлам не поддерживается.
 - `.github/workflows/deploy-status-page.yml` checkout'ит default branch с полной историей, строит
   `_site` из текущих status и предыдущих версий тех же файлов, создаёт Shields endpoint для каждого
   target и публикует GitHub Pages artifact. Бейдж показывает последнюю успешную `readable_version`,
   а цвет — результат последнего run. Основной workflow вызывает Pages прямо после status commit,
-  включая token-originated runs;
+  включая token-originated runs; история использует полный `last_run`, старые status-файлы
+  только с `release_name` пропускаются.
   `push` и `workflow_dispatch` используются для изменений страницы и ручной пересборки. История не
   дублируется в накопительном JSON или отдельных run-файлах.
 - При чтении checker runs/jobs для Pages HTTP 502 допускает не более четырёх попыток на запрос
@@ -132,8 +131,8 @@ workflow или отдельный репозиторий и не перенос
   Python опрашивает точный completedLength, сохраняет общий полезный прогресс между
   попытками, делает fsync и проверяет source hash/SHA-256 перед CAS commit; хеширование
   ограничено четырьмя workers. Resume требует совпадающий strong ETag/Last-Modified
-  и родной .aria2 bitmap либо проверенный legacy sequential prefix. Sparse payload без
-  control-файла перезапускается. Старые Python Range partials перезапускаются однократно.
+  и родной .aria2 bitmap. Незавершённый payload без control-файла перезапускается.
+  Импорт partial-файлов прежнего HTTP downloader не поддерживается.
   RPC слушает только loopback, одноразовый token хранится в private config 0600/dir 0700,
   отсутствует в argv/env/logs. Любая ошибка или отмена останавливает и дожидается aria2.
 - Targets: `wot-eu`, `wot-na`, `wot-asia`, `wot-common-test`, `wot-cn`, `mt-ru`,

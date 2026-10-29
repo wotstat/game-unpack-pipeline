@@ -277,14 +277,13 @@ def _load_retry(
     payload: object, published_release: str | None, last_run: PipelineRun | None
 ) -> ReleaseRetry | None:
     if payload is None:
-        # Old status documents have only the most recent attempt as a time anchor.
         if (
             last_run is not None
             and last_run.result != "success"
             and last_run.release_name is not None
             and last_run.release_name != published_release
         ):
-            return ReleaseRetry(last_run.release_name, last_run.completed_at, last_run.completed_at)
+            raise ReleaseStatusError("unpublished failed release requires retry state")
         return None
     if not isinstance(payload, dict) or set(payload) != {
         "release_name",

@@ -32,7 +32,6 @@ game-downloader-pyc = "game_downloader.pyc_decompiler:main"
 dev = [
   "mypy>=1.15,<2",
   "pytest>=8.3,<9",
-  "pytest-cov>=6,<8",
   "ruff>=0.9,<1",
   "types-defusedxml>=0.7.0,<1",
   "types-jsonschema>=4.23,<5",
@@ -50,9 +49,6 @@ packages = ["src/game_downloader"]
 addopts = "--strict-config --strict-markers"
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = [
-  "live: opt-in test that calls official WGUS/LSTUS endpoints",
-]
 
 [tool.ruff]
 target-version = "py313"

@@ -253,23 +253,17 @@ def test_unknown_or_published_release_failure_preserves_pending_retry(tmp_path: 
         assert load_status(tmp_path, "wot-eu").retry == pending
 
 
-def test_old_status_uses_last_failure_as_initial_retry_anchor(tmp_path: Path) -> None:
+def test_unpublished_failed_release_requires_explicit_retry_state(tmp_path: Path) -> None:
     write_document(tmp_path, "wot-eu", successful_status())
     first = datetime(2026, 8, 30, 10, tzinfo=UTC)
     record_attempt(tmp_path, first)
     path = tmp_path / "wot-eu.json"
-    legacy = json.loads(path.read_text())
-    del legacy["retry"]
-    write_document(tmp_path, "wot-eu", legacy)
+    incomplete = json.loads(path.read_text())
+    del incomplete["retry"]
+    write_document(tmp_path, "wot-eu", incomplete)
 
-    result = compare_release(
-        tmp_path, target="wot-eu", current_release_name="2.3.2.5500", now=first
-    )
-    assert result.next_retry_at == "2026-08-30T22:00:00Z"
-    record_attempt(tmp_path, first + timedelta(days=1), run_id=102)
-    retry = load_status(tmp_path, "wot-eu").retry
-    assert retry is not None
-    assert retry.first_failed_at == "2026-08-30T10:00:00Z"
+    with pytest.raises(ReleaseStatusError, match="requires retry state"):
+        compare_release(tmp_path, target="wot-eu", current_release_name="2.3.2.5500", now=first)
 
 
 @pytest.mark.parametrize(

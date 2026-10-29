@@ -604,7 +604,6 @@ class _Aria2HttpAdapter:
         payload.unlink(missing_ok=True)
         state.unlink(missing_ok=True)
         Path(str(payload) + ".aria2").unlink(missing_ok=True)
-        (payload.parent / "range-state.json").unlink(missing_ok=True)
 
     def attempt(
         self,
@@ -636,16 +635,9 @@ class _Aria2HttpAdapter:
         native = (
             same_source and previous is not None and previous.native_control and control.exists()
         )
-        prefix = (
-            same_source
-            and previous is not None
-            and not previous.native_control
-            and payload.exists()
-            and payload.stat().st_size == previous.bytes_written
-        )
-        if not (native or prefix):
+        if not native:
             self.clear(payload, state_path)
-        resumed = previous.bytes_written if (native or prefix) and previous else 0
+        resumed = previous.bytes_written if native and previous else 0
         progress.update(artifact.artifact_id, resumed)
         transfer.update(resumed)
         state = _PartialState(
@@ -687,9 +679,9 @@ class _Aria2HttpAdapter:
         options: dict[str, Any] = {
             "dir": str(payload.parent),
             "out": payload.name,
-            "continue": "true" if native or prefix else "false",
+            "continue": "true" if native else "false",
             "use-head": "true"
-            if (native or prefix or segments > 1) and metadata.request.method == "HEAD"
+            if (native or segments > 1) and metadata.request.method == "HEAD"
             else "false",
             "split": str(segments),
             "max-connection-per-server": str(segments),
@@ -1049,7 +1041,6 @@ class ArtifactDownloader:
             initial_size == artifact.size
             and payload_path.exists()
             and not Path(str(payload_path) + ".aria2").exists()
-            and not (payload_path.parent / "range-state.json").exists()
             and (artifact.source_hash is not None or (previous and previous.confirmed_complete))
         ):
             own, verified = _hash_file(payload_path, artifact.source_hash)

@@ -1078,7 +1078,6 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--run-id")
     remove.add_argument("--run-attempt")
     remove.add_argument("--server-id", default="")
-    remove.add_argument("--diagnostics", action="store_true")
     for role in ROLES:
         remove.add_argument(f"--{role}-runner-id", default="")
     remove.set_defaults(handler=cleanup)

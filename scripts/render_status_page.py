@@ -96,7 +96,6 @@ class TargetInfo:
 @dataclass(frozen=True)
 class GitCommit:
     sha: str
-    committed_at: datetime
     paths: tuple[str, ...]
 
 
@@ -108,11 +107,10 @@ class HistoryEntry:
     readable_version: str | None
     started_at: datetime
     completed_at: datetime
-    duration_seconds: int | None
-    run_id: int | None
-    run_attempt: int | None
-    run_url: str | None
-    legacy: bool = False
+    duration_seconds: int
+    run_id: int
+    run_attempt: int
+    run_url: str
 
 
 @dataclass(frozen=True)
@@ -171,57 +169,29 @@ def _status_commits(repository_root: Path) -> tuple[GitCommit, ...]:
     output = _git(
         repository_root,
         "log",
-        "--format=@@COMMIT@@%H%x09%cI",
+        "--format=@@COMMIT@@%H",
         "--name-only",
         "--",
         "status",
     )
     commits: list[GitCommit] = []
     sha: str | None = None
-    committed_at: datetime | None = None
     paths: list[str] = []
 
     def append_current() -> None:
-        if sha is not None and committed_at is not None:
-            commits.append(GitCommit(sha, committed_at, tuple(paths)))
+        if sha is not None:
+            commits.append(GitCommit(sha, tuple(paths)))
 
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if line.startswith("@@COMMIT@@"):
             append_current()
-            marker = line.removeprefix("@@COMMIT@@")
-            sha, timestamp = marker.split("\t", 1)
-            committed_at = _parse_timestamp(timestamp)
+            sha = line.removeprefix("@@COMMIT@@")
             paths = []
         elif line.startswith("status/") and line.endswith(".json"):
             paths.append(line)
     append_current()
     return tuple(commits)
-
-
-def _legacy_history_entry(
-    target: str,
-    payload: object,
-    committed_at: datetime,
-) -> HistoryEntry | None:
-    if not isinstance(payload, dict) or set(payload) != {"release_name"}:
-        return None
-    release_name = payload["release_name"]
-    if not isinstance(release_name, str) or not release_name.strip():
-        return None
-    return HistoryEntry(
-        target=target,
-        result="success",
-        release_name=release_name,
-        readable_version=None,
-        started_at=committed_at,
-        completed_at=committed_at,
-        duration_seconds=None,
-        run_id=None,
-        run_attempt=None,
-        run_url=None,
-        legacy=True,
-    )
 
 
 def collect_history(
@@ -244,10 +214,6 @@ def collect_history(
                 payload = json.loads(_git(repository_root, "show", f"{commit.sha}:{path}"))
             except (json.JSONDecodeError, subprocess.CalledProcessError):
                 continue
-            legacy = _legacy_history_entry(target, payload, commit.committed_at)
-            if legacy is not None:
-                entries.append(legacy)
-                continue
             try:
                 historical = parse_status_document(payload, f"{commit.sha}:{path}")
             except ReleaseStatusError:
@@ -255,26 +221,14 @@ def collect_history(
             if historical.last_run is not None:
                 entries.append(_history_from_run(target, historical.last_run))
 
-    rich_keys: set[tuple[str, int, int]] = set()
-    rich_version_times: list[tuple[str, str | None, datetime]] = []
+    seen: set[tuple[str, int, int]] = set()
     deduplicated: list[HistoryEntry] = []
     for entry in sorted(entries, key=lambda item: item.completed_at, reverse=True):
-        if entry.run_id is not None and entry.run_attempt is not None:
-            key = (entry.target, entry.run_id, entry.run_attempt)
-            if key in rich_keys:
-                continue
-            rich_keys.add(key)
-            rich_version_times.append((entry.target, entry.release_name, entry.completed_at))
-            deduplicated.append(entry)
+        key = (entry.target, entry.run_id, entry.run_attempt)
+        if key in seen:
             continue
-        duplicates_rich_entry = any(
-            target == entry.target
-            and release_name == entry.release_name
-            and abs((completed_at - entry.completed_at).total_seconds()) <= 6 * 60 * 60
-            for target, release_name, completed_at in rich_version_times
-        )
-        if not duplicates_rich_entry:
-            deduplicated.append(entry)
+        seen.add(key)
+        deduplicated.append(entry)
     return tuple(deduplicated[:limit])
 
 
@@ -341,9 +295,7 @@ def _format_short_date(value: datetime) -> str:
     return f"{local.day} {SHORT_MONTHS[local.month - 1]}, {local:%H:%M}"
 
 
-def _format_duration(seconds: int | None) -> str:
-    if seconds is None:
-        return "длительность недоступна"
+def _format_duration(seconds: int) -> str:
     minutes, remaining = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
@@ -463,14 +415,12 @@ def _render_product(
 def _history_description(entry: HistoryEntry) -> str:
     raw_version = entry.readable_version or entry.release_name
     if raw_version is None:
-        if entry.result == "success" or entry.legacy:
+        if entry.result == "success":
             return "Обработка завершена, версия не указана"
         if entry.result == "cancelled":
             return "Обработка была отменена, версия неизвестна"
         return "Не удалось завершить обработку, версия неизвестна"
     version = html.escape(raw_version)
-    if entry.legacy:
-        return f"Успешно обработана версия {version}"
     if entry.result == "success":
         return f"Успешно обработана версия {version}"
     if entry.result == "cancelled":
@@ -484,14 +434,9 @@ def _render_history(entries: tuple[HistoryEntry, ...]) -> str:
     rows: list[str] = []
     for entry in entries:
         target = TARGET_BY_ID[entry.target]
-        if entry.run_url is not None and entry.run_id is not None:
-            run = f'<a href="{html.escape(entry.run_url, quote=True)}">#{entry.run_id}</a>' + (
-                f" · попытка {entry.run_attempt}"
-                if entry.run_attempt and entry.run_attempt > 1
-                else ""
-            )
-        else:
-            run = "старый формат статуса"
+        run = f'<a href="{html.escape(entry.run_url, quote=True)}">#{entry.run_id}</a>' + (
+            f" · попытка {entry.run_attempt}" if entry.run_attempt > 1 else ""
+        )
         rows.append(
             f"""<li class="timeline-item timeline-item--{entry.result}">
               <span class="timeline-node" aria-hidden="true"></span>
