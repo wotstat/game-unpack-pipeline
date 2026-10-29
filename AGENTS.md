@@ -187,7 +187,13 @@ workflow или отдельный репозиторий и не перенос
 - Основной workflow отправляет после cleanup компактный HTML Telegram-отчёт с человекочитаемым
   target, downloader `readable_version` в формате `x.x.x.x #xxx`, client type, языками и consumer
   state. Введённый `ALL` сохраняется в заголовке буквально, а последняя строка показывает полную
-  длительность run рядом со ссылкой. Reconciler отправляет recovery alert только при машинно
+  длительность run рядом со ссылкой. Стоимость VM текущей попытки читается после удаления
+  из выполненных Aeza `buy`/`prolong` с учётом бонусного баланса и возвратов `refund`/`compensation`,
+  только по service ID этой попытки. Отдельный best-effort шаг передаёт в Environment `telegram`
+  только сумму в евроцентах и признак окончательности; ключ остаётся в Environment `aeza`.
+  Недоступный billing не мешает cleanup/отчёту и показывается как «стоимость недоступна»;
+  если удаление VM не подтверждено, сумма помечается как уже начисленная.
+  Reconciler отправляет recovery alert только при машинно
   подтверждённом `deleted_count > 0`.
 - Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
   `cancel-in-progress: false`; status и Pages deployment также сериализованы без отмены. Uploader не

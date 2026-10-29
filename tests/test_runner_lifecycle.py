@@ -111,14 +111,18 @@ class HttpJsonTests(unittest.TestCase):
     ],
 )
 def test_delete_rejects_explicit_service_without_ownership(changes: dict[str, Any]) -> None:
+    billing_ids: set[str] = set()
     with (
         patch.object(lifecycle, "owned_servers", return_value=[]),
         patch.object(lifecycle, "get_server", return_value=server(**changes)),
         patch.object(lifecycle.AezaConfig, "request") as request,
         pytest.raises(lifecycle.LifecycleError, match="ownership"),
     ):
-        lifecycle.delete_servers(CONFIG, IDENTITY, "42", deleted_resources=[])
+        lifecycle.delete_servers(
+            CONFIG, IDENTITY, "42", deleted_resources=[], billing_service_ids=billing_ids
+        )
     request.assert_not_called()
+    assert billing_ids == set()
 
 
 def test_both_aeza_list_and_detail_shapes_have_the_same_ownership() -> None:
@@ -133,6 +137,7 @@ def test_both_aeza_list_and_detail_shapes_have_the_same_ownership() -> None:
 
 def test_delete_waits_for_actual_deletion_after_204() -> None:
     deleted: list[str] = []
+    billing_ids: set[str] = set()
     with (
         patch.object(lifecycle, "owned_servers", return_value=[server()]),
         patch.object(
@@ -141,9 +146,27 @@ def test_delete_waits_for_actual_deletion_after_204() -> None:
         patch.object(lifecycle.AezaConfig, "request", return_value=(204, None, {})) as request,
         patch.object(time, "sleep"),
     ):
-        lifecycle.delete_servers(CONFIG, IDENTITY, deleted_resources=deleted)
+        lifecycle.delete_servers(
+            CONFIG, IDENTITY, deleted_resources=deleted, billing_service_ids=billing_ids
+        )
     assert deleted == ["aeza-service:42"]
+    assert billing_ids == {"42"}
     request.assert_called_once()
+
+
+@pytest.mark.parametrize("existing", [None, server(status="deleted")])
+def test_already_deleted_vm_keeps_its_billing_identity(existing: dict[str, Any] | None) -> None:
+    billing_ids: set[str] = set()
+    with (
+        patch.object(lifecycle, "owned_servers", return_value=[]),
+        patch.object(lifecycle, "get_server", return_value=existing),
+        patch.object(lifecycle.AezaConfig, "request") as request,
+    ):
+        lifecycle.delete_servers(
+            CONFIG, IDENTITY, "42", deleted_resources=[], billing_service_ids=billing_ids
+        )
+    assert billing_ids == {"42"}
+    request.assert_not_called()
 
 
 def test_unknown_delete_result_is_reconciled() -> None:
@@ -194,12 +217,21 @@ def test_aeza_pagination_does_not_lose_attempt_resources() -> None:
     assert "offset=1" in request.call_args.args[1]
 
 
-def test_cleanup_attempts_all_runners_after_cloud_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cleanup_attempts_all_runners_after_cloud_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("GITHUB_APP_TOKEN", "dummy")
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    def fail_delete(*_args: Any, billing_service_ids: set[str], **_kwargs: Any) -> None:
+        billing_service_ids.add("42")
+        raise lifecycle.LifecycleError("API down")
+
     with (
         patch.object(lifecycle.AezaConfig, "from_environment", return_value=CONFIG),
         patch.object(lifecycle, "build_identity", return_value=IDENTITY),
-        patch.object(lifecycle, "delete_servers", side_effect=lifecycle.LifecycleError("API down")),
+        patch.object(lifecycle, "delete_servers", side_effect=fail_delete),
         patch.object(lifecycle, "delete_ssh_keys") as keys,
         patch.object(lifecycle, "delete_github_runners") as runners,
     ):
@@ -210,6 +242,8 @@ def test_cleanup_attempts_all_runners_after_cloud_failure(monkeypatch: pytest.Mo
             lifecycle.cleanup(args)
     assert runners.call_count == 4
     keys.assert_not_called()
+    assert 'billing_service_ids=["42"]\n' in output.read_text()
+    assert "vm_deleted=false\n" in output.read_text()
 
 
 def test_bootstrap_arms_timer_before_runner_and_keeps_secrets_out_of_argv() -> None:
@@ -304,9 +338,12 @@ def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None
 
 
 def test_missing_github_app_token_does_not_block_cloud_cleanup(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GITHUB_APP_TOKEN", raising=False)
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     with (
         patch.object(lifecycle.AezaConfig, "from_environment", return_value=CONFIG),
         patch.object(lifecycle, "build_identity", return_value=IDENTITY),
@@ -322,6 +359,7 @@ def test_missing_github_app_token_does_not_block_cloud_cleanup(
     servers.assert_called_once()
     keys.assert_called_once()
     runners.assert_not_called()
+    assert "vm_deleted=true\n" in output.read_text()
 
 
 def test_failed_ssh_bootstrap_redacts_encoded_secret_files() -> None:

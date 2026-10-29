@@ -50,6 +50,7 @@ class TelegramReportTests(unittest.TestCase):
                     f'{"a" * 40}">updated</a>',
                     "🖼 <code>wot-gui-assets</code> — unchanged",
                     "🗄 <code>wotstat-assets-uploader</code> — uploaded",
+                    "💶 VM — стоимость недоступна",
                     "",
                     '<a href="https://github.com/wotstat/game-unpack-pipeline/actions/runs/1">'
                     "Open pipeline run →</a>",
@@ -157,6 +158,38 @@ class TelegramReportTests(unittest.TestCase):
             )
         )
         self.assertNotIn("⏱", message)
+
+    def test_report_shows_billed_vm_cost_before_duration(self) -> None:
+        message = render_message(
+            {
+                "PIPELINE_RUN_URL": "https://github.com/example/run",
+                "VM_COST_CENTS": "106",
+                "VM_COST_STATE": "final",
+            }
+        )
+        self.assertIn("💶 VM — <b>€1.06</b>\n\n", message)
+
+    def test_report_marks_a_nonfinal_vm_charge(self) -> None:
+        message = render_message(
+            {
+                "PIPELINE_RUN_URL": "https://github.com/example/run",
+                "VM_COST_CENTS": "53",
+                "VM_COST_STATE": "accrued",
+            }
+        )
+        self.assertIn("💶 VM — <b>€0.53</b> (начислено; удаление VM не подтверждено)", message)
+
+    def test_report_does_not_show_unknown_or_malformed_cost_as_zero(self) -> None:
+        for value in ("", "-53", "<b>53</b>"):
+            message = render_message(
+                {
+                    "PIPELINE_RUN_URL": "https://github.com/example/run",
+                    "VM_COST_CENTS": value,
+                    "VM_COST_STATE": "final",
+                }
+            )
+            self.assertIn("💶 VM — стоимость недоступна", message)
+            self.assertNotIn("€0.00", message)
 
 
 if __name__ == "__main__":

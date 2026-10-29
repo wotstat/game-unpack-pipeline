@@ -197,16 +197,29 @@ def delete_servers(
     server_id: str = "",
     *,
     deleted_resources: list[str],
+    billing_service_ids: set[str] | None = None,
 ) -> None:
     candidates = {str(item["id"]) for item in owned_servers(config, identity)}
+    if billing_service_ids is not None:
+        billing_service_ids.update(candidates)
     if server_id:
         candidates.add(server_id)
     for candidate in sorted(candidates):
         server = get_server(config, candidate)
-        if server is None or server.get("status") == "deleted":
+        if server is None:
+            # An explicit ID comes from this attempt's provision output. Aeza may
+            # already have purged the VM; retain its ledger identity for reporting.
+            if billing_service_ids is not None:
+                billing_service_ids.add(candidate)
+            continue
+        if server.get("status") == "deleted":
+            if billing_service_ids is not None and server_has_ownership_markers(server, identity):
+                billing_service_ids.add(candidate)
             continue
         if not server_has_ownership_markers(server, identity):
             raise LifecycleError("Refusing to delete Aeza VM: ownership markers do not match")
+        if billing_service_ids is not None:
+            billing_service_ids.add(candidate)
         # DELETE may have succeeded; confirm state instead of assuming it.
         with suppress(TransientLifecycleError):
             config.request("DELETE", f"services/{candidate}", expected_statuses=(204, 404))
@@ -461,13 +474,22 @@ def cleanup(arguments: argparse.Namespace) -> None:
     app_token = os.environ.get("GITHUB_APP_TOKEN", "").strip()
     failures: list[str] = []
     deleted: list[str] = []
+    billing_service_ids: set[str] = set()
+    vm_deleted = False
     # Delete billed resources first. One failed GitHub call must never prevent
     # the cloud cleanup, and a cloud failure must not skip runner cleanup.
     try:
-        delete_servers(config, identity, arguments.server_id, deleted_resources=deleted)
+        delete_servers(
+            config,
+            identity,
+            arguments.server_id,
+            deleted_resources=deleted,
+            billing_service_ids=billing_service_ids,
+        )
     except Exception as error:  # continue every cleanup despite a malformed provider response
         failures.append(str(error) if isinstance(error, LifecycleError) else type(error).__name__)
     else:
+        vm_deleted = True
         try:
             delete_ssh_keys(config, identity, deleted)
         except Exception as error:
@@ -489,6 +511,8 @@ def cleanup(arguments: argparse.Namespace) -> None:
                 str(error) if isinstance(error, LifecycleError) else type(error).__name__
             )
     write_output("deleted_count", len(deleted))
+    write_output("billing_service_ids", json.dumps(sorted(billing_service_ids)))
+    write_output("vm_deleted", "true" if vm_deleted else "false")
     append_summary(f"- Resources deleted: `{len(deleted)}`")
     if failures:
         raise LifecycleError("Cleanup incomplete: " + " | ".join(failures))
