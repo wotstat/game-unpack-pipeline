@@ -35,7 +35,11 @@ class Aria2Session:
         self._directory = tempfile.TemporaryDirectory(prefix="aria2-http-", dir=root)
         self._secret = secrets.token_hex(32)
         self._process: subprocess.Popen[bytes] | None = None
-        self._client = httpx.Client(trust_env=False, timeout=2)
+        # aria2 serves RPC from the same event loop as DNS and disk work. A busy
+        # healthy process can take longer than two seconds to answer.
+        self._client = httpx.Client(
+            trust_env=False, timeout=httpx.Timeout(read_timeout, connect=connect_timeout)
+        )
         self._close_lock = threading.Lock()
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -99,7 +103,7 @@ class Aria2Session:
                         "source_unavailable", "aria2 HTTP process failed to start"
                     )
                 try:
-                    self.call("getVersion")
+                    self.call("getVersion", timeout=min(2, deadline - time.monotonic()))
                     return self
                 except StageExecutionError:
                     time.sleep(0.02)
@@ -108,7 +112,7 @@ class Aria2Session:
             self.close()
             raise
 
-    def call(self, method: str, *parameters: Any) -> Any:
+    def call(self, method: str, *parameters: Any, timeout: float | None = None) -> Any:
         process = self._process
         if process is None or process.poll() is not None:
             raise StageExecutionError("source_unavailable", "aria2 HTTP process is not running")
@@ -121,12 +125,14 @@ class Aria2Session:
                     "method": f"aria2.{method}",
                     "params": [f"token:{self._secret}", *parameters],
                 },
+                timeout=self._client.timeout if timeout is None else timeout,
             )
             response.raise_for_status()
             result = response.json()
-        except (httpx.HTTPError, ValueError, RuntimeError):
+        except (httpx.HTTPError, ValueError, RuntimeError) as error:
             raise StageExecutionError(
-                "source_unavailable", "aria2 HTTP control request failed"
+                "source_unavailable",
+                f"aria2 HTTP control request failed ({method}: {type(error).__name__})",
             ) from None
         if not isinstance(result, dict) or "error" in result or "result" not in result:
             # RPC diagnostics can contain source credentials. Never include them in errors.
@@ -135,20 +141,28 @@ class Aria2Session:
 
     def remove(self, gid: str) -> dict[str, Any]:
         """Wait for all writers to stop before a caller touches a partial/control file."""
-        result: dict[str, Any] = self.call("tellStatus", gid)
-        if result["status"] in {"active", "waiting", "paused"}:
-            self.call("forceRemove", gid)
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                result = self.call("tellStatus", gid)
-                if result["status"] in {"complete", "error", "removed"}:
-                    break
-                time.sleep(0.02)
-            else:
-                self.close()
+        deadline = time.monotonic() + 5
+
+        def remaining() -> float:
+            value = deadline - time.monotonic()
+            if value <= 0:
                 raise StageExecutionError("source_unavailable", "aria2 HTTP transfer did not stop")
-        self.call("removeDownloadResult", gid)
-        return result
+            return value
+
+        try:
+            result: dict[str, Any] = self.call("tellStatus", gid, timeout=remaining())
+            if result["status"] in {"active", "waiting", "paused"}:
+                self.call("forceRemove", gid, timeout=remaining())
+                while True:
+                    result = self.call("tellStatus", gid, timeout=remaining())
+                    if result["status"] in {"complete", "error", "removed"}:
+                        break
+                    time.sleep(min(0.02, remaining()))
+            self.call("removeDownloadResult", gid, timeout=remaining())
+            return result
+        except StageExecutionError:
+            self.close()
+            raise
 
     def close(self) -> None:
         with self._close_lock:

@@ -245,6 +245,7 @@ class _DownloadProgress:
         self._clock = clock
         self._lock = threading.Lock()
         self._failure: tuple[str, str] | None = None
+        self._failure_cause: BaseException | None = None
         started_at = clock()
         self._last_report_at = started_at
         self._last_report_downloaded = -1
@@ -269,10 +270,15 @@ class _DownloadProgress:
                 f"{_format_bytes(downloaded)} / {_format_bytes(self._total_bytes)} available"
             )
 
-    def fail(self, error: StageExecutionError) -> None:
+    def fail(self, error: StageExecutionError, *, cause: BaseException | None = None) -> None:
         with self._lock:
             if self._failure is None:
                 self._failure = (error.error.code, str(error))
+                self._failure_cause = cause if cause is not None else error
+
+    def failure_cause(self) -> BaseException | None:
+        with self._lock:
+            return self._failure_cause
 
     def check_active(self) -> None:
         with self._lock:
@@ -693,7 +699,12 @@ class _Aria2HttpAdapter:
         contiguous = segments == 1 and (not native or bool(previous and previous.sequential_prefix))
         state = state.model_copy(update={"sequential_prefix": contiguous})
         workspace.atomic_write_json(state_path, state.model_dump(mode="json"))
-        gid = self.session.call("addUri", [final_url], options)
+        gid = self.session.call(
+            "addUri",
+            [final_url],
+            options,
+            timeout=min(self.policy.read_timeout_seconds, transfer.remaining()),
+        )
         if not isinstance(gid, str) or re.fullmatch(r"[a-f0-9]{16}", gid) is None:
             raise StageExecutionError("source_unavailable", "aria2 returned an invalid transfer ID")
         completed, observed, complete = resumed, resumed, False
@@ -705,6 +716,7 @@ class _Aria2HttpAdapter:
                     "tellStatus",
                     gid,
                     ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
+                    timeout=min(self.policy.read_timeout_seconds, transfer.remaining()),
                 )
                 completed = int(status["completedLength"])
                 if contiguous and payload.exists():
@@ -870,7 +882,8 @@ class ArtifactDownloader:
                     progress.fail(
                         exc
                         if isinstance(exc, StageExecutionError)
-                        else StageExecutionError("source_unavailable", "HTTP download interrupted")
+                        else StageExecutionError("source_unavailable", "HTTP download interrupted"),
+                        cause=exc,
                     )
                     raise
 
@@ -884,6 +897,9 @@ class ArtifactDownloader:
                 except BaseException:
                     if session is not None:
                         session.close()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    if cause := progress.failure_cause():
+                        raise cause from None
                     raise
         downloads_by_id = {item.artifact.artifact_id: item for item in scheduled_downloads}
         downloaded = tuple(downloads_by_id[artifact.artifact_id] for artifact in artifacts)

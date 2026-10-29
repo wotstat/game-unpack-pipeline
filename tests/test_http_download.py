@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import signal
 import socket
 import ssl
 import subprocess
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +20,7 @@ from typing import Any
 import pytest
 
 from game_downloader.acquisition import ArtifactCorruptError
+from game_downloader.aria2_rpc import Aria2Session
 from game_downloader.delivery import ArtifactDownloader, DownloadPolicy
 from game_downloader.models import (
     AcquisitionArtifact,
@@ -305,6 +309,37 @@ def assert_bytes(result: Any, workspace: Workspace, server: Source) -> None:
         expected = server.data["/" + item.artifact.path.utf8]
         assert workspace.blobs.path_for(item.blob_sha256).read_bytes() == expected
         assert item.blob_sha256 == hashlib.sha256(expected).hexdigest()
+
+
+@pytest.mark.parametrize("request_timeout", [None, 0.1], ids=["busy-process", "caller-deadline"])
+def test_http_control_tolerates_a_short_native_process_stall(
+    tmp_path: Path, processes: list[subprocess.Popen[bytes]], request_timeout: float | None
+) -> None:
+    with Aria2Session(
+        tmp_path, executable="aria2c", workers=16, connect_timeout=2, read_timeout=6
+    ) as session:
+        child = processes[-1]
+
+        def resume() -> None:
+            with suppress(ProcessLookupError):
+                os.kill(child.pid, signal.SIGCONT)
+
+        os.kill(child.pid, signal.SIGSTOP)
+        timer = threading.Timer(2.5, resume)
+        timer.start()
+        try:
+            if request_timeout is not None:
+                with pytest.raises(StageExecutionError, match="getVersion: ReadTimeout"):
+                    session.call("getVersion", timeout=request_timeout)
+            else:
+                with ThreadPoolExecutor(max_workers=16) as executor:
+                    results = list(executor.map(lambda _: session.call("getVersion"), range(16)))
+                assert all("version" in result for result in results)
+        finally:
+            resume()
+            timer.cancel()
+            timer.join()
+    assert child.poll() is not None
 
 
 def test_http_uses_one_native_process_and_revalidates_cached_hashes(

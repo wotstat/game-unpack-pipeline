@@ -34,9 +34,12 @@ def rental_cost_cents(config: lifecycle.AezaConfig, service_ids: set[str]) -> in
         if str(item.get("serviceId")) not in service_ids or item.get("status") != "performed":
             continue
         kind = item.get("type")
+        amount = _cents(item.get("amount")) + _cents(item.get("bonusAmount", 0))
+        # Aeza records a zero-value order beside the actual hourly prolong debit.
+        if kind == "order" and amount == 0:
+            continue
         if kind not in {"buy", "prolong", "refund", "compensation"}:
             raise ValueError("Unexpected service billing operation")
-        amount = _cents(item.get("amount")) + _cents(item.get("bonusAmount", 0))
         transaction_id = str(item.get("id", ""))
         if not re.fullmatch(r"[1-9][0-9]*", transaction_id):
             raise ValueError("Invalid billing transaction")
@@ -47,7 +50,7 @@ def rental_cost_cents(config: lifecycle.AezaConfig, service_ids: set[str]) -> in
             continue
         seen[transaction_id] = entry
         if kind in {"buy", "prolong"}:
-            charges += 1
+            charges += int(amount > 0)
             total += amount
         else:
             total -= amount

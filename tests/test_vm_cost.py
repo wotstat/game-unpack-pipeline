@@ -54,6 +54,22 @@ def test_cost_accounts_for_bonus_spend_and_service_refunds(monkeypatch: pytest.M
     assert cost.rental_cost_cents(CONFIG, {"42"}) == 83
 
 
+def test_cost_ignores_zero_order_bookkeeping_before_hourly_debit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [transaction(1, "order", 0), transaction(2, "prolong", -53)]
+    monkeypatch.setattr(lifecycle, "aeza_items", lambda _config, _path: rows)
+    assert cost.rental_cost_cents(CONFIG, {"42"}) == 53
+
+
+@pytest.mark.parametrize("kind", ["order", "buy"])
+def test_zero_bookkeeping_without_a_rental_debit_is_not_free_rent(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(lifecycle, "aeza_items", lambda _config, _path: [transaction(1, kind, 0)])
+    assert cost.rental_cost_cents(CONFIG, {"42"}) is None
+
+
 def test_missing_charges_do_not_become_a_free_vm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lifecycle, "aeza_items", lambda _config, _path: [])
     assert cost.rental_cost_cents(CONFIG, {"42"}) is None
@@ -64,6 +80,7 @@ def test_missing_charges_do_not_become_a_free_vm(monkeypatch: pytest.MonkeyPatch
     "rows",
     [
         [transaction(1, "edit_resources")],
+        [transaction(1, "order", 53)],
         [transaction(1), transaction(1, amount=106)],
         [transaction(1), transaction(2, "refund", 106)],
     ],
