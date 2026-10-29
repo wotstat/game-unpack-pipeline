@@ -351,7 +351,7 @@ def test_provider_error_never_logs_payload_with_credentials() -> None:
     assert CONFIG.api_key not in str(raised.value)
 
 
-def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None:
+def test_workflows_keep_consumers_and_aeza_cleanup() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/process-game-release.yml").read_text())
     assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {
         "target",
@@ -374,7 +374,7 @@ def test_workflows_keep_consumers_and_remove_selectel_retry_controller() -> None
     reconciler = yaml.safe_load(
         (ROOT / ".github/workflows/reconcile-release-resources.yml").read_text()
     )
-    assert "retry-preempted" not in reconciler["jobs"]
+    assert reconciler[True]["workflow_run"]["workflows"] == ["Process game release"]
     assert reconciler["concurrency"]["cancel-in-progress"] is False
 
 
@@ -518,9 +518,7 @@ def test_account_limit_applies_only_to_the_selected_group_and_payment_term(
             lifecycle.preflight(CONFIG, profile)
 
 
-@pytest.mark.parametrize(
-    "workflow_name", ["process-game-release", "check-game-releases", "benchmark-game-download"]
-)
+@pytest.mark.parametrize("workflow_name", ["process-game-release", "check-game-releases"])
 def test_all_manual_workflows_offer_the_same_server_choices_and_default(workflow_name: str) -> None:
     document = yaml.safe_load((ROOT / f".github/workflows/{workflow_name}.yml").read_text())
     choice = document[True]["workflow_dispatch"]["inputs"]["aeza_server"]

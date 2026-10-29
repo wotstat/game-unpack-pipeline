@@ -303,8 +303,7 @@ Cleanup выполняется с `always()` и подтверждает `delete
 Для token-originated runs сохраняется явный dispatch reconciler. Recovery alert
 отправляется только при подтверждённом `deleted_count > 0`.
 
-GitHub App, consumer contracts, secrets uploader, Telegram и Git-история status остаются
-прежними. Неуспешные версии повторяются существующим checker по retry state.
+Неуспешные версии повторяются checker по retry state.
 
 ## Настройка и проверка
 

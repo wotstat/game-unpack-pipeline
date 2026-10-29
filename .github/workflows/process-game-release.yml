@@ -437,7 +437,6 @@ jobs:
           --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
           --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}"
           --server-id "${SERVER_ID}"
-          --diagnostics
 
       - name: Cancel workflow after VM interruption
         if: >-
@@ -539,38 +538,20 @@ jobs:
         env:
           GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           INSTANCE_KEY: manual-${{ github.run_id }}-${{ github.run_attempt }}
-          PROVISION_RESULT: ${{ needs.provision.result }}
           DOWNLOADER_RUNNER_ID: ${{ needs.provision.outputs.downloader_runner_id }}
-          WOT_GUI_ASSETS_PUBLISH_RESULT: ${{ needs.publish-wot-gui-assets.result }}
-          WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_gui_assets && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_GUI_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wot_gui_assets_runner_id }}
-          WOT_SRC_PUBLISH_RESULT: ${{ needs.publish-wot-src.result }}
-          WOT_SRC_PUBLISH_EXPECTED_RESULT: ${{ inputs.publish_wot_src && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOT_SRC_RUNNER_ID: ${{ needs.provision.outputs.wot_src_runner_id }}
-          WOTSTAT_ASSETS_UPLOAD_RESULT: ${{ needs.publish-wotstat-assets.result }}
-          WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT: ${{ inputs.publish_wotstat_assets && needs.download.outputs.snapshot_path != '' && 'success' || 'skipped' }}
           WOTSTAT_ASSETS_RUNNER_ID: ${{ needs.provision.outputs.wotstat_assets_runner_id }}
           SERVER_ID: ${{ needs.provision.outputs.server_id }}
           AEZA_API_KEY: ${{ secrets.AEZA_API_KEY }}
-          DOWNLOAD_RESULT: ${{ needs.download.result }}
-        run: |
-          set -Eeuo pipefail
-          diagnostics=()
-          if [[ "${PROVISION_RESULT}" != success \
-            || "${DOWNLOAD_RESULT}" != success \
-            || "${WOT_GUI_ASSETS_PUBLISH_RESULT}" != "${WOT_GUI_ASSETS_PUBLISH_EXPECTED_RESULT}" \
-            || "${WOT_SRC_PUBLISH_RESULT}" != "${WOT_SRC_PUBLISH_EXPECTED_RESULT}" \
-            || "${WOTSTAT_ASSETS_UPLOAD_RESULT}" != "${WOTSTAT_ASSETS_UPLOAD_EXPECTED_RESULT}" ]]; then
-            diagnostics+=(--diagnostics)
-          fi
-          python3 scripts/runner_lifecycle.py cleanup \
-            --instance-key "${INSTANCE_KEY}" \
-            --downloader-runner-id "${DOWNLOADER_RUNNER_ID}" \
-            --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}" \
-            --wot-src-runner-id "${WOT_SRC_RUNNER_ID}" \
-            --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}" \
-            --server-id "${SERVER_ID}" \
-            "${diagnostics[@]}"
+        run: >-
+          python3 scripts/runner_lifecycle.py cleanup
+          --instance-key "${INSTANCE_KEY}"
+          --downloader-runner-id "${DOWNLOADER_RUNNER_ID}"
+          --wot-gui-assets-runner-id "${WOT_GUI_ASSETS_RUNNER_ID}"
+          --wot-src-runner-id "${WOT_SRC_RUNNER_ID}"
+          --wotstat-assets-runner-id "${WOTSTAT_ASSETS_RUNNER_ID}"
+          --server-id "${SERVER_ID}"
 
       - name: Read this VM's billed rental cost
         if: always()

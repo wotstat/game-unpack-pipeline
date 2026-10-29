@@ -451,7 +451,7 @@ def test_http_never_adopts_sparse_partial_without_its_native_control_file(
         assert any(p == "/client.bin" for p, _, _ in server.requests)
 
 
-def test_http_imports_validated_sequential_prefix_from_previous_transport(
+def test_http_restarts_partial_from_a_previous_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, certificate: tuple[Path, Path]
 ) -> None:
     workspace = Workspace(tmp_path)
@@ -474,8 +474,8 @@ def test_http_imports_validated_sequential_prefix_from_previous_transport(
         )
         result = ArtifactDownloader(policy()).download(selected, workspace)
         assert_bytes(result, workspace, server)
-        assert any(
-            r is not None and not r.startswith("bytes=0-")
+        assert all(
+            r is None or r.startswith("bytes=0-")
             for p, r, _ in server.requests
             if p == "/client.bin"
         )

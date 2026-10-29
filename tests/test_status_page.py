@@ -39,11 +39,7 @@ def test_build_site_uses_real_status_files_and_git_history(tmp_path: Path) -> No
     current_run_ids = {
         status.last_run.run_id for status in statuses.values() if status.last_run is not None
     }
-    historical_run = next(
-        entry
-        for entry in history
-        if entry.run_id is not None and entry.run_id not in current_run_ids
-    )
+    historical_run = next(entry for entry in history if entry.run_id not in current_run_ids)
     assert f"#{historical_run.run_id}" in page
     assert 'class="overall overall--' in page
     assert 'class="theme-toggle"' in page
