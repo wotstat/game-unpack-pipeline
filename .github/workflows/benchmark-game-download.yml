@@ -23,6 +23,11 @@ on:
         required: false
         default: ""
         type: string
+      loopback_control:
+        description: Also isolate disk and client overhead with local HTTPS and tmpfs
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -72,6 +77,7 @@ jobs:
       REPEATS: ${{ inputs.repeats }}
       DIAGNOSE: ${{ inputs.diagnose }}
       BASELINE_SHA: ${{ inputs.baseline_sha }}
+      LOOPBACK_CONTROL: ${{ inputs.loopback_control }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -124,6 +130,9 @@ jobs:
           options=()
           if [[ "${DIAGNOSE}" == true ]]; then
             options+=(--diagnose)
+          fi
+          if [[ "${LOOPBACK_CONTROL}" == true ]]; then
+            options+=(--loopback-control)
           fi
           uv run --no-sync python -m scripts.benchmark_download run \
             --work "${BENCHMARK_ROOT}" \
