@@ -357,9 +357,9 @@ def doctor(
     aria2 = shutil.which("aria2c")
     checks.append(
         {
-            "detail": aria2 or "not installed; HTTPS web-seed transport remains available",
-            "name": "aria2-torrent-fallback",
-            "ok": True,
+            "detail": aria2 or "aria2c is required for HTTP and torrent downloads",
+            "name": "aria2-download",
+            "ok": aria2 is not None,
         }
     )
 

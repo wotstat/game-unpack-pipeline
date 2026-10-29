@@ -49,6 +49,7 @@ def test_download_maps_both_interfaces_to_the_internal_cli(
     )
     _write_executable(fake_bin / "java", "exit 0\n")
     _write_executable(fake_bin / "7zz", "exit 0\n")
+    _write_executable(fake_bin / "aria2c", "exit 0\n")
     _write_executable(
         fake_bin / "uv",
         'printf \'%s\\n\' "$@" >"${DOWNLOAD_TEST_ARGUMENTS:?}"\n',

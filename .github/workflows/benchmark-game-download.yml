@@ -14,7 +14,7 @@ on:
           - "2"
           - "3"
       diagnose:
-        description: Also compare 1 and 16 file workers
+        description: Also compare 1 and 4 file workers
         required: true
         default: false
         type: boolean
@@ -28,6 +28,15 @@ on:
         required: true
         default: false
         type: boolean
+      baseline_workers:
+        description: File workers for the historical downloader
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "4"
+          - "16"
+          - "1"
 
 permissions:
   contents: read
@@ -77,6 +86,7 @@ jobs:
       REPEATS: ${{ inputs.repeats }}
       DIAGNOSE: ${{ inputs.diagnose }}
       BASELINE_SHA: ${{ inputs.baseline_sha }}
+      BASELINE_WORKERS: ${{ inputs.baseline_workers }}
       LOOPBACK_CONTROL: ${{ inputs.loopback_control }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -109,7 +119,9 @@ jobs:
           version: "0.11.28"
           python-version: "3.13.14"
       - name: Install pinned downloader
-        run: uv sync --frozen --no-dev
+        run: uv sync --frozen --all-groups
+      - name: Verify native HTTP hashes, resume and timeouts on Linux
+        run: uv run --no-sync pytest -q tests/test_http_download.py
       - name: Record host and tool versions
         shell: bash
         run: |
@@ -139,6 +151,7 @@ jobs:
             --reports "${BENCHMARK_REPORTS}" \
             --repeats "${REPEATS}" \
             --baseline-sha "${BASELINE_SHA}" \
+            --baseline-workers "${BASELINE_WORKERS}" \
             "${options[@]}"
       - name: Upload measurements
         if: always()

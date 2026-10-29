@@ -97,7 +97,7 @@ def test_doctor_checks_contracts_and_workspace(tmp_path: Path) -> None:
     assert {check["name"] for check in report["checks"]} == {
         "archive-tool",
         "actionscript-decompiler",
-        "aria2-torrent-fallback",
+        "aria2-download",
         "python-3.13",
         "contracts",
         "pyc-decompiler",
@@ -118,6 +118,19 @@ def test_doctor_json_remains_machine_readable_on_failure(tmp_path: Path) -> None
     report = json.loads(result.output)
     assert report["ok"] is False
     assert next(check for check in report["checks"] if check["name"] == "contracts")["ok"] is False
+
+
+def test_doctor_requires_aria2_for_http_downloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    original = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "aria2c" else original(name))
+    result = CliRunner().invoke(cli, ["doctor", "--data-root", str(tmp_path), "--json"])
+    assert result.exit_code == 3
+    check = next(c for c in json.loads(result.output)["checks"] if c["name"] == "aria2-download")
+    assert check["ok"] is False
 
 
 def test_cli_runs_production_resolve_seam_and_reuses_the_pin(

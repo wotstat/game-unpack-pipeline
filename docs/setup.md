@@ -159,12 +159,18 @@ Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним со�
 выбранных файлов без URL query/credentials. У downloader его внутренняя проверка входит во
 время передачи. После измерений cleanup подтверждает удаление VM, временного SSH-ключа и runner.
 Workflow не публикует snapshot и не меняет production status.
-Production download и обычный benchmark используют четыре file worker. `diagnose: true`
-дополнительно сравнивает один и 16 file workers. Optional `baseline_sha` принимает полный SHA
-из истории `main` и запускает прежний downloader с 16 workers на той же VM и тех же файлах.
+HTTP payload production downloader передаёт одному процессу aria2 с 16 file workers на
+MSKs-5. Хеши и запись в CAS остаются ответственностью Python. Обычный benchmark использует
+16 workers; `diagnose: true` дополнительно сравнивает один и четыре workers.
+Optional `baseline_sha` принимает полный SHA из истории `main` и запускает прежний downloader
+на той же VM и тех же файлах. `baseline_workers` задаёт его file budget (4 по умолчанию).
 Исторический импорт проверяется явно; source hash и SHA-256 должны совпасть для всех вариантов.
 Reconciler также обрабатывает завершившиеся benchmark runs.
 Benchmark сохраняет семейства адресов и fingerprints DNS-ответов CDN без записи IP VM.
+Перед замерами один разрешённый public IP каждого CDN hostname закрепляется в `/etc/hosts`
+временной VM. Все клиенты используют системный resolver; после измерений удаляются только
+собственные строки benchmark. Это исключает выбор разных DNS endpoints между инструментами.
+Перед скоростными замерами workflow запускает native HTTP acceptance tests на Linux.
 `loopback_control: true` дополнительно сравнивает curl, aria2 с Range и downloader
 на тех же проверенных байтах через HTTPS на `127.0.0.1`. Источник держит только
 выбранные файлы в памяти; отдельный сертификат доверен только дочерним benchmark-процессам.

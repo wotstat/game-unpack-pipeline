@@ -1,8 +1,25 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
 
-from scripts.benchmark_download import loopback_source
+from scripts.benchmark_download import _HOSTS_SCRIPT, loopback_source
+
+
+def test_cdn_pinning_removes_only_its_own_hosts_entries(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    original = "127.0.0.1 localhost\n::1 localhost\n"
+    path.write_text(original)
+    marker = "gup-benchmark-0123456789abcdef"
+    pins = '{"cdn.example.test": "1.1.1.1"}'
+    command = [sys.executable, "-c", _HOSTS_SCRIPT, str(path)]
+    subprocess.run([*command, "add", marker, pins], check=True)
+    assert "1.1.1.1 cdn.example.test" in path.read_text()
+    with path.open("a") as output:
+        output.write("127.0.0.2 unrelated.example.test\n")
+    subprocess.run([*command, "remove", marker, pins], check=True)
+    assert path.read_text() == original + "\n127.0.0.2 unrelated.example.test\n"
 
 
 def test_loopback_control_serves_only_pinned_bytes_with_valid_ranges(tmp_path: Path) -> None:

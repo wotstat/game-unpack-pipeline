@@ -5,6 +5,11 @@ set -Eeuo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${repo_root}"
 
+command -v aria2c >/dev/null 2>&1 || {
+  echo "aria2c is required for the offline HTTP transport tests" >&2
+  exit 1
+}
+
 uv sync --frozen --all-groups
 uv run ruff format --check .
 uv run ruff check .
