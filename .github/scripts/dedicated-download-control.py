@@ -1,4 +1,4 @@
-"""Disposable A/B control for this branch; never part of the production workflow."""
+"""Temporary opt-in A/B control; remove after the dedicated experiment."""
 
 from __future__ import annotations
 
