@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -93,6 +95,36 @@ def verify_file(item: tuple[AcquisitionArtifact, Path]) -> tuple[str, str]:
     return artifact.artifact_id, sha256
 
 
+def sync_file(path: Path) -> None:
+    with path.open("rb") as source:
+        os.fsync(source.fileno())
+
+
+def source_dns(artifacts: tuple[AcquisitionArtifact, ...]) -> dict[str, Any]:
+    hosts = sorted(
+        {
+            host
+            for a in artifacts
+            for url in a.source_urls
+            if (host := urlsplit(url).hostname) is not None
+        }
+    )
+    result: dict[str, Any] = {}
+    for host in hosts:
+        try:
+            records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            result[host] = {"unavailable": True}
+            continue
+        result[host] = [
+            {"family": family, "address_sha256": hashlib.sha256(address.encode()).hexdigest()}
+            for family, address in sorted(
+                {(family, str(address[0])) for family, _, _, _, address in records}
+            )
+        ]
+    return result
+
+
 def curl_file(item: tuple[AcquisitionArtifact, Path]) -> None:
     artifact, directory = item
     subprocess.run(
@@ -121,66 +153,33 @@ def worker(args: argparse.Namespace) -> None:
     artifacts = tuple(a for part in plan.parts for a in part.artifacts)
     directory: Path = args.work
     directory.mkdir(parents=True, exist_ok=False)
+    dns = source_dns(artifacts)
     started = time.monotonic()
     details: dict[str, Any] = {}
-    if args.method == "downloader-processes":
-        # Diagnostic isolation: each process runs the unchanged production implementation.
-        process_count = min(4, len(artifacts))
-        groups: list[list[AcquisitionArtifact]] = [[] for _ in range(process_count)]
-        loads = [0] * process_count
-        for artifact in sorted(artifacts, key=lambda a: (-a.size, a.artifact_id)):
-            index = min(range(process_count), key=lambda index: (loads[index], index))
-            groups[index].append(artifact)
-            loads[index] += artifact.size
-
-        def run_group(index: int) -> dict[str, Any]:
-            group_plan = directory / f"group-{index}-plan.json"
-            group_plan.write_text(subset_plan(plan, groups[index]).model_dump_json())
-            group_result = directory / f"group-{index}-result.json"
-            with (directory / f"group-{index}.log").open("w") as output:
-                subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "scripts.benchmark_download",
-                        "worker",
-                        "--method",
-                        "downloader",
-                        "--plan",
-                        str(group_plan),
-                        "--work",
-                        str(directory / f"group-{index}"),
-                        "--result",
-                        str(group_result),
-                    ],
-                    stdout=output,
-                    stderr=subprocess.STDOUT,
-                    check=True,
-                    timeout=600,
-                )
-            value: dict[str, Any] = json.loads(group_result.read_text())
-            return value
-
-        with ThreadPoolExecutor(max_workers=process_count) as executor:
-            group_results = list(executor.map(run_group, range(process_count)))
-        digests = {key: value for group in group_results for key, value in group["digests"].items()}
-        details = {"download_processes": process_count, "artifact_workers": 4 * process_count}
-        transferred_at = time.monotonic()
-    elif args.method.startswith("downloader"):
-        workers = {"downloader-16": 16, "downloader-1": 1, "downloader-baseline": 16}.get(
-            args.method, 4
-        )
+    synced_at: float | None = None
+    if args.method.startswith("downloader"):
+        processes = 4 if args.method == "downloader-processes" else 1
+        workers = {
+            "downloader-16": 16,
+            "downloader-1": 1,
+            "downloader-baseline": 16,
+            "downloader-processes": 16,
+        }.get(args.method, 4)
         if args.method == "downloader-baseline":
             baseline = Path(os.environ["BENCHMARK_BASELINE_SOURCE"]).resolve()
             if not Path(delivery.__file__).resolve().is_relative_to(baseline):
                 raise ValueError("Baseline worker did not import the historical implementation")
+        policy_values = {"max_workers": workers}
+        if args.method != "downloader-baseline":
+            policy_values["process_workers"] = processes
         result = ArtifactDownloader(
-            DownloadPolicy(max_workers=workers),
+            DownloadPolicy.model_validate(policy_values),
             progress_observer=lambda msg: print(msg, flush=True),
         ).download(plan, Workspace(directory))
         digests = {item.artifact.artifact_id: item.blob_sha256 for item in result.artifacts}
         details = {
             "artifact_workers": workers,
+            "download_processes": processes,
             "parallel_range_artifacts": sum(
                 item.transport.parallel_segments > 1 for item in result.artifacts
             ),
@@ -225,11 +224,22 @@ def worker(args: argparse.Namespace) -> None:
                 timeout=600,
             )
         transferred_at = time.monotonic()
+        # Match the downloader's durable payload writes instead of deleting dirty pages.
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(sync_file, (directory / artifact_name(a) for a in artifacts)))
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        synced_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=4) as executor:
             digests = dict(
                 executor.map(verify_file, ((a, directory / artifact_name(a)) for a in artifacts))
             )
     finished = time.monotonic()
+    if synced_at is None:
+        synced_at = transferred_at
     total = sum(a.size for a in artifacts)
     write_json(
         args.result,
@@ -238,10 +248,12 @@ def worker(args: argparse.Namespace) -> None:
             "bytes": total,
             "files": len(artifacts),
             "transfer_seconds": transferred_at - started,
-            "validation_seconds": finished - transferred_at,
+            "post_transfer_fsync_seconds": synced_at - transferred_at,
+            "validation_seconds": finished - synced_at,
             "elapsed_seconds": finished - started,
             "mib_per_second": total / MIB / (finished - started),
             "digests": digests,
+            "source_dns": dns,
             **details,
         },
     )
@@ -408,7 +420,7 @@ def benchmark(args: argparse.Namespace) -> None:
                 )
                 shutil.rmtree(work)
     summary = [
-        "| File set | Run | Tool | MiB/s including validation | Seconds |",
+        "| File set | Run | Tool | MiB/s including fsync and validation | Seconds |",
         "| --- | ---: | --- | ---: | ---: |",
     ]
     summary.extend(
