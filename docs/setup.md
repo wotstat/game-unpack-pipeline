@@ -160,21 +160,19 @@ Plan `wot-eu`/`sd`/`ALL` и сравнивает curl, aria2 с одним со�
 время передачи. После измерений cleanup подтверждает удаление VM, временного SSH-ключа и runner.
 Workflow не публикует snapshot и не меняет production status.
 Production download и обычный benchmark используют четыре file worker. `diagnose: true`
-дополнительно сравнивает один и 16 file workers и четыре HTTP-процесса с общим cache,
-прогрессом и отменой, разделяющие бюджет 16 file workers. Optional `baseline_sha` принимает полный SHA
+дополнительно сравнивает один и 16 file workers. Optional `baseline_sha` принимает полный SHA
 из истории `main` и запускает прежний downloader с 16 workers на той же VM и тех же файлах.
 Исторический импорт проверяется явно; source hash и SHA-256 должны совпасть для всех вариантов.
 Reconciler также обрабатывает завершившиеся benchmark runs.
-CLI `run`/`resume` принимает `--download-processes` или `GAME_DOWNLOADER_DOWNLOAD_PROCESSES`
-(по умолчанию 1, максимум 8). Процессы используют общий CAS, бюджеты file/Range concurrency,
-счётчики прогресса и общий сигнал отмены; завершение download дожидается закрытия всех workers.
 Benchmark сохраняет семейства адресов и fingerprints DNS-ответов CDN без записи IP VM.
-`loopback_control: true` дополнительно сравнивает curl, aria2 с Range, downloader и четыре
-HTTP-процесса на тех же проверенных байтах через HTTPS на `127.0.0.1`. Источник держит только
+`loopback_control: true` дополнительно сравнивает curl, aria2 с Range и downloader
+на тех же проверенных байтах через HTTPS на `127.0.0.1`. Источник держит только
 выбранные файлы в памяти; отдельный сертификат доверен только дочерним benchmark-процессам.
 Измерения повторяются с записью на обычный диск VM и в `/dev/shm`, чтобы отделить WAN/CDN,
 запись на диск и затраты клиента. Контроль также включает исторический downloader, если указан
 `baseline_sha`. Публичный ingress остаётся закрытым; исходники игровых файлов в отчёт не входят.
+Результаты контролируемого сравнения и ограничения выводов описаны в
+[download-performance.md](download-performance.md).
 
 ## 7. Автоматическая и ручная проверка новых версий
 

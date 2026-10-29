@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import multiprocessing
 import os
 import re
 import shutil
@@ -12,10 +11,8 @@ import time
 import zipfile
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from multiprocessing.queues import Queue as ProcessQueue
-from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, cast
 from urllib.parse import urlsplit
@@ -95,7 +92,6 @@ class DownloadPolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_workers: int = Field(default=6, ge=1, le=32)
-    process_workers: int = Field(default=1, ge=1, le=8)
     attempts_per_url: int = Field(default=4, ge=1, le=20)
     parallel_range_retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=30.0)
     http_attempts_per_url: int = Field(default=8, ge=1, le=20)
@@ -585,118 +581,6 @@ def _response_chunks(
         yield bytes(pending), True
 
 
-@dataclass(frozen=True, slots=True)
-class _ProcessProgressUpdate:
-    artifact_id: str
-    current_bytes: int
-    transferred_bytes: int
-    source_host: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ProcessLog:
-    message: str
-
-
-type _ProcessMessage = _ProcessProgressUpdate | _ProcessLog | None
-_PROCESS_MESSAGES: ProcessQueue[_ProcessMessage] | None = None
-_PROCESS_CANCELLED: ProcessEvent | None = None
-
-
-def _initialize_download_process(
-    messages: ProcessQueue[_ProcessMessage], cancelled: ProcessEvent
-) -> None:
-    global _PROCESS_MESSAGES, _PROCESS_CANCELLED
-    _PROCESS_MESSAGES, _PROCESS_CANCELLED = messages, cancelled
-
-
-class _DownloadProcessCancelled(RuntimeError):
-    pass
-
-
-class _ProcessProgressProxy(_DownloadProgress):
-    def __init__(self, messages: ProcessQueue[_ProcessMessage], cancelled: ProcessEvent) -> None:
-        self._messages = messages
-        self._cancelled = cancelled
-        self._local_failure: tuple[str, str] | None = None
-        self._failure_lock = threading.Lock()
-
-    @property
-    def local_failure(self) -> tuple[str, str] | None:
-        with self._failure_lock:
-            return self._local_failure
-
-    def check_active(self) -> None:
-        if self._cancelled.is_set():
-            if failure := self.local_failure:
-                raise StageExecutionError(*failure)
-            raise _DownloadProcessCancelled()
-
-    def update(
-        self,
-        artifact_id: str,
-        current_bytes: int,
-        transferred_bytes: int = 0,
-        *,
-        source_host: str | None = None,
-    ) -> None:
-        self.check_active()
-        self._messages.put(
-            _ProcessProgressUpdate(
-                artifact_id,
-                current_bytes,
-                transferred_bytes,
-                source_host,
-            )
-        )
-
-    def fail(self, error: StageExecutionError) -> None:
-        with self._failure_lock:
-            if self._local_failure is None:
-                self._local_failure = error.error.code, str(error)
-        self._cancelled.set()
-
-
-@dataclass(frozen=True, slots=True)
-class _ProcessDownloadResult:
-    artifacts: tuple[DownloadedArtifact, ...] = ()
-    failure: tuple[str, str] | None = None
-    cancelled: bool = False
-
-
-def _download_process_group(
-    plan: AcquisitionPlan,
-    root: Path,
-    policy: DownloadPolicy,
-    artifacts: tuple[AcquisitionArtifact, ...],
-    range_workers: int,
-) -> _ProcessDownloadResult:
-    messages, cancelled = _PROCESS_MESSAGES, _PROCESS_CANCELLED
-    if messages is None or cancelled is None:
-        raise RuntimeError("Download process IPC is not initialized")
-    progress = _ProcessProgressProxy(messages, cancelled)
-    downloader = ArtifactDownloader(policy, lambda message: messages.put(_ProcessLog(message)))
-    try:
-        downloaded = downloader._download_subset(
-            plan, Workspace(root), artifacts, {}, progress, range_workers=range_workers
-        )
-        return _ProcessDownloadResult(artifacts=downloaded)
-    except _DownloadProcessCancelled:
-        # A sibling thread's original error must not be hidden by its cancelled peers.
-        return _ProcessDownloadResult(failure=progress.local_failure, cancelled=True)
-    except StageExecutionError as error:
-        progress.fail(error)
-        return _ProcessDownloadResult(failure=progress.local_failure)
-    except Exception as error:
-        cancelled.set()
-        return _ProcessDownloadResult(
-            failure=(
-                "internal_error",
-                f"HTTP process failed with {type(error).__name__}",
-            )
-        )
-
-
 def _artifact_cache_key(artifact: AcquisitionArtifact) -> str:
     return artifact.artifact_id.removeprefix("sha256:")
 
@@ -896,42 +780,13 @@ class ArtifactDownloader:
                 f"{remaining_required_bytes} free bytes after validating "
                 f"{len(cached)} cached Artifacts, only {free_bytes} available"
             )
-        if self._policy.process_workers > 1:
-            scheduled_downloads = self._download_processes(
-                plan, workspace, artifacts, cached, progress
-            )
-        else:
-            scheduled_downloads = self._download_subset(
-                plan, workspace, artifacts, cached, progress
-            )
-        downloads_by_id = {item.artifact.artifact_id: item for item in scheduled_downloads}
-        downloaded = tuple(downloads_by_id[artifact.artifact_id] for artifact in artifacts)
-        progress.completed()
-        return DownloadResult(
-            acquisition_plan_sha256="sha256:" + "0" * 64,
-            artifacts=downloaded,
-            downloaded_bytes=sum(item.blob_size for item in downloaded),
-            reused_artifacts=sum(item.reused for item in downloaded),
-        )
-
-    def _download_subset(
-        self,
-        plan: AcquisitionPlan,
-        workspace: Workspace,
-        artifacts: Sequence[AcquisitionArtifact],
-        cached: Mapping[str, DownloadedArtifact],
-        progress: _DownloadProgress,
-        *,
-        range_workers: int | None = None,
-    ) -> tuple[DownloadedArtifact, ...]:
         timeout = httpx.Timeout(
             connect=self._policy.connect_timeout_seconds,
             read=self._policy.read_timeout_seconds,
             write=self._policy.read_timeout_seconds,
             pool=self._policy.connect_timeout_seconds,
         )
-        if range_workers is None:
-            range_workers = min(64, self._policy.max_workers * 3)
+        range_workers = min(64, self._policy.max_workers * 3)
         scheduled_artifacts = tuple(
             sorted(
                 artifacts,
@@ -986,108 +841,15 @@ class ArtifactDownloader:
                     scheduled_downloads = tuple(
                         executor.map(download_artifact, scheduled_artifacts)
                     )
-        return scheduled_downloads
-
-    def _download_processes(
-        self,
-        plan: AcquisitionPlan,
-        workspace: Workspace,
-        artifacts: Sequence[AcquisitionArtifact],
-        cached: Mapping[str, DownloadedArtifact],
-        progress: _DownloadProgress,
-    ) -> tuple[DownloadedArtifact, ...]:
-        pending = sorted(
-            (a for a in artifacts if a.artifact_id not in cached),
-            key=lambda a: (-a.size, a.artifact_id),
+        downloads_by_id = {item.artifact.artifact_id: item for item in scheduled_downloads}
+        downloaded = tuple(downloads_by_id[artifact.artifact_id] for artifact in artifacts)
+        progress.completed()
+        return DownloadResult(
+            acquisition_plan_sha256="sha256:" + "0" * 64,
+            artifacts=downloaded,
+            downloaded_bytes=sum(item.blob_size for item in downloaded),
+            reused_artifacts=sum(item.reused for item in downloaded),
         )
-        count = min(self._policy.process_workers, self._policy.max_workers, len(pending))
-        if not pending:
-            return tuple(cached.values())
-        if count == 1:
-            return self._download_subset(plan, workspace, artifacts, cached, progress)
-        base, extra = divmod(self._policy.max_workers, count)
-        slots = [base + (index < extra) for index in range(count)]
-        range_base, range_extra = divmod(min(64, self._policy.max_workers * 3), count)
-        range_slots = [range_base + (index < range_extra) for index in range(count)]
-        groups: list[list[AcquisitionArtifact]] = [[] for _ in range(count)]
-        loads = [0] * count
-        for artifact in pending:
-            index = min(range(count), key=lambda i: (loads[i] / slots[i], i))
-            groups[index].append(artifact)
-            loads[index] += artifact.size
-
-        context = multiprocessing.get_context("spawn")
-        updates: ProcessQueue[_ProcessMessage] = context.Queue()
-        cancelled = context.Event()
-        relay_errors: list[BaseException] = []
-
-        def relay() -> None:
-            while True:
-                update = updates.get()
-                if update is None:
-                    return
-                if cancelled.is_set():
-                    continue
-                try:
-                    if isinstance(update, _ProcessLog):
-                        self._progress_observer(update.message)
-                    else:
-                        progress.update(
-                            update.artifact_id,
-                            update.current_bytes,
-                            update.transferred_bytes,
-                            source_host=update.source_host,
-                        )
-                except BaseException as error:
-                    relay_errors.append(error)
-                    cancelled.set()
-
-        reader = threading.Thread(target=relay, name="download-process-progress", daemon=True)
-        reader.start()
-        downloaded = list(cached.values())
-        try:
-            # Spawn avoids inheriting open TLS connections or locks from the caller's threads.
-            with ProcessPoolExecutor(
-                max_workers=count,
-                mp_context=context,
-                initializer=_initialize_download_process,
-                initargs=(updates, cancelled),
-            ) as executor:
-                try:
-                    futures = [
-                        executor.submit(
-                            _download_process_group,
-                            plan,
-                            workspace.root,
-                            self._policy.model_copy(
-                                update={"max_workers": slots[i], "process_workers": 1}
-                            ),
-                            tuple(group),
-                            range_slots[i],
-                        )
-                        for i, group in enumerate(groups)
-                    ]
-                    for future in as_completed(futures):
-                        outcome = future.result()
-                        if outcome.failure is not None:
-                            if outcome.failure[0] == "artifact_corrupt":
-                                raise ArtifactCorruptError(outcome.failure[1])
-                            raise StageExecutionError(*outcome.failure)
-                        downloaded.extend(outcome.artifacts)
-                except BaseException:
-                    cancelled.set()
-                    raise
-        finally:
-            # Keep draining while workers exit: their Queue feeders must never block shutdown.
-            updates.put(None)
-            reader.join()
-            updates.close()
-            updates.join_thread()
-        if relay_errors:
-            raise relay_errors[0]
-        if len(downloaded) != len(artifacts):
-            raise StageExecutionError("source_unavailable", "HTTP processes were cancelled")
-        return tuple(downloaded)
 
     @staticmethod
     def _validated_cached_artifacts(
@@ -2254,7 +2016,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="resumable-download-v14",
+        implementation_version="resumable-download-v15",
         execute=execute,
         validate=validate,
         audit=audit,

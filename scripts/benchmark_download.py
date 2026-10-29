@@ -39,7 +39,6 @@ DIAGNOSTIC_METHODS = (
     "downloader",
     "downloader-16",
     "downloader-1",
-    "downloader-processes",
 )
 
 
@@ -261,28 +260,22 @@ def worker(args: argparse.Namespace) -> None:
     details: dict[str, Any] = {}
     synced_at: float | None = None
     if args.method.startswith("downloader"):
-        processes = 4 if args.method == "downloader-processes" else 1
         workers = {
             "downloader-16": 16,
             "downloader-1": 1,
             "downloader-baseline": 16,
-            "downloader-processes": 16,
         }.get(args.method, 4)
         if args.method == "downloader-baseline":
             baseline = Path(os.environ["BENCHMARK_BASELINE_SOURCE"]).resolve()
             if not Path(delivery.__file__).resolve().is_relative_to(baseline):
                 raise ValueError("Baseline worker did not import the historical implementation")
-        policy_values = {"max_workers": workers}
-        if args.method != "downloader-baseline":
-            policy_values["process_workers"] = processes
         result = ArtifactDownloader(
-            DownloadPolicy.model_validate(policy_values),
+            DownloadPolicy(max_workers=workers),
             progress_observer=lambda msg: print(msg, flush=True),
         ).download(plan, Workspace(directory))
         digests = {item.artifact.artifact_id: item.blob_sha256 for item in result.artifacts}
         details = {
             "artifact_workers": workers,
-            "download_processes": processes,
             "parallel_range_artifacts": sum(
                 item.transport.parallel_segments > 1 for item in result.artifacts
             ),
@@ -547,7 +540,7 @@ def benchmark(args: argparse.Namespace) -> None:
         plans[case] = plan
         references[case] = measure(plan, case, root, choices, args.repeats)
     if args.loopback_control:
-        controls: tuple[str, ...] = ("curl", "aria2-split", "downloader", "downloader-processes")
+        controls: tuple[str, ...] = ("curl", "aria2-split", "downloader")
         if baseline_source is not None:
             controls += ("downloader-baseline",)
         for case, plan in plans.items():
