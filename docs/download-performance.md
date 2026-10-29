@@ -1,5 +1,9 @@
 # Скорость скачивания на Aeza, 29 октября 2026
 
+Это исследование предыдущего Python HTTP-клиента. После него HTTP payload перенесён
+на aria2; [новый отчёт с одинаковым DNS endpoint](aria2-http-performance.md) содержит
+проверку нового транспорта, resume/таймаутов и актуальные результаты.
+
 Сравнение выполнялось на почасовых Moscow Shared MSKs-5 с production firewall,
 отдельными JIT runner и четырёхчасовым timer самоудаления. Основной контрольный
 [run 40793155091](https://github.com/wotstat/game-unpack-pipeline/actions/runs/40793155091)
