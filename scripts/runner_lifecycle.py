@@ -32,6 +32,7 @@ AEZA_API_URL = "https://my.aeza.net/api/v2"
 DEFAULT_AEZA_SERVER = "MSKs-5"
 AEZA_RETRY_DELAYS = (5, 15, 30)
 TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+SSH_READINESS_TIMEOUT_SECONDS = 8 * 60
 INSTANCE_KEY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 ROLES = ("downloader", "wot-src", "wot-gui-assets", "wotstat-assets")
 
@@ -400,18 +401,75 @@ systemd-run --unit=gup-bootstrap --property=Type=exec \\
 """
 
 
+def ssh_readiness_failure(details: str) -> str:
+    """Classify local OpenSSH diagnostics without publishing any server data."""
+    text = details.lower()
+    if "remote host identification has changed" in text:
+        raise LifecycleError("Aeza SSH host key changed")
+    if "host key verification failed" in text:
+        raise LifecycleError("Aeza SSH host key verification failed")
+    if any(
+        marker in text
+        for marker in (
+            "bad configuration option",
+            "bad owner or permissions",
+            "bad permissions",
+            "load key",
+            "not accessible",
+            "unix domain socket too long",
+            "too long for unix domain socket",
+            "controlpath too long",
+        )
+    ):
+        raise LifecycleError("Aeza SSH local client configuration or private key is invalid")
+    if "permission denied" in text or "authentication failed" in text:
+        return "authentication_pending"
+    if "connection refused" in text:
+        return "connection_refused"
+    if "timed out" in text or "operation timeout" in text:
+        return "connect_timeout"
+    if "network is unreachable" in text or "no route to host" in text:
+        return "network_unreachable"
+    if "connection reset" in text or "connection closed" in text or "kex_exchange" in text:
+        return "handshake_interrupted"
+    if "offering public key" in text:
+        return "authentication_pending"
+    if "remote protocol version" in text:
+        return "ssh_handshake_pending"
+    if "connection established" in text:
+        return "ssh_banner_pending"
+    if "connecting to" in text:
+        return "tcp_connection_pending"
+    return "ssh_failed"
+
+
 def ssh_bootstrap(
     address: str, private_key: Path, payload: str, *, sensitive_values: Iterable[str] = ()
 ) -> None:
-    deadline = time.monotonic() + 180
+    started_at = time.monotonic()
+    deadline = started_at + SSH_READINESS_TIMEOUT_SECONDS
+    attempts = 0
+    last_reason = "not_attempted"
+    next_report = started_at
     command = [
         "ssh",
+        "-F",
+        "/dev/null",
+        "-T",
         "-i",
         str(private_key),
         "-o",
         "BatchMode=yes",
         "-o",
         "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "PreferredAuthentications=publickey",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
         "-o",
         "StrictHostKeyChecking=accept-new",
         "-o",
@@ -432,31 +490,50 @@ def ssh_bootstrap(
         # Keep the authenticated transport instead of opening a second TCP
         # connection after a successful readiness probe. No JIT data is sent yet.
         while time.monotonic() < deadline:
-            try:
+            attempts += 1
+            timed_out = False
+            result = None
+            with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as diagnostics:
                 # A background master keeps its standard descriptors open. A
                 # private regular file avoids communicate() waiting for EOF on
                 # a pipe that belongs to the long-lived master process.
-                with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as diagnostics:
+                try:
                     result = subprocess.run(
-                        [*command[:-1], "-M", "-N", "-f", command[-1]],
+                        [*command[:-1], "-v", "-M", "-N", "-f", command[-1]],
                         stdout=subprocess.DEVNULL,
                         stderr=diagnostics,
                         text=True,
                         timeout=min(20, max(1, deadline - time.monotonic())),
                         check=False,
                     )
-                    diagnostics.seek(0)
-                    details = diagnostics.read(65536)
-            except subprocess.TimeoutExpired:
-                time.sleep(5)
-                continue
-            if result.returncode == 0:
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                diagnostics.seek(0)
+                details = diagnostics.read(65536)
+            if result is not None and result.returncode == 0:
+                print(
+                    f"SSH authenticated after {attempts} attempts "
+                    f"({time.monotonic() - started_at:.1f}s)"
+                )
                 break
-            if "REMOTE HOST IDENTIFICATION HAS CHANGED" in details:
-                raise LifecycleError("Aeza SSH host key changed")
-            time.sleep(5)
+            reason = ssh_readiness_failure(details)
+            if timed_out and reason == "ssh_failed":
+                reason = "attempt_timeout"
+            now = time.monotonic()
+            if reason != last_reason or now >= next_report:
+                print(
+                    f"SSH readiness: attempt {attempts}, elapsed {now - started_at:.1f}s, "
+                    f"result={reason}; retrying within the initial-boot deadline"
+                )
+                next_report = now + 30
+            last_reason = reason
+            if now < deadline:
+                time.sleep(min(5, deadline - now))
         else:
-            raise LifecycleError("Aeza SSH readiness timed out")
+            raise LifecycleError(
+                f"Aeza SSH readiness timed out after {time.monotonic() - started_at:.1f}s "
+                f"({attempts} attempts; last failure: {last_reason})"
+            )
         # Submit exactly once; systemd owns the detached bootstrap. Completion is
         # observed through GitHub because this unit intentionally closes SSH.
         try:
@@ -475,7 +552,7 @@ def ssh_bootstrap(
         if "REMOTE HOST IDENTIFICATION HAS CHANGED" in result.stderr:
             raise LifecycleError("Aeza SSH host key changed")
         if result.returncode:
-            details = sanitized(result.stdout + result.stderr, sensitive_values)[-6000:]
+            details = sanitized(result.stdout + result.stderr, (*sensitive_values, address))[-6000:]
             if result.returncode == 255:
                 raise BootstrapOutcomeUnknownError(
                     "SSH bootstrap acknowledgement lost; payload will not be replayed: " + details

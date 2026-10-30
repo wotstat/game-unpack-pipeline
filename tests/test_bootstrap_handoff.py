@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import base64
+import getpass
 import json
 import os
+import shlex
+import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +24,192 @@ from scripts import runner_lifecycle as lifecycle
 
 IDENTITY = lifecycle.ResourceIdentity("fixture/pipeline", "12345", "1", "manual-12345-1")
 CONFIG = lifecycle.AezaConfig("fixture-api-key")
+
+
+@pytest.mark.skipif(shutil.which("sshd") is None, reason="Local OpenSSH server is unavailable")
+def test_real_openssh_waits_for_key_installation_and_reuses_one_authenticated_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ssh, sshd = shutil.which("ssh"), shutil.which("sshd")
+    assert ssh is not None and sshd is not None
+    sleep = time.sleep
+    # Unix control sockets have a short path limit, including on macOS.
+    with tempfile.TemporaryDirectory(prefix="gup-ssh-test-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        for name in ("host", "client"):
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root / name)],
+                check=True,
+            )
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        authorized = root / "authorized_keys"
+        authorized.touch(mode=0o600)
+        config = root / "sshd_config"
+        config.write_text(
+            f"Port {port}\nListenAddress 127.0.0.1\nHostKey {root}/host\n"
+            f"AuthorizedKeysFile {authorized}\nPidFile {root}/pid\n"
+            "UsePAM no\nStrictModes no\nPasswordAuthentication no\n"
+            "KbdInteractiveAuthentication no\nLogLevel VERBOSE\n"
+        )
+        executable = root / "bin" / "ssh"
+        executable.parent.mkdir()
+        executable.write_text(
+            "#!/usr/bin/env python3\nimport os,sys\n"
+            f"args=[{(getpass.getuser() + '@127.0.0.1')!r} if arg == 'root@vm.example.invalid' "
+            "else arg for arg in sys.argv[1:]]\n"
+            f"os.execv({ssh!r},[{ssh!r},'-p',{str(port)!r},*args])\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+        monkeypatch.setattr(lifecycle, "SSH_READINESS_TIMEOUT_SECONDS", 3)
+        monkeypatch.setattr(time, "sleep", lambda seconds: sleep(min(seconds, 0.05)))
+
+        def install_key() -> None:
+            sleep(0.5)
+            authorized.write_text((root / "client.pub").read_text())
+
+        installer = threading.Thread(target=install_key)
+        received = root / "received"
+        with (root / "sshd.log").open("w+") as log:
+            server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)], stdout=log, stderr=log)
+            try:
+                sleep(0.15)
+                if server.poll() is not None:
+                    log.seek(0)
+                    details = log.read()
+                    if "privilege separation directory" in details:
+                        pytest.skip("Local sshd privilege-separation directory is unavailable")
+                    pytest.fail("Local sshd did not start: " + details)
+                installer.start()
+                lifecycle.ssh_bootstrap(
+                    "vm.example.invalid",
+                    root / "client",
+                    "printf %s fixture-payload >> " + shlex.quote(str(received)),
+                )
+            finally:
+                if installer.ident is not None:
+                    installer.join(timeout=2)
+                server.terminate()
+                server.wait(timeout=3)
+            log.seek(0)
+            diagnostics = log.read()
+        assert "authentication_pending" in capsys.readouterr().out
+        assert "Failed publickey" in diagnostics
+        assert diagnostics.count("Accepted publickey") == 1
+        assert received.read_text() == "fixture-payload"
+
+
+def test_active_vm_can_finish_booting_after_the_old_ssh_readiness_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 0.0
+    payloads: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "-M" in command:
+            if now < 210:
+                diagnostics = kwargs["stderr"]
+                assert hasattr(diagnostics, "write")
+                diagnostics.write(
+                    "ssh: connect to host vm.example.invalid port 22: Connection refused"
+                )
+                return subprocess.CompletedProcess(command, 255, "", "")
+        elif command[-1] == "bash -s":
+            payloads.append(str(kwargs["input"]))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    lifecycle.ssh_bootstrap("vm.example.invalid", tmp_path / "key", "fixture payload")
+
+    assert now >= 210
+    assert payloads == ["fixture payload"]
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "reason"),
+    [
+        ("connect to host vm.example.invalid port 22: Connection refused", "connection_refused"),
+        ("connect to host vm.example.invalid port 22: Connection timed out", "connect_timeout"),
+        (
+            "root@vm.example.invalid: Permission denied (publickey,password).",
+            "authentication_pending",
+        ),
+        ("kex_exchange_identification: Connection closed by remote host", "handshake_interrupted"),
+        ("debug1: Connecting to vm.example.invalid port 22.", "tcp_connection_pending"),
+        ("debug1: Connection established.", "ssh_banner_pending"),
+    ],
+)
+def test_readiness_timeout_reports_a_safe_failure_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    diagnostic: str,
+    reason: str,
+) -> None:
+    now = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "-M" in command:
+            diagnostics = kwargs["stderr"]
+            assert hasattr(diagnostics, "write")
+            diagnostics.write(diagnostic + " sensitive-value")
+        assert command[-1] != "bash -s"
+        return subprocess.CompletedProcess(command, 255, "", "")
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(lifecycle.LifecycleError, match=reason) as failure:
+        lifecycle.ssh_bootstrap("vm.example.invalid", tmp_path / "key", "fixture payload")
+    output = capsys.readouterr().out + str(failure.value)
+    assert "vm.example.invalid" not in output
+    assert "sensitive-value" not in output
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "Load key /private/path: invalid format",
+        "Bad configuration option: fixture",
+        "Host key verification failed.",
+    ],
+)
+def test_local_ssh_errors_fail_immediately_without_submitting_bootstrap(
+    tmp_path: Path, diagnostic: str
+) -> None:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "-M" in command:
+            diagnostics = kwargs["stderr"]
+            assert hasattr(diagnostics, "write")
+            diagnostics.write(diagnostic)
+        assert command[-1] != "bash -s"
+        assert command[command.index("-F") + 1] == "/dev/null"
+        assert "IdentityAgent=none" in command
+        assert "PreferredAuthentications=publickey" in command
+        assert "StrictHostKeyChecking=accept-new" in command
+        return subprocess.CompletedProcess(command, 255, "", "")
+
+    with (
+        patch("subprocess.run", side_effect=run) as ssh,
+        pytest.raises(lifecycle.LifecycleError),
+    ):
+        lifecycle.ssh_bootstrap("vm.example.invalid", tmp_path / "key", "fixture payload")
+    assert sum("-M" in call.args[0] for call in ssh.call_args_list) == 1
+    assert len(ssh.call_args_list) == 2, "The control-master cleanup still runs"
 
 
 def test_background_ssh_master_does_not_keep_the_provisioner_output_pipe_open(
