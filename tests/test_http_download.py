@@ -56,6 +56,7 @@ class Source(ThreadingHTTPServer):
     range_trickle: bool
     no_head: bool
     get_error: bool
+    transient_errors: int
     release: threading.Event
 
 
@@ -108,7 +109,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             if disconnect:
                 self.server.disconnected = True
-        if self.server.get_error:
+            retry_error = path == "/client.bin" and self.server.transient_errors > 0
+            if retry_error:
+                self.server.transient_errors -= 1
+        if self.server.get_error or retry_error:
             self.send_response(503)
             self.headers_for(0)
             return
@@ -214,6 +218,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     server.last_modified = None
     server.range_trickle = False
     server.no_head = server.get_error = False
+    server.transient_errors = 0
     server.release = threading.Event()
     server.requests = []
     server.lock = threading.Lock()
@@ -428,6 +433,126 @@ def test_http_download_survives_a_busy_control_loop_within_its_progress_budget(
     assert processes and all(child.poll() is not None for child in processes)
 
 
+@pytest.mark.parametrize(
+    "fault", [httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError]
+)
+@pytest.mark.parametrize("workers", [1, 16])
+def test_http_retries_a_lost_status_response_without_restarting_downloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+    fault: type[httpx.TransportError],
+    workers: int,
+) -> None:
+    original = httpx.Client.post
+    submissions = 0
+    lost_responses = 0
+    lock = threading.Lock()
+
+    def post(client: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal submissions, lost_responses
+        request = kwargs.get("json", {})
+        method = request.get("method")
+        with lock:
+            if method == "aria2.addUri":
+                submissions += 1
+            if method == "aria2.tellStatus" and lost_responses < 2:
+                lost_responses += 1
+                raise fault("temporary lost status response: unit-control-secret")
+        return original(client, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "post", post)
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        result = ArtifactDownloader(
+            DownloadPolicy(max_workers=workers, http_no_progress_timeout_seconds=2)
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+    assert lost_responses == 2
+    assert submissions == 3, "A lost read-only response must not replay addUri"
+    assert processes and all(child.poll() is not None for child in processes)
+
+
+def test_http_repeated_lost_status_responses_exhaust_the_original_progress_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+) -> None:
+    original = httpx.Client.post
+    status_requests = 0
+    submissions = 0
+
+    def post(client: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal status_requests, submissions
+        method = kwargs.get("json", {}).get("method")
+        if method == "aria2.addUri":
+            submissions += 1
+        if method == "aria2.tellStatus":
+            status_requests += 1
+            raise httpx.ReadTimeout("unit-control-secret")
+        return original(client, url, *args, **kwargs)
+
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.stall = True
+        monkeypatch.setattr(httpx.Client, "post", post)
+        started = time.monotonic()
+        with pytest.raises(StageExecutionError, match="no forward progress") as failure:
+            ArtifactDownloader(
+                DownloadPolicy(max_workers=1, http_no_progress_timeout_seconds=0.4)
+            ).download(plan(workspace, server), workspace)
+        assert time.monotonic() - started < 2.5
+        assert "unit-control-secret" not in str(failure.value)
+    assert status_requests > 2
+    assert submissions == 1
+    assert processes and all(child.poll() is not None for child in processes)
+
+
+def test_http_transient_cdn_errors_can_recover_after_the_old_eight_attempt_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.transient_errors = 9
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                http_retry_backoff_seconds=0,
+                http_retry_max_backoff_seconds=0,
+                http_no_progress_timeout_seconds=5,
+            )
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.attempts == 10
+
+
+def test_http_interrupted_stream_retries_and_resumes_within_the_same_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    processes: list[subprocess.Popen[bytes]],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.disconnect = True
+        result = ArtifactDownloader(policy()).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.attempts == 2
+        assert client.transport.resumed_from > 0
+        assert any(
+            p == "/client.bin" and r is not None and not r.startswith("bytes=0-")
+            for p, r, _ in server.requests
+        )
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+
+
 def test_http_uses_one_native_process_and_revalidates_cached_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -446,6 +571,36 @@ def test_http_uses_one_native_process_and_revalidates_cached_hashes(
     assert len(processes) == 1, "HTTP payload must go through one shared aria2 process"
     assert all(child.poll() is not None for child in processes)
     assert "(100.0%)" in messages[-1]
+
+
+@pytest.mark.parametrize("hashes", [True, False], ids=["source-hash", "validator-only"])
+def test_http_completed_content_uses_its_source_hash_when_cdn_validator_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    hashes: bool,
+) -> None:
+    original = httpx.Client.head
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        probes = 0
+
+        def head(client: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal probes
+            if str(url).endswith("/client.bin"):
+                probes += 1
+                if probes == 2:
+                    server.etag = '"different-cdn-edge"'
+            return original(client, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "head", head)
+        result = ArtifactDownloader(policy()).download(
+            plan(workspace, server, hashes=hashes), workspace
+        )
+        assert_bytes(result, workspace, server)
+        downloads = [r for p, r, _ in server.requests if p == "/client.bin" and r != "bytes=0-0"]
+        assert len(downloads) == (1 if hashes else 2)
+        assert probes == (1 if hashes else 4)
 
 
 def test_http_completed_payload_survives_a_stalled_result_cleanup(

@@ -24,7 +24,7 @@ from pydantic import ConfigDict, Field, ValidationError
 
 from game_downloader._json import JsonValue
 from game_downloader.acquisition import ArtifactCorruptError, UnsafeArchiveError
-from game_downloader.aria2_rpc import Aria2Session
+from game_downloader.aria2_rpc import Aria2ControlTransportError, Aria2Session
 from game_downloader.models import (
     AcquisitionArtifact,
     AcquisitionPlan,
@@ -68,7 +68,7 @@ class DownloadPolicy(FrozenModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_workers: int = Field(default=16, ge=1, le=32)
-    http_attempts_per_url: int = Field(default=8, ge=1, le=20)
+    http_attempts_per_url: int = Field(default=20, ge=1, le=20)
     http_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=30.0)
     http_retry_max_backoff_seconds: float = Field(default=10.0, ge=0.0, le=30.0)
     http_no_progress_timeout_seconds: float = Field(default=300.0, gt=0, le=600.0)
@@ -574,8 +574,15 @@ class _NativeHttpError(OSError):
 
 
 class _Aria2HttpAdapter:
-    def __init__(self, policy: DownloadPolicy, session: Aria2Session, client: httpx.Client) -> None:
+    def __init__(
+        self,
+        policy: DownloadPolicy,
+        session: Aria2Session,
+        client: httpx.Client,
+        observer: Callable[[str], None],
+    ) -> None:
         self.policy, self.session, self.client = policy, session, client
+        self.observer = observer
         self.hash_slots = threading.Semaphore(min(4, policy.max_workers))
 
     def probe(
@@ -738,16 +745,42 @@ class _Aria2HttpAdapter:
         if not isinstance(gid, str) or re.fullmatch(r"[a-f0-9]{16}", gid) is None:
             raise StageExecutionError("source_unavailable", "aria2 returned an invalid transfer ID")
         completed, observed, complete = resumed, resumed, False
+        status_retry = False
         interval = min(0.25, self.policy.http_no_progress_timeout_seconds / 4)
         try:
             while True:
                 progress.check_active()
-                status = self.session.call(
-                    "tellStatus",
-                    gid,
-                    ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
-                    timeout=transfer.remaining(),
-                )
+                try:
+                    status = self.session.call(
+                        "tellStatus",
+                        gid,
+                        ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
+                        timeout=min(5, transfer.remaining()),
+                    )
+                except Aria2ControlTransportError as error:
+                    # The native writer may still be healthy. Retrying this
+                    # read cannot start a second download or discard its bitmap.
+                    progress.check_active()
+                    if contiguous and payload.exists():
+                        completed = max(completed, payload.stat().st_size)
+                        if completed > artifact.size:
+                            raise _NativeHttpError(
+                                "aria2 HTTP size does not match the Acquisition Plan"
+                            ) from None
+                        transfer.update(completed)
+                        progress.update(
+                            artifact.artifact_id, completed, max(0, completed - observed)
+                        )
+                        observed = completed
+                    if not status_retry:
+                        self.observer(
+                            f"Artifact {artifact.artifact_id}: {error}; "
+                            "retrying status of the existing HTTP transfer"
+                        )
+                        status_retry = True
+                    time.sleep(min(interval, transfer.remaining()))
+                    continue
+                status_retry = False
                 completed = int(status["completedLength"])
                 if contiguous and payload.exists():
                     completed = max(completed, payload.stat().st_size)
@@ -801,7 +834,10 @@ class _Aria2HttpAdapter:
         _validate_regular_file(payload, expected_size=artifact.size, writable=True)
         with payload.open("rb") as source:
             os.fsync(source.fileno())
-        if etag or modified:
+        # A declared source hash pins the content independently of a CDN edge's
+        # ETag. Re-probing such a complete file can discard correct gigabytes.
+        # Partial resume still always requires an unchanged source validator.
+        if artifact.source_hash is None and (etag or modified):
             current = self.probe(url, artifact, transfer)
             current_etag, current_modified = self.validator(current)
             if current_etag != etag if etag else current_modified != modified:
@@ -902,7 +938,11 @@ class ArtifactDownloader:
                 if pending_http
                 else None
             )
-            http = _Aria2HttpAdapter(self._policy, session, client) if session else None
+            http = (
+                _Aria2HttpAdapter(self._policy, session, client, self._progress_observer)
+                if session
+                else None
+            )
 
             def download_artifact(artifact: AcquisitionArtifact) -> DownloadedArtifact:
                 progress.check_active()

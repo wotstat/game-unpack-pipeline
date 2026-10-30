@@ -20,6 +20,10 @@ import httpx
 from game_downloader.pipeline import StageExecutionError
 
 
+class Aria2ControlTransportError(StageExecutionError):
+    """A lost RPC response, retryable only for read-only requests."""
+
+
 class Aria2Session:
     def __init__(
         self,
@@ -139,7 +143,12 @@ class Aria2Session:
             response.raise_for_status()
             result = response.json()
         except (httpx.HTTPError, ValueError, RuntimeError) as error:
-            raise StageExecutionError(
+            failure = (
+                Aria2ControlTransportError
+                if isinstance(error, httpx.TransportError)
+                else StageExecutionError
+            )
+            raise failure(
                 "source_unavailable",
                 f"aria2 HTTP control request failed ({method}: {type(error).__name__})",
             ) from None
