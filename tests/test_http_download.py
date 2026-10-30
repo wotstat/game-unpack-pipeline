@@ -61,6 +61,7 @@ class Source(ThreadingHTTPServer):
     get_error: bool
     transient_errors: int
     get_status_error: int
+    reject_tiny_range: bool
     release: threading.Event
 
 
@@ -119,6 +120,10 @@ class Handler(BaseHTTPRequestHandler):
             retry_error = path == "/client.bin" and self.server.transient_errors > 0
             if retry_error:
                 self.server.transient_errors -= 1
+        if self.server.reject_tiny_range and raw_range == "bytes=0-0":
+            self.send_response(416)
+            self.headers_for(0)
+            return
         if self.server.get_error or retry_error or self.server.get_status_error:
             self.send_response(self.server.get_status_error or 503)
             self.headers_for(0)
@@ -171,7 +176,8 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 self.wfile.write(data[start : start + self.server.disconnect_after_bytes])
                 self.wfile.flush()
-                self.connection.shutdown(socket.SHUT_RDWR)
+                with suppress(OSError):
+                    self.connection.shutdown(socket.SHUT_RDWR)
                 return
             if self.server.chunk_delay and path == "/client.bin":
                 width = self.server.chunk_bytes
@@ -241,6 +247,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     server.no_head = server.get_error = False
     server.transient_errors = 0
     server.get_status_error = 0
+    server.reject_tiny_range = False
     server.release = threading.Event()
     server.requests = []
     server.body_writes = []
@@ -648,6 +655,29 @@ def test_fresh_parallel_download_uses_the_get_validator_without_losing_paralleli
         assert not client.transport.parallel_range_fallbacks
 
 
+def test_rejected_tiny_range_probe_uses_whole_get_headers_without_failing_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.reject_tiny_range = True
+        result = ArtifactDownloader(
+            policy(
+                parallel_range_minimum_bytes=1024 * 1024, parallel_range_target_bytes=1024 * 1024
+            )
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.attempts == 1
+        assert client.transport.parallel_segments == 1
+        assert (
+            client.transport.parallel_range_fallbacks[0].reason.value
+            == "range-response-not-partial"
+        )
+
+
 def test_conditional_response_rejected_after_get_probe_still_falls_back_safely(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -684,10 +714,12 @@ def test_conditional_response_rejected_after_get_probe_still_falls_back_safely(
         }
 
 
+@pytest.mark.parametrize("reject_tiny_range", [False, True], ids=["range-probe", "whole-get-probe"])
 def test_repeated_interruptions_resume_with_the_get_representation_validator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     certificate: tuple[Path, Path],
+    reject_tiny_range: bool,
 ) -> None:
     workspace = Workspace(tmp_path)
     with source(certificate, monkeypatch) as server:
@@ -695,6 +727,7 @@ def test_repeated_interruptions_resume_with_the_get_representation_validator(
         server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
         server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
         server.disconnect_after_bytes = 256 * 1024
+        server.reject_tiny_range = reject_tiny_range
         result = ArtifactDownloader(
             DownloadPolicy(
                 max_workers=1,

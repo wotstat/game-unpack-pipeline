@@ -615,6 +615,11 @@ class _Aria2HttpAdapter:
                 "GET", url, headers={"Range": "bytes=0-0"}, timeout=transfer.timeout()
             ) as streamed:
                 response = streamed
+            if response.status_code in {400, 405, 416, 501}:
+                # A server may reject a tiny Range but still serve the file.
+                # Inspect an ordinary GET's headers, without reading its body.
+                with self.client.stream("GET", url, timeout=transfer.timeout()) as streamed:
+                    response = streamed
         if response.status_code not in {200, 206}:
             raise _NativeHttpError(f"HTTP metadata returned {response.status_code}")
         if urlsplit(str(response.url)).scheme != "https":
