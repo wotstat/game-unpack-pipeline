@@ -53,6 +53,7 @@ class Source(ThreadingHTTPServer):
     chunk_delay: float
     chunk_bytes: int
     last_modified: str | None
+    head_last_modified: str | None
     range_trickle: bool
     no_head: bool
     get_error: bool
@@ -85,8 +86,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         if self.server.etag is not None:
             self.send_header("ETag", self.server.etag)
-        if self.server.last_modified is not None:
-            self.send_header("Last-Modified", self.server.last_modified)
+        modified = self.server.last_modified
+        if self.command == "HEAD" and self.server.head_last_modified is not None:
+            modified = self.server.head_last_modified
+        if modified is not None:
+            self.send_header("Last-Modified", modified)
         if self.server.advertise_ranges:
             self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
@@ -217,6 +221,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     server.chunk_delay = 0
     server.chunk_bytes = 16384
     server.last_modified = None
+    server.head_last_modified = None
     server.range_trickle = False
     server.no_head = server.get_error = False
     server.transient_errors = 0
@@ -529,6 +534,105 @@ def test_http_failures_report_the_numeric_status_without_native_diagnostics(
             )
         assert "127.0.0.1" not in str(failure.value)
         assert "[DEBUG-" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("hashes", [True, False], ids=["source-hash", "validator-only"])
+def test_fresh_pinned_content_survives_inconsistent_cdn_last_modified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    hashes: bool,
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.etag = None
+        server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
+        server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+        selected = plan(workspace, server, hashes=hashes)
+        downloader = ArtifactDownloader(policy())
+        if hashes:
+            assert_bytes(downloader.download(selected, workspace), workspace, server)
+            assert all(validator is None for _, _, validator in server.requests)
+        else:
+            with pytest.raises(StageExecutionError):
+                downloader.download(selected, workspace)
+            digest = hashlib.sha256(server.data["/client.bin"]).hexdigest()
+            assert not workspace.blobs.path_for(digest).exists()
+
+
+@pytest.mark.parametrize("mode", ["resume", "parallel"])
+def test_rejected_cdn_validator_restarts_pinned_content_without_reusing_partial_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    mode: str,
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.etag = None
+        server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
+        server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+        server.disconnect = mode == "resume"
+        messages: list[str] = []
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                http_attempts_per_url=3,
+                http_retry_backoff_seconds=0,
+                http_retry_max_backoff_seconds=0,
+                parallel_range_minimum_bytes=1024 * 1024
+                if mode == "parallel"
+                else 512 * 1024 * 1024,
+                parallel_range_target_bytes=1024 * 1024,
+            ),
+            messages.append,
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.attempts == (3 if mode == "resume" else 2)
+        assert client.transport.resumed_from == 0
+        assert client.transport.parallel_segments == 1
+        assert any("code 22" in message for message in messages)
+        assert client.transport.parallel_range_fallbacks[0].reason.value in {
+            "validator-changed",
+            "range-request-failed",
+        }
+        assert any(
+            p == "/client.bin" and validator is not None for p, _, validator in server.requests
+        )
+        assert any(p == "/client.bin" and validator is None for p, _, validator in server.requests)
+
+
+def test_rejected_resume_validator_without_source_hash_remains_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    workspace = Workspace(tmp_path)
+    original_head = httpx.Client.head
+    with source(certificate, monkeypatch) as server:
+        server.etag = None
+        server.head_last_modified = server.last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
+        server.disconnect = True
+        probes = 0
+
+        def head(client: httpx.Client, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
+            nonlocal probes
+            if str(url).endswith("/client.bin"):
+                probes += 1
+                if probes > 1:
+                    server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+            return original_head(client, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.Client, "head", head)
+        with pytest.raises(StageExecutionError):
+            ArtifactDownloader(policy()).download(plan(workspace, server, hashes=False), workspace)
+        assert probes == 2
+        assert all(
+            validator is not None for p, _, validator in server.requests if p == "/client.bin"
+        )
+        digest = hashlib.sha256(server.data["/client.bin"]).hexdigest()
+        assert not workspace.blobs.path_for(digest).exists()
 
 
 def test_http_transient_cdn_errors_can_recover_after_the_old_eight_attempt_limit(

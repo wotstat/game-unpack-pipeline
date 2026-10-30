@@ -298,6 +298,35 @@ def test_http_transfer_progress_does_not_renew_idle_timeout_for_replayed_prefix(
         transfer.update(500)
 
 
+@pytest.mark.parametrize("new_bytes", [False, True])
+def test_discarded_http_layout_does_not_extend_the_idle_deadline_without_new_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    new_bytes: bool,
+) -> None:
+    import game_downloader.delivery as delivery_module
+
+    now = [0.0]
+    monkeypatch.setattr(delivery_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    transfer = _HttpTransferProgress(
+        "artifact", 1000, 0, DownloadPolicy(http_no_progress_timeout_seconds=10)
+    )
+    now[0] = 1
+    transfer.update(500)
+    now[0] = 9
+    transfer.restart_after_discard()
+    assert transfer.remaining() == 2
+    if new_bytes:
+        now[0] = 10
+        transfer.update(250)
+        now[0] = 19
+        assert transfer.remaining() == 1
+        now[0] = 20
+    else:
+        now[0] = 11
+    with pytest.raises(StageExecutionError, match="no forward progress for 10s"):
+        transfer.remaining()
+
+
 def test_http_transfer_progress_warns_once_per_slowdown_after_fast_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

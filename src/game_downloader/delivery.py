@@ -127,6 +127,13 @@ class _HttpTransferProgress:
     def remaining(self) -> float:
         return self._check(time.monotonic())
 
+    def restart_after_discard(self) -> None:
+        """Rebase a discarded layout without treating its rejection as progress."""
+        self._current_bytes = self._high_watermark = 0
+        self._samples.clear()
+        self._samples.append((time.monotonic(), 0))
+        self._slow_warning_active = False
+
     def _check(self, now: float) -> float:
         remaining = self._policy.http_no_progress_timeout_seconds - (now - self._last_progress_at)
         if remaining <= 0:
@@ -568,9 +575,18 @@ class _Aria2Adapter:
 
 
 class _NativeHttpError(OSError):
-    def __init__(self, message: str, code: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: int = 0,
+        *,
+        http_status: int | None = None,
+        bound_response: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
+        self.bound_response = bound_response
 
 
 class _Aria2HttpAdapter:
@@ -715,9 +731,12 @@ class _Aria2HttpAdapter:
                     ),
                 )
         headers = ["Accept-Encoding: identity"]
-        if etag:
+        bind_response = native or segments > 1 or artifact.source_hash is None
+        # A fresh whole-file response is pinned by its declared source hash.
+        # Partial resume and parallel ranges still require source validators.
+        if etag and bind_response:
             headers.append("If-Match: " + etag)
-        elif modified:
+        elif modified and bind_response:
             headers.append("If-Unmodified-Since: " + modified)
         options: dict[str, Any] = {
             "dir": str(payload.parent),
@@ -830,6 +849,8 @@ class _Aria2HttpAdapter:
                     raise _NativeHttpError(
                         f"aria2 HTTP transfer failed with code {code}{detail}",
                         code,
+                        http_status=http_status,
+                        bound_response=bind_response and bool(etag or modified),
                     )
                 time.sleep(min(interval, transfer.remaining()))
         finally:
@@ -1213,22 +1234,33 @@ class ArtifactDownloader:
                     last_error = (
                         str(error) if isinstance(error, _NativeHttpError) else type(error).__name__
                     )
-                    if isinstance(error, _NativeHttpError) and error.code == 8:
+                    fallback_reason = None
+                    if isinstance(error, _NativeHttpError):
+                        if error.code == 8:
+                            fallback_reason = ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL
+                        elif (
+                            error.code == 22
+                            and error.bound_response
+                            and artifact.source_hash is not None
+                        ):
+                            # aria2 may overwrite a rejected conditional response's
+                            # diagnostic with "No URI available". A fresh pinned
+                            # response can recover without reusing partial bytes.
+                            fallback_reason = (
+                                ParallelRangeFallbackReason.VALIDATOR_CHANGED
+                                if error.http_status == 412
+                                else ParallelRangeFallbackReason.RANGE_REQUEST_FAILED
+                            )
+                    if fallback_reason is not None:
                         http.clear(payload_path, state_path)
                         if not single_stream:
-                            # A one-time Range fallback discards the old sparse layout.
-                            # Single-stream retries then retain their own high watermark.
-                            transfer = _HttpTransferProgress(
-                                artifact.artifact_id,
-                                artifact.size,
-                                0,
-                                self._policy,
-                                observer=self._progress_observer,
-                            )
+                            # Rebase once after discarding the layout. Only new
+                            # payload bytes may renew the existing idle deadline.
+                            transfer.restart_after_discard()
                         single_stream = True
                         fallbacks.append(
                             ParallelRangeFallback(
-                                reason=ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL,
+                                reason=fallback_reason,
                                 source_host=urlsplit(url).hostname or "unknown",
                             )
                         )
