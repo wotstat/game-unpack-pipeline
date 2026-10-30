@@ -656,16 +656,19 @@ class _Aria2HttpAdapter:
         single_stream: bool,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
         previous = ArtifactDownloader._load_state(state_path, workspace)
-        # After an interruption, validate the GET representation itself. Some
-        # CDNs return a different Last-Modified for HEAD, which would otherwise
-        # reject every resume and repeatedly discard the same valid prefix.
+        # Validate the GET representation before binding ranges, including the
+        # first split request. Some CDNs return different validators for HEAD.
         metadata = self.probe(
             url,
             artifact,
             transfer,
             use_get=artifact.size > 0
             and artifact.source_hash is not None
-            and (previous is not None or single_stream),
+            and (
+                previous is not None
+                or single_stream
+                or artifact.size >= self.policy.parallel_range_minimum_bytes
+            ),
         )
         final_url = str(metadata.url)
         etag, modified = self.validator(metadata)
@@ -727,7 +730,9 @@ class _Aria2HttpAdapter:
         segments = 1
         fallbacks: tuple[ParallelRangeFallback, ...] = ()
         if artifact.size >= self.policy.parallel_range_minimum_bytes and not single_stream:
-            if metadata.headers.get("accept-ranges", "").lower() != "bytes":
+            if metadata.request.method == "GET" and metadata.status_code != 206:
+                reason = ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL
+            elif metadata.headers.get("accept-ranges", "").lower() != "bytes":
                 reason = ParallelRangeFallbackReason.RANGE_NOT_ADVERTISED
             elif not (etag or modified):
                 reason = ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE

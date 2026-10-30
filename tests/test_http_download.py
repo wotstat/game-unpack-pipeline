@@ -605,23 +605,83 @@ def test_inconsistent_cdn_validator_restarts_pinned_content_without_reusing_part
         ).download(plan(workspace, server), workspace)
         assert_bytes(result, workspace, server)
         client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
-        assert client.transport.attempts == 2
+        assert client.transport.attempts == (1 if mode == "parallel" else 2)
         assert client.transport.resumed_from == 0
-        assert client.transport.parallel_segments == 1
+        assert client.transport.parallel_segments == (2 if mode == "parallel" else 1)
         if mode == "parallel":
-            assert any("code 22" in message for message in messages)
-            assert client.transport.parallel_range_fallbacks[0].reason.value in {
-                "validator-changed",
-                "range-request-failed",
-            }
+            assert not any("code 22" in message for message in messages)
+            assert not client.transport.parallel_range_fallbacks
             assert any(
-                p == "/client.bin" and validator is not None for p, _, validator in server.requests
+                p == "/client.bin" and v == server.last_modified for p, _, v in server.requests
+            )
+            assert all(
+                v is None or v == server.last_modified
+                for p, _, v in server.requests
+                if p == "/client.bin"
             )
         else:
             assert not client.transport.parallel_range_fallbacks
             assert any(p == "/client.bin" and r == "bytes=0-0" for p, r, _ in server.requests)
             assert all(v is None for p, _, v in server.requests if p == "/client.bin")
         assert any(p == "/client.bin" and validator is None for p, _, validator in server.requests)
+
+
+def test_fresh_parallel_download_uses_the_get_validator_without_losing_parallelism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.etag = None
+        server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
+        server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+        result = ArtifactDownloader(
+            policy(
+                parallel_range_minimum_bytes=1024 * 1024, parallel_range_target_bytes=1024 * 1024
+            )
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.attempts == 1
+        assert client.transport.parallel_segments == 2
+        assert not client.transport.parallel_range_fallbacks
+
+
+def test_conditional_response_rejected_after_get_probe_still_falls_back_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    original_get = Handler.do_GET
+    rejected = False
+
+    def get(handler: Handler) -> None:
+        nonlocal rejected
+        if handler.path == "/client.bin" and handler.headers.get("If-Match") and not rejected:
+            rejected = True
+            handler.send_response(412)
+            handler.headers_for(0)
+            return
+        original_get(handler)
+
+    monkeypatch.setattr(Handler, "do_GET", get)
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        result = ArtifactDownloader(
+            policy(
+                parallel_range_minimum_bytes=1024 * 1024, parallel_range_target_bytes=1024 * 1024
+            )
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert rejected
+        assert client.transport.attempts == 2
+        assert client.transport.parallel_segments == 1
+        assert client.transport.parallel_range_fallbacks[0].reason.value in {
+            "validator-changed",
+            "range-request-failed",
+        }
 
 
 def test_repeated_interruptions_resume_with_the_get_representation_validator(
