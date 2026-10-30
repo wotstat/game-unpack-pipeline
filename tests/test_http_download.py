@@ -57,6 +57,7 @@ class Source(ThreadingHTTPServer):
     no_head: bool
     get_error: bool
     transient_errors: int
+    get_status_error: int
     release: threading.Event
 
 
@@ -112,8 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             retry_error = path == "/client.bin" and self.server.transient_errors > 0
             if retry_error:
                 self.server.transient_errors -= 1
-        if self.server.get_error or retry_error:
-            self.send_response(503)
+        if self.server.get_error or retry_error or self.server.get_status_error:
+            self.send_response(self.server.get_status_error or 503)
             self.headers_for(0)
             return
         if self.headers.get("If-Match") is not None and validator != self.server.etag:
@@ -219,6 +220,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     server.range_trickle = False
     server.no_head = server.get_error = False
     server.transient_errors = 0
+    server.get_status_error = 0
     server.release = threading.Event()
     server.requests = []
     server.lock = threading.Lock()
@@ -508,6 +510,25 @@ def test_http_repeated_lost_status_responses_exhaust_the_original_progress_budge
     assert status_requests > 2
     assert submissions == 1
     assert processes and all(child.poll() is not None for child in processes)
+
+
+@pytest.mark.parametrize("status", [400, 403, 412, 429])
+def test_http_failures_report_the_numeric_status_without_native_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+    status: int,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.get_status_error = status
+        with pytest.raises(StageExecutionError, match=f"HTTP {status}") as failure:
+            ArtifactDownloader(DownloadPolicy(max_workers=1, http_attempts_per_url=1)).download(
+                plan(workspace, server), workspace
+            )
+        assert "127.0.0.1" not in str(failure.value)
+        assert "[DEBUG-" not in capsys.readouterr().out
 
 
 def test_http_transient_cdn_errors_can_recover_after_the_old_eight_attempt_limit(

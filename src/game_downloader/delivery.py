@@ -754,7 +754,14 @@ class _Aria2HttpAdapter:
                     status = self.session.call(
                         "tellStatus",
                         gid,
-                        ["status", "completedLength", "totalLength", "errorCode", "downloadSpeed"],
+                        [
+                            "status",
+                            "completedLength",
+                            "totalLength",
+                            "errorCode",
+                            "downloadSpeed",
+                            "errorMessage",
+                        ],
                         timeout=min(5, transfer.remaining()),
                     )
                 except Aria2ControlTransportError as error:
@@ -811,7 +818,19 @@ class _Aria2HttpAdapter:
                     break
                 if status["status"] in {"error", "removed"}:
                     code = int(status.get("errorCode", "1"))
-                    raise _NativeHttpError(f"aria2 HTTP transfer failed with code {code}", code)
+                    # Native diagnostics may contain credentials or full source URLs.
+                    # Retain only aria2's numeric HTTP response status.
+                    native_message = status.get("errorMessage", "")
+                    matched = re.search(
+                        r"The response status is not successful\. status=([1-5][0-9]{2})\b",
+                        native_message if isinstance(native_message, str) else "",
+                    )
+                    http_status = int(matched[1]) if matched else None
+                    detail = f" (HTTP {http_status})" if http_status is not None else ""
+                    raise _NativeHttpError(
+                        f"aria2 HTTP transfer failed with code {code}{detail}",
+                        code,
+                    )
                 time.sleep(min(interval, transfer.remaining()))
         finally:
             if not complete:
