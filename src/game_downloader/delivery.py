@@ -602,10 +602,15 @@ class _Aria2HttpAdapter:
         self.hash_slots = threading.Semaphore(min(4, policy.max_workers))
 
     def probe(
-        self, url: str, artifact: AcquisitionArtifact, transfer: _HttpTransferProgress
+        self,
+        url: str,
+        artifact: AcquisitionArtifact,
+        transfer: _HttpTransferProgress,
+        *,
+        use_get: bool = False,
     ) -> httpx.Response:
-        response = self.client.head(url, timeout=transfer.timeout())
-        if response.status_code in {405, 501}:
+        response = None if use_get else self.client.head(url, timeout=transfer.timeout())
+        if response is None or response.status_code in {405, 501}:
             with self.client.stream(
                 "GET", url, headers={"Range": "bytes=0-0"}, timeout=transfer.timeout()
             ) as streamed:
@@ -650,10 +655,20 @@ class _Aria2HttpAdapter:
         *,
         single_stream: bool,
     ) -> tuple[DownloadTrace, _PayloadIntegrity]:
-        metadata = self.probe(url, artifact, transfer)
+        previous = ArtifactDownloader._load_state(state_path, workspace)
+        # After an interruption, validate the GET representation itself. Some
+        # CDNs return a different Last-Modified for HEAD, which would otherwise
+        # reject every resume and repeatedly discard the same valid prefix.
+        metadata = self.probe(
+            url,
+            artifact,
+            transfer,
+            use_get=artifact.size > 0
+            and artifact.source_hash is not None
+            and (previous is not None or single_stream),
+        )
         final_url = str(metadata.url)
         etag, modified = self.validator(metadata)
-        previous = ArtifactDownloader._load_state(state_path, workspace)
         control = Path(str(payload) + ".aria2")
         if control.exists() or control.is_symlink():
             _validate_regular_file(control, expected_size=control.stat().st_size, writable=True)

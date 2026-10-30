@@ -43,12 +43,14 @@ class Source(ThreadingHTTPServer):
     etag: str | None
     disconnect: bool
     disconnected: bool
+    disconnect_after_bytes: int
     stall: bool
     stall_metadata: bool
     head_delay: float
     invalid_ranges: bool
     advertise_ranges: bool
     requests: list[tuple[str, str | None, str | None]]
+    body_writes: list[tuple[str, str | None, int]]
     lock: threading.Lock
     chunk_delay: float
     chunk_bytes: int
@@ -162,10 +164,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
+            if (
+                path == "/client.bin"
+                and self.server.disconnect_after_bytes
+                and end - start + 1 > self.server.disconnect_after_bytes
+            ):
+                self.wfile.write(data[start : start + self.server.disconnect_after_bytes])
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
             if self.server.chunk_delay and path == "/client.bin":
                 width = self.server.chunk_bytes
                 for offset in range(start, end + 1, width):
-                    self.wfile.write(data[offset : min(offset + width, end + 1)])
+                    chunk = data[offset : min(offset + width, end + 1)]
+                    self.wfile.write(chunk)
+                    with self.server.lock:
+                        self.server.body_writes.append((path, raw_range, len(chunk)))
                     self.wfile.flush()
                     time.sleep(self.server.chunk_delay)
             else:
@@ -215,6 +229,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     }
     server.etag = '"version-1"'
     server.disconnect = server.disconnected = server.stall = server.invalid_ranges = False
+    server.disconnect_after_bytes = 0
     server.stall_metadata = False
     server.head_delay = 0
     server.advertise_ranges = True
@@ -228,6 +243,7 @@ def source(certificate: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> I
     server.get_status_error = 0
     server.release = threading.Event()
     server.requests = []
+    server.body_writes = []
     server.lock = threading.Lock()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(*certificate)
@@ -561,7 +577,7 @@ def test_fresh_pinned_content_survives_inconsistent_cdn_last_modified(
 
 
 @pytest.mark.parametrize("mode", ["resume", "parallel"])
-def test_rejected_cdn_validator_restarts_pinned_content_without_reusing_partial_bytes(
+def test_inconsistent_cdn_validator_restarts_pinned_content_without_reusing_partial_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     certificate: tuple[Path, Path],
@@ -589,18 +605,55 @@ def test_rejected_cdn_validator_restarts_pinned_content_without_reusing_partial_
         ).download(plan(workspace, server), workspace)
         assert_bytes(result, workspace, server)
         client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
-        assert client.transport.attempts == (3 if mode == "resume" else 2)
+        assert client.transport.attempts == 2
         assert client.transport.resumed_from == 0
         assert client.transport.parallel_segments == 1
-        assert any("code 22" in message for message in messages)
-        assert client.transport.parallel_range_fallbacks[0].reason.value in {
-            "validator-changed",
-            "range-request-failed",
-        }
-        assert any(
-            p == "/client.bin" and validator is not None for p, _, validator in server.requests
-        )
+        if mode == "parallel":
+            assert any("code 22" in message for message in messages)
+            assert client.transport.parallel_range_fallbacks[0].reason.value in {
+                "validator-changed",
+                "range-request-failed",
+            }
+            assert any(
+                p == "/client.bin" and validator is not None for p, _, validator in server.requests
+            )
+        else:
+            assert not client.transport.parallel_range_fallbacks
+            assert any(p == "/client.bin" and r == "bytes=0-0" for p, r, _ in server.requests)
+            assert all(v is None for p, _, v in server.requests if p == "/client.bin")
         assert any(p == "/client.bin" and validator is None for p, _, validator in server.requests)
+
+
+def test_repeated_interruptions_resume_with_the_get_representation_validator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    certificate: tuple[Path, Path],
+) -> None:
+    workspace = Workspace(tmp_path)
+    with source(certificate, monkeypatch) as server:
+        server.etag = None
+        server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
+        server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+        server.disconnect_after_bytes = 256 * 1024
+        result = ArtifactDownloader(
+            DownloadPolicy(
+                max_workers=1,
+                http_attempts_per_url=20,
+                http_retry_backoff_seconds=0,
+                http_retry_max_backoff_seconds=0,
+            )
+        ).download(plan(workspace, server), workspace)
+        assert_bytes(result, workspace, server)
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        assert client.transport.resumed_from > 0
+        assert 1 < client.transport.attempts < 20
+        assert not client.transport.parallel_range_fallbacks
+        positions = [
+            int(raw_range.split("=", 1)[1].split("-", 1)[0])
+            for path, raw_range, _ in server.requests
+            if path == "/client.bin" and raw_range and raw_range != "bytes=0-0"
+        ]
+        assert max(positions) > 1024 * 1024
 
 
 def test_rejected_resume_validator_without_source_hash_remains_fatal(
@@ -939,12 +992,22 @@ def test_http_resumes_native_control_file_after_interrupted_run(
             ArtifactDownloader(selected_policy, interrupt).download(selected, workspace)
         assert list(workspace.partial_root.rglob("payload.part.aria2"))
         before = len(server.requests)
+        written_before = len(server.body_writes)
+        server.chunk_delay = max(server.chunk_delay, 0.002)
         result = ArtifactDownloader(selected_policy).download(selected, workspace)
         assert_bytes(result, workspace, server)
         client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
         assert client.transport.resumed_from > 0
         ranges = [r for p, r, _ in server.requests[before:] if p == "/client.bin"]
-        assert None not in ranges, "A native resume must not restart a fresh whole-file GET"
+        # With HEAD disabled, aria2 can use one GET only to inspect headers.
+        # It must stop that response before re-reading the saved payload prefix.
+        assert ranges.count(None) <= 1
+        unrequested_body = sum(
+            count
+            for path, raw_range, count in server.body_writes[written_before:]
+            if path == "/client.bin" and raw_range is None
+        )
+        assert unrequested_body < client.transport.resumed_from
         assert any(r is not None and not r.startswith("bytes=0-") for r in ranges)
     assert all(child.poll() is not None for child in processes)
 
