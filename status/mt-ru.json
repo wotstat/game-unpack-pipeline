@@ -2,14 +2,19 @@
   "release_name": "1.46.0.8580",
   "readable_version": "1.46.0.0 #2308",
   "last_run": {
-    "result": "success",
-    "release_name": "1.46.0.8580",
-    "readable_version": "1.46.0.0 #2308",
-    "started_at": "2026-10-29T22:35:50Z",
-    "completed_at": "2026-10-29T23:34:13Z",
-    "duration_seconds": 3503,
-    "run_id": 40967074511,
+    "result": "failure",
+    "release_name": "1.46.0.8618",
+    "readable_version": "1.46.0.0 #2318",
+    "started_at": "2026-11-04T09:28:59Z",
+    "completed_at": "2026-11-04T10:04:14Z",
+    "duration_seconds": 2115,
+    "run_id": 41807854668,
     "run_attempt": 1,
-    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/40967074511"
+    "run_url": "https://github.com/wotstat/game-unpack-pipeline/actions/runs/41807854668"
+  },
+  "retry": {
+    "release_name": "1.46.0.8618",
+    "first_failed_at": "2026-11-04T10:04:14Z",
+    "last_failed_at": "2026-11-04T10:04:14Z"
   }
 }
