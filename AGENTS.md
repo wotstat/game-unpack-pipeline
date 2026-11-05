@@ -15,6 +15,7 @@ runner, вызовом reusable snapshot consumer, cleanup/reconciliation, Teleg
 
 ```text
 manual workflow_dispatch
+  → очередь production-запусков GitHub Actions
   → provision одной почасовой Aeza VM выбранного тарифа и одноразового SSH-ключа
   → SSH bootstrap вооружает systemd kill switch и закрывает ingress через nftables
   → четыре JIT runner в game-unpack-pipeline: downloader, wot-src, wot-gui-assets и wotstat-assets
@@ -30,8 +31,8 @@ manual workflow_dispatch
 ```
 
 Отдельный `.github/workflows/check-game-releases.yml` через lightweight WGUS/LSTUS probe проверяет
-targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме параллельно запускает
-основной workflow для отличающихся targets. Cron `23 * * * *` проверяет все семь targets и всегда
+targets, сравнивает `release_name` с `status/<target>.json` и в dispatch-режиме параллельно ставит
+отличающиеся targets в очередь основного workflow. Cron `23 * * * *` проверяет все семь targets и всегда
 работает в dispatch-режиме. Ручной запуск по умолчанию также проверяет все семь targets и работает в
 dispatch-режиме; для dry-run `dispatch_pipelines` нужно явно выключить.
 
@@ -133,7 +134,8 @@ workflow или отдельный репозиторий и не перенос
   прогресса обычного HTTP, лимит download-шага 60 минут и четырёхчасовой kill switch сохраняются.
   HTTP payload скачивает один общий процесс aria2 с file concurrency по числу workers
   (16 на MSKs-5, максимум 32). Крупные файлы используют до 16 соединений с минимальным
-  размером split 128 МиБ; без валидатора или advertised Range используется один поток.
+  размером split 128 МиБ. Для этого нужен валидатор и точный ответ `206` на пробный Range GET
+  либо `Accept-Ranges: bytes` при проверке через HEAD.
   Python опрашивает точный completedLength, сохраняет общий полезный прогресс между
   попытками, делает fsync и проверяет source hash/SHA-256 перед CAS commit; хеширование
   ограничено четырьмя workers. Resume требует совпадающий strong ETag/Last-Modified
@@ -235,8 +237,10 @@ workflow или отдельный репозиторий и не перенос
   если удаление VM не подтверждено, сумма помечается как уже начисленная.
   Reconciler отправляет recovery alert только при машинно
   подтверждённом `deleted_count > 0`.
-- Не добавлять отменяющий global concurrency. Publisher сериализуют обновления одной data-ветки с
-  `cancel-in-progress: false`; status и Pages deployment также сериализованы без отмены. Uploader не
+- Основной workflow использует общую очередь `queue: max`: следующий pipeline начинает provision
+  после завершения текущего, включая cleanup. Это предотвращает одновременные заказы VM checker'ом
+  и ручными запусками. Publisher сериализуют обновления одной data-ветки с
+  `cancel-in-progress: false`; status и Pages deployment также сериализованы. Uploader не
   сериализует runs: production targets пишут во временные S3 namespaces `wot`/`mt`, а
   `wot-common-test` и `mt-public-test` изолированы в `wot-test`/`mt-test`.
 

@@ -633,16 +633,20 @@ def test_inconsistent_cdn_validator_restarts_pinned_content_without_reusing_part
         assert any(p == "/client.bin" and validator is None for p, _, validator in server.requests)
 
 
+@pytest.mark.parametrize("advertise_ranges", [True, False], ids=["advertised", "proved-by-get"])
 def test_fresh_parallel_download_uses_the_get_validator_without_losing_parallelism(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     certificate: tuple[Path, Path],
+    advertise_ranges: bool,
 ) -> None:
     workspace = Workspace(tmp_path)
     with source(certificate, monkeypatch) as server:
         server.etag = None
         server.head_last_modified = "Tue, 20 Oct 2026 12:00:00 GMT"
         server.last_modified = "Wed, 21 Oct 2026 12:00:00 GMT"
+        server.advertise_ranges = advertise_ranges
+        server.chunk_delay = 0.005
         result = ArtifactDownloader(
             policy(
                 parallel_range_minimum_bytes=1024 * 1024, parallel_range_target_bytes=1024 * 1024
@@ -653,6 +657,13 @@ def test_fresh_parallel_download_uses_the_get_validator_without_losing_paralleli
         assert client.transport.attempts == 1
         assert client.transport.parallel_segments == 2
         assert not client.transport.parallel_range_fallbacks
+        assert any(
+            path == "/client.bin"
+            and span is not None
+            and not span.startswith("bytes=0-")
+            and validator == server.last_modified
+            for path, span, validator in server.requests
+        )
 
 
 def test_rejected_tiny_range_probe_uses_whole_get_headers_without_failing_download(
@@ -1274,7 +1285,7 @@ def test_http_handles_missing_server_metadata_safely(
         server.no_head = mode == "no-head"
         server.advertise_ranges = mode != "no-ranges"
         server.etag = None if mode == "no-validator" else server.etag
-        selected = plan(workspace, server)
+        selected = plan(workspace, server, hashes=mode != "no-ranges")
         result = ArtifactDownloader(
             policy(
                 parallel_range_minimum_bytes=1024 * 1024, parallel_range_target_bytes=1024 * 1024
@@ -1486,3 +1497,11 @@ def test_http_parallel_ranges_preserve_bytes_and_fall_back_safely(
         ).download(selected, workspace)
         assert_bytes(result, workspace, server)
         assert any(r is not None for p, r, _ in server.requests if p == "/client.bin")
+        client = next(x for x in result.artifacts if x.artifact.path.utf8 == "client.bin")
+        if bad_ranges:
+            assert client.transport.parallel_segments == 1
+            assert (
+                client.transport.parallel_range_fallbacks[0].reason.value == "invalid-content-range"
+            )
+        else:
+            assert client.transport.parallel_segments == 4

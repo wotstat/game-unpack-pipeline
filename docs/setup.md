@@ -195,8 +195,9 @@ Workflow автоматически запускается каждый час �
 Summary: сохранённый и найденный release name, результат сравнения и фактическое действие checker.
 Ошибки probe, чтения status, поиска активного run и dispatch отображаются в строке своего target.
 
-При `dispatch_pipelines: true` отличающиеся targets запускаются параллельно через основной workflow
-на default branch с фиксированными `client_type: sd`, `languages: ALL` и всеми тремя consumer. Ошибка
+При `dispatch_pipelines: true` отличающиеся targets ставятся в очередь основного workflow
+на default branch с фиксированными `client_type: sd`, `languages: ALL` и всеми тремя consumer.
+Новый pipeline начинает работу после завершения предыдущего, включая cleanup. Ошибка
 одного WGUS/LSTUS endpoint не останавливает остальные matrix jobs, но оставляет общий checker run
 красным. После отчёта checker напрямую пересобирает Pages artifact с кликабельным временем проверки;
 status-коммит для этого не создаётся.

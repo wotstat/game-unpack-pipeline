@@ -63,6 +63,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: process-game-release
+  queue: max
+
 env:
   PYTHONUNBUFFERED: "1"
   AEZA_SERVER: ${{ inputs.aeza_server || 'MSKs-5' }}

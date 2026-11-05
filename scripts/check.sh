@@ -23,7 +23,17 @@ ruby <<'RUBY'
 require "yaml"
 
 Dir[".github/**/*.{yml,yaml}"].sort.each do |path|
-  YAML.safe_load(File.read(path), aliases: true)
+  workflow = YAML.safe_load(File.read(path), aliases: true)
+  if File.dirname(path) == ".github/workflows"
+    [workflow, *workflow.fetch("jobs", {}).values].each do |scope|
+      concurrency = scope["concurrency"]
+      next unless concurrency.is_a?(Hash) && concurrency.key?("queue")
+      unless %w[single max].include?(concurrency["queue"]) &&
+             (concurrency["queue"] != "max" || concurrency.fetch("cancel-in-progress", false) == false)
+        abort "Invalid concurrency.queue in #{path}"
+      end
+    end
+  end
   puts "YAML OK: #{path}"
 end
 RUBY
@@ -35,7 +45,8 @@ else
 fi
 
 if command -v actionlint >/dev/null 2>&1; then
-  actionlint
+  # actionlint 1.7.12 does not recognize concurrency.queue (upstream #657).
+  actionlint -ignore '^unexpected key "queue" for "concurrency" section\.'
 else
   echo "actionlint not installed; skipped"
 fi

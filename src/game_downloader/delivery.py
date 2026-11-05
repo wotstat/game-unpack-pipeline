@@ -735,14 +735,22 @@ class _Aria2HttpAdapter:
         segments = 1
         fallbacks: tuple[ParallelRangeFallback, ...] = ()
         if artifact.size >= self.policy.parallel_range_minimum_bytes and not single_stream:
-            if metadata.request.method == "GET" and metadata.status_code != 206:
-                reason = ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL
+            if metadata.request.method == "GET":
+                if metadata.status_code != 206:
+                    reason = ParallelRangeFallbackReason.RANGE_RESPONSE_NOT_PARTIAL
+                elif metadata.headers.get("content-range") != f"bytes 0-0/{artifact.size}":
+                    reason = ParallelRangeFallbackReason.INVALID_CONTENT_RANGE
+                else:
+                    # The server already served the requested range. Some CDNs
+                    # omit the optional Accept-Ranges header even on a 206.
+                    reason = None
             elif metadata.headers.get("accept-ranges", "").lower() != "bytes":
                 reason = ParallelRangeFallbackReason.RANGE_NOT_ADVERTISED
-            elif not (etag or modified):
-                reason = ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE
             else:
                 reason = None
+            if reason is None and not (etag or modified):
+                reason = ParallelRangeFallbackReason.VALIDATOR_UNAVAILABLE
+            if reason is None:
                 segments = max(
                     1,
                     min(
@@ -1627,7 +1635,7 @@ def create_download_implementation(
             validate_downloaded_artifact(context.workspace, item)
 
     return StageImplementation(
-        implementation_version="aria2-http-download-v16",
+        implementation_version="aria2-http-download-v17",
         execute=execute,
         validate=validate,
         audit=audit,
