@@ -4,7 +4,7 @@ run-name: >-
   ${{ github.event_name == 'schedule' && 'scheduled dispatch'
       || inputs.dispatch_pipelines && 'manual dispatch'
       || 'dry-run' }}
-  · Aeza ${{ inputs.aeza_server || 'MSKs-5' }} · @${{ github.actor }}
+  · Aeza ${{ inputs.aeza_server || 'CLTs-5' }} · @${{ github.actor }}
 
 on:
   schedule:
@@ -14,7 +14,7 @@ on:
       aeza_server:
         description: Aeza server plan for dispatched pipelines
         required: true
-        default: MSKs-5
+        default: CLTs-5
         type: choice
         options:
           - MSKs-5
@@ -71,7 +71,7 @@ permissions:
   contents: read
 
 env:
-  AEZA_SERVER: ${{ inputs.aeza_server || 'MSKs-5' }}
+  AEZA_SERVER: ${{ inputs.aeza_server || 'CLTs-5' }}
 
 concurrency:
   group: check-game-releases

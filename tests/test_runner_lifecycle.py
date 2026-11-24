@@ -403,11 +403,11 @@ def test_missing_github_app_token_does_not_block_cloud_cleanup(
     assert "vm_deleted=true\n" in output.read_text()
 
 
-def test_product_selection_defaults_to_moscow_and_rejects_arbitrary_plans(
+def test_product_selection_defaults_to_charlotte_and_rejects_arbitrary_plans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("AEZA_SERVER", raising=False)
-    assert lifecycle.selected_product().name == "MSKs-5"
+    assert lifecycle.selected_product().name == "CLTs-5"
     monkeypatch.setenv("AEZA_SERVER", "WAWs-5")
     assert lifecycle.selected_product().product_id == 445
     monkeypatch.setenv("AEZA_SERVER", "other-product")
@@ -523,14 +523,15 @@ def test_all_manual_workflows_offer_the_same_server_choices_and_default(workflow
     document = yaml.safe_load((ROOT / f".github/workflows/{workflow_name}.yml").read_text())
     choice = document[True]["workflow_dispatch"]["inputs"]["aeza_server"]
     assert choice["type"] == "choice"
-    assert choice["default"] == "MSKs-5"
+    assert choice["default"] == lifecycle.DEFAULT_AEZA_SERVER
     assert (
         choice["options"]
         == list(lifecycle.AEZA_PRODUCTS)
         == ["MSKs-5", "MSK-5", "WAWs-5", "CLTs-5"]
     )
-    assert document["env"]["AEZA_SERVER"] == "${{ inputs.aeza_server || 'MSKs-5' }}"
-    assert "inputs.aeza_server" in document["run-name"]
+    server_expression = "${{ inputs.aeza_server || 'CLTs-5' }}"
+    assert document["env"]["AEZA_SERVER"] == server_expression
+    assert server_expression in document["run-name"]
 
 
 def test_failed_ssh_bootstrap_redacts_encoded_secret_files() -> None:

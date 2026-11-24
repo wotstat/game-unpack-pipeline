@@ -1,5 +1,5 @@
 name: Process game release
-run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza ${{ inputs.aeza_server || 'MSKs-5' }} · @${{ github.actor }}
+run-name: Release · ${{ inputs.target }} · ${{ inputs.client_type }} · ${{ inputs.languages }} · Aeza ${{ inputs.aeza_server || 'CLTs-5' }} · @${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ on:
       aeza_server:
         description: Aeza server plan
         required: true
-        default: MSKs-5
+        default: CLTs-5
         type: choice
         options:
           - MSKs-5
@@ -69,7 +69,7 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  AEZA_SERVER: ${{ inputs.aeza_server || 'MSKs-5' }}
+  AEZA_SERVER: ${{ inputs.aeza_server || 'CLTs-5' }}
 
 jobs:
   provision:

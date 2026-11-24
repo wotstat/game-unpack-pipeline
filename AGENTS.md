@@ -72,11 +72,11 @@ workflow или отдельный репозиторий и не перенос
   проверяет все семь targets с включённым dispatch; ручной запуск имеет отдельные boolean whitelist
   inputs, все семь target-inputs и `dispatch_pipelines: true` по умолчанию. Реальный dispatch всегда
   использует default branch, `sd`, `ALL` и все три snapshot consumer. Ручной `aeza_server`
-  передаётся во все запускаемые targets; cron использует `MSKs-5`.
-- `aeza_server` — choice из имён `MSKs-5` (по умолчанию, Москва Shared, product `157`, group `2`),
+  передаётся во все запускаемые targets. Cron использует `CLTs-5`.
+- `aeza_server` — choice из имён `MSKs-5` (Москва Shared, product `157`, group `2`),
   `MSK-5` (Москва Dedicated, `152`/`1`), `WAWs-5` (Варшава Shared, `445`/`77`) и
-  `CLTs-5` (Шарлотт Shared, `341`/`46`). Все профили имеют 16 vCPU, 32 ГБ RAM, 480 ГБ NVMe,
-  ОС `ubuntu_2404`; каталог на 29 октября 2026 заявляет до 25 Гбит/с.
+  `CLTs-5` (по умолчанию, Шарлотт Shared, `341`/`46`). Все профили имеют 16 vCPU, 32 ГБ RAM,
+  480 ГБ NVMe, ОС `ubuntu_2404`; каталог на 29 октября 2026 заявляет до 25 Гбит/с.
   Заказ оплачивается с баланса: `term: hour`, `termCount: 1`, `autoProlong: true`.
   Preflight проверяет identity, группу, ёмкость и доступность выбранного профиля,
   котировку не выше €0,76/час для `MSK-5` или €0,53/час для остальных, баланс на четыре часа
