@@ -893,19 +893,19 @@ def test_pyc_wall_budget_accounts_for_parallel_cpu_contention() -> None:
 
     assert (
         _pyc_wall_timeout_seconds(
-            policy.subprocess_timeout_seconds,
+            policy.pyc_timeout_seconds,
             workers=policy.transform_workers,
             logical_cpus=1,
         )
-        == 12 * 60
+        == 30 * 60
     )
     assert (
         _pyc_wall_timeout_seconds(
-            policy.subprocess_timeout_seconds,
+            policy.pyc_timeout_seconds,
             workers=policy.transform_workers,
             logical_cpus=policy.transform_workers,
         )
-        == policy.subprocess_timeout_seconds
+        == policy.pyc_timeout_seconds
     )
 
 
@@ -1003,6 +1003,18 @@ def test_pinned_python27_batch_adapter_matches_single_file_output(tmp_path: Path
 
     assert actual == (expected, expected)
     assert not tuple(tmp_path.glob("pyc-many-*"))
+
+
+def test_pyc_batch_manifest_uses_five_minute_file_timeout(tmp_path: Path) -> None:
+    fixture = Path(__file__).parent / "fixtures/pyc/python27-control-flow.pyc.b64"
+    source = tmp_path / "python27-control-flow.pyc"
+    source.write_bytes(base64.b64decode(fixture.read_bytes()))
+    transformer = Uncompyle6Transformer(ReadablePolicy())
+
+    staged = transformer.stage_many(((source, PYTHON_27_MAGIC),), tmp_path)
+
+    (manifest,) = staged.root.glob("*/manifest.json")
+    assert json.loads(manifest.read_text(encoding="utf-8"))["timeout_seconds"] == 300
 
 
 def test_pyc_process_finalization_matches_serial_output(tmp_path: Path) -> None:

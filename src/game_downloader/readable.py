@@ -115,6 +115,7 @@ class ReadablePolicy(FrozenModel):
     transform_workers: int = Field(default=6, ge=1, le=32)
     web_batch_size: int = Field(default=64, ge=1, le=256)
     pyc_batch_size: int = Field(default=32, ge=1, le=256)
+    pyc_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     actionscript_workers: int = Field(default=1, ge=1, le=4)
     engine_stub_workers: int = Field(default=4, ge=1, le=16)
     subprocess_timeout_seconds: int = Field(default=120, ge=1, le=3600)
@@ -865,13 +866,13 @@ class Uncompyle6Transformer:
                 cwd=scratch_directory,
                 env=environment,
                 timeout=_pyc_wall_timeout_seconds(
-                    self._policy.subprocess_timeout_seconds,
+                    self._policy.pyc_timeout_seconds,
                     workers=self._policy.transform_workers,
                 ),
                 start_new_session=True,
                 preexec_fn=partial(
                     _limit_decompiler,
-                    self._policy.subprocess_timeout_seconds,
+                    self._policy.pyc_timeout_seconds,
                 ),
             )
         except subprocess.TimeoutExpired as exc:
@@ -960,7 +961,7 @@ class Uncompyle6Transformer:
                         for index, source, _magic in batch
                     ],
                     "max_output_bytes": self._policy.max_transform_output_bytes,
-                    "timeout_seconds": self._policy.subprocess_timeout_seconds,
+                    "timeout_seconds": self._policy.pyc_timeout_seconds,
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -984,14 +985,14 @@ class Uncompyle6Transformer:
                     cwd=work,
                     env=environment,
                     timeout=_pyc_batch_wall_timeout_seconds(
-                        self._policy.subprocess_timeout_seconds,
+                        self._policy.pyc_timeout_seconds,
                         items=len(batch),
                         workers=self._policy.transform_workers,
                     ),
                     start_new_session=True,
                     preexec_fn=partial(
                         _limit_decompiler,
-                        self._policy.subprocess_timeout_seconds * len(batch),
+                        self._policy.pyc_timeout_seconds * len(batch),
                         self._policy.max_transform_output_bytes,
                     ),
                 )
